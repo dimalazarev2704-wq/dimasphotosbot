@@ -1,0 +1,10 @@
+# Secrets: never upload these
+.env
+*.env
+!.env.example
+
+# Python
+venv/
+.venv/
+__pycache__/
+*.pyc
