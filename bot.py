@@ -15,6 +15,7 @@ Group commands (group admins only, nobody gets "marked" as an admin by the bot):
     /register LastName   inside a topic: makes the family and replies with its 6-digit code
     /code                inside a topic: shows the family's code again
     /members             inside a topic: lists the people linked to that family
+    /connect, /unlink    (private, owner only) browse a family like its clients; leave again
     /unlink FirstName    inside a topic: unlinks a person (or /unlink <telegram id>)
     /remove              reply to a photo: asks "are you sure", then deletes that exact photo
     /families            lists every family with its code and photo count
@@ -509,9 +510,10 @@ async def on_group_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 # ---------- private chat: linking ----------
 
-def menu_markup() -> InlineKeyboardMarkup:
+def menu_markup(extra: list | None = None) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
-        [
+        (extra or [])
+        + [
             [
                 InlineKeyboardButton("📅 By date", callback_data="d:0"),
                 InlineKeyboardButton("📍 By location", callback_data="l:0"),
@@ -521,9 +523,20 @@ def menu_markup() -> InlineKeyboardMarkup:
     )
 
 
+async def my_thread(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> int | None:
+    """The family (topic id) this person browses: their linked family, or, for the owner only,
+    the family they picked with /connect. The owner's pick lives in memory only, never in the database."""
+    doc = await db.users.find_one({"_id": user_id})
+    if doc:
+        return doc["thread_id"]
+    if is_owner(user_id):
+        return context.bot_data.get("preview", {}).get(user_id)
+    return None
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
-    if await db.users.find_one({"_id": user.id}):
+    if await my_thread(context, user.id):
         await update.message.reply_text(
             "Welcome back! What would you like to see?", reply_markup=menu_markup()
         )
@@ -539,10 +552,40 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if await db.users.find_one({"_id": update.effective_user.id}):
+    """/gallery and /menu: open the gallery."""
+    if await my_thread(context, update.effective_user.id):
         await update.message.reply_text("What would you like to see?", reply_markup=menu_markup())
+    elif is_owner(update.effective_user.id):
+        await update.message.reply_text("No family picked yet. Send /connect to choose one to browse.")
     else:
         await update.message.reply_text("Send /start to link your account first.")
+
+
+async def connect_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Owner only: pick a family to browse as its clients do. Kept in memory, never saved."""
+    if not is_owner(update.effective_user.id):
+        await update.message.reply_text("That command isn't available. Send /start to link your account.")
+        return
+    for k in ("up", "link", "adm"):
+        context.user_data.pop(k, None)
+    markup, empty = await family_picker(0, "a:cn", "a:cnf:{tid}")
+    await update.message.reply_text(
+        "No families yet. Open /admin and add one first." if empty else "Which family do you want to browse?",
+        reply_markup=markup,
+    )
+
+
+async def unlink_private(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """In a private chat, /unlink is for the owner only: it stops the /connect browsing."""
+    user = update.effective_user
+    if not is_owner(user.id):
+        await update.message.reply_text("Only the photographer can unlink accounts.")
+        return
+    gone = context.bot_data.get("preview", {}).pop(user.id, None)
+    await update.message.reply_text(
+        "Disconnected. You're not browsing any family now. Send /connect to pick one." if gone
+        else "You weren't connected to a family. Send /connect to pick one."
+    )
 
 
 async def handle_link_step(update: Update, context: ContextTypes.DEFAULT_TYPE, link: dict) -> None:
@@ -788,7 +831,7 @@ async def on_private_text(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if link:
         await handle_link_step(update, context, link)
         return
-    if await db.users.find_one({"_id": update.effective_user.id}):
+    if await my_thread(context, update.effective_user.id):
         await msg.reply_text("Pick what you'd like to see:", reply_markup=menu_markup())
     else:
         await msg.reply_text("Send /start to link your account.")
@@ -837,6 +880,7 @@ async def send_photos(bot, chat_id: int, query: dict) -> None:
             groups.append([d])
 
     failed = 0
+    sent_ids: list[int] = []
     for group in groups:
         first = group[0]
         caption = pretty_date(first["date"]) + (f" · {first['location']}" if first.get("location") else "")
@@ -846,18 +890,20 @@ async def send_photos(bot, chat_id: int, query: dict) -> None:
             if len(group) == 1:
                 send_one = bot.send_photo if is_photo else bot.send_document
                 arg = {"photo": first["file_id"]} if is_photo else {"document": first["file_id"]}
-                await send_with_retry(
+                res = await send_with_retry(
                     lambda: send_one(chat_id, caption=caption, protect_content=PROTECT_CONTENT, **arg)
                 )
+                sent_ids.append(res.message_id)
             else:
                 media_cls = InputMediaPhoto if is_photo else InputMediaDocument
                 media = [
                     media_cls(media=d["file_id"], caption=caption if j == 0 else None)
                     for j, d in enumerate(group)
                 ]
-                await send_with_retry(
+                res = await send_with_retry(
                     lambda: bot.send_media_group(chat_id, media, protect_content=PROTECT_CONTENT)
                 )
+                sent_ids.extend(m.message_id for m in (res or []))
         except (TelegramError, RuntimeError):
             log.exception("Failed sending a batch")
             failed += len(group)
@@ -868,17 +914,29 @@ async def send_photos(bot, chat_id: int, query: dict) -> None:
         note += f"\n\nShowing the first {MAX_SEND}. Use “By date” or “By location” to see the rest."
     if failed:
         note += f"\n\n{failed} file(s) couldn't be sent. Please tell the photographer."
-    await bot.send_message(chat_id, "That's everything! 📸" + note + "\n\nAnything else?", reply_markup=menu_markup())
+    last = await bot.send_message(chat_id, "That's everything! 📸" + note + "\n\nAnything else?", reply_markup=menu_markup())
+    extra = []
+    if sent_ids:
+        # remember which messages were photos so the 🧹 button can remove them from the chat
+        await db.sent.update_one(
+            {"_id": f"{chat_id}:{last.message_id}"},
+            {"$set": {"ids": sent_ids, "at": datetime.now(timezone.utc)}},
+            upsert=True,
+        )
+        extra = [[InlineKeyboardButton("🧹 Hide these photos", callback_data=f"x:{last.message_id}")]]
+        try:
+            await bot.edit_message_reply_markup(chat_id, last.message_id, reply_markup=menu_markup(extra))
+        except TelegramError:
+            pass
 
 
 async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     q = update.callback_query
     await q.answer()
-    user_doc = await db.users.find_one({"_id": q.from_user.id})
-    if not user_doc:
+    thread_id = await my_thread(context, q.from_user.id)
+    if not thread_id:
         await q.message.reply_text("Please send /start to link your account first.")
         return
-    thread_id = user_doc["thread_id"]
     data = q.data
     chat_id = q.message.chat_id
 
@@ -890,6 +948,23 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     if data == "menu":
         await show("What would you like to see?", menu_markup())
+
+    elif data.startswith("x:"):  # 🧹 hide the photos I sent into this chat
+        doc = await db.sent.find_one({"_id": f"{chat_id}:{data[2:]}"})
+        ids = doc["ids"] if doc else []
+        deleted = False
+        for i in range(0, len(ids), 100):
+            try:
+                await context.bot.delete_messages(chat_id, ids[i : i + 100])
+                deleted = True
+            except TelegramError:
+                log.warning("Couldn't delete some messages while hiding photos")
+        await db.sent.delete_one({"_id": f"{chat_id}:{data[2:]}"})
+        await show(
+            "🧹 Photos hidden. Open the gallery again whenever you like." if deleted
+            else "Those photos are too old for me to hide now. You can delete them by hand.",
+            menu_markup(),
+        )
 
     elif data.startswith("d:"):
         cur = await db.photos.aggregate(
@@ -991,7 +1066,7 @@ async def family_page(tid: int):
         [
             [_btn("📤 Add photos", f"a:phf:{tid}"), _btn("🗑 Remove photos", f"a:rmf:{tid}:0")],
             [_btn("👥 Members", f"a:mem:{tid}"), _btn("🔄 New code", f"a:nc:{tid}")],
-            [_btn("❌ Delete family", f"a:df:{tid}")],
+            [_btn("👁 Browse as this family", f"a:cnf:{tid}"), _btn("❌ Delete family", f"a:df:{tid}")],
             [_btn("⬅️ Families", "a:fl:0")],
         ]
     )
@@ -1124,6 +1199,22 @@ async def on_admin_button(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if action == "home":
         context.user_data.pop("adm", None)
         await show("👑 Admin panel", admin_home_markup())
+
+    elif action == "cn":  # owner: pick a family to browse like a client
+        markup, empty = await family_picker(int(parts[2]), "a:cn", "a:cnf:{tid}")
+        await show("No families yet." if empty else "Which family do you want to browse?", markup)
+
+    elif action == "cnf":
+        tid = int(parts[2])
+        fam = await need_family(tid)
+        if not fam:
+            return
+        context.bot_data.setdefault("preview", {})[q.from_user.id] = tid
+        await show(
+            f"👁 Connected to the {fam['name']} family. You see exactly what they see. "
+            "Nothing is saved about you. /unlink disconnects you.",
+            menu_markup(),
+        )
 
     elif action in ("fl", "ph", "rm"):  # pick a family: view / add photos / remove photos
         page = int(parts[2])
@@ -1364,6 +1455,7 @@ async def post_init(app: Application) -> None:
     await db.photos.create_index([("thread_id", 1), ("loc_id", 1)])
     await db.photos.create_index("media_group_id")
     await db.users.create_index("thread_id")
+    await db.sent.create_index("at", expireAfterSeconds=172800)  # forget hide-buttons after 2 days
     log.info("Connected to MongoDB database '%s'", DB_NAME)
 
 
@@ -1388,7 +1480,9 @@ def main() -> None:
 
     priv = filters.ChatType.PRIVATE
     app.add_handler(CommandHandler("start", start, filters=priv))
-    app.add_handler(CommandHandler("menu", menu, filters=priv))
+    app.add_handler(CommandHandler(["menu", "gallery"], menu, filters=priv))
+    app.add_handler(CommandHandler("connect", connect_cmd, filters=priv))
+    app.add_handler(CommandHandler("unlink", unlink_private, filters=priv))
     app.add_handler(CommandHandler("admin", admin_cmd, filters=priv))
     app.add_handler(CommandHandler("addphotos", addphotos, filters=priv))
     app.add_handler(CommandHandler("done", done, filters=priv))
@@ -1396,7 +1490,7 @@ def main() -> None:
     app.add_handler(MessageHandler(priv & (filters.PHOTO | filters.Document.ALL | filters.VIDEO), on_private_media))
     app.add_handler(CallbackQueryHandler(on_admin_button, pattern=r"^a:"))
     app.add_handler(
-        CallbackQueryHandler(on_button, pattern=r"^(menu|all|d:\d+|l:\d+|D:\d{4}-\d{2}-\d{2}|L:[0-9a-f]{10}|L:none)$")
+        CallbackQueryHandler(on_button, pattern=r"^(menu|all|d:\d+|l:\d+|D:\d{4}-\d{2}-\d{2}|L:[0-9a-f]{10}|L:none|x:\d+)$")
     )
     app.add_error_handler(on_error)
 
