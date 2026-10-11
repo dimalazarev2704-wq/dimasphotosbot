@@ -63,8 +63,30 @@ deleted, and the bot does not save anything that marks your account as an admin.
 Clients can't unlink themselves. Wrong guesses are limited: 5 wrong tries lock that
 Telegram account for an hour (saved in MongoDB, so a restart doesn't reset it).
 
-## 8. Group admin commands
-All of these only work for admins of the group.
+## 8. The owner's admin panel (`/admin`)
+Set `OWNER_ID` to your own Telegram ID (send `/id` to the bot in a **private chat**, the number
+it replies with is your ID). Then send `/admin` to the bot. Only that account sees the panel,
+and the bot saves nothing about you in the database.
+
+| Button | What it does |
+|---|---|
+| 📋 Families | all families; tap one for its page (code, photo count, people linked) |
+| ➕ Add family | you type the last name, the bot **creates the topic in the group** and gives you the code |
+| 📤 Add photos | pick a family, then send files. No password for you |
+| 🗑 Remove photos | pick a family, then a date; asks "Are you sure?", then deletes those photos from the group and the list |
+| 📊 Stats | families, people linked and photos |
+| (family page) 👥 Members | see who linked and unlink people |
+| (family page) 🔄 New code | makes a new code; people already linked stay linked |
+| (family page) ❌ Delete family | asks first; choose to keep the topic and files in the group, or delete the topic and all its files too |
+
+Creating or deleting topics needs the bot to be a group admin with the **Manage topics** right
+(and **Delete messages** for removing photos or topics).
+
+`/addphotos` in a private chat also skips the password for the owner. Everyone else still needs
+`ADMIN_PASSWORD` every time.
+
+## 9. Group admin commands
+All of these only work for admins of the group (and for the owner).
 
 | Command | Where | What it does |
 |---|---|---|
@@ -75,11 +97,11 @@ All of these only work for admins of the group.
 | `/remove` | reply to a photo | asks "Are you sure?", then deletes that exact photo from the group and the list |
 | `/families` | anywhere in the group | all families with codes and file counts |
 
-## 9. Free hosting: Render + UptimeRobot
+## 10. Free hosting: Render + UptimeRobot
 1. Push this project to a private GitHub repo (never commit `.env`).
 2. In Render: **New → Web Service**, connect the repo, choose the **Free** instance.
    Build: `pip install -r requirements.txt`. Start: `python bot.py`.
-3. Add the variables from `.env.example` (`BOT_TOKEN`, `MONGODB_URI`, `GROUP_ID`, `ADMIN_PASSWORD`, ...).
+3. Add the variables from `.env.example` (`BOT_TOKEN`, `MONGODB_URI`, `GROUP_ID`, `OWNER_ID`, `ADMIN_PASSWORD`, ...).
 4. In UptimeRobot add an **HTTP(s)** monitor for your Render URL at the shortest interval
    (5 minutes on free). Free instances sleep after about 15 minutes without traffic, and the
    bot answers `200 ok` on the port Render provides.
