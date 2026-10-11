@@ -46,7 +46,7 @@ import secrets
 import threading
 import time
 import unicodedata
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from zoneinfo import ZoneInfo
 
@@ -128,6 +128,25 @@ def parse_caption(caption: str | None, default_date: str) -> tuple[str, str | No
             loc = caption  # looked like a date but wasn't one: treat it all as location
     loc = " ".join(loc.split())[:80]
     return day, (loc or None)
+
+
+def parse_date_answer(text: str) -> str | None:
+    """'today' / 'yesterday' / '2026-07-04' -> 'YYYY-MM-DD'; None if it isn't a usable date."""
+    t = text.strip().casefold()
+    today = datetime.now(TZ).date()
+    if t == "today":
+        return today.isoformat()
+    if t == "yesterday":
+        return (today - timedelta(days=1)).isoformat()
+    try:
+        d = date.fromisoformat(t)
+    except ValueError:
+        return None
+    return d.isoformat() if d <= today else None
+
+
+ASK_PLACE = "📍 Where were these photos taken? Type the place (for example: Central Park)."
+ASK_DATE = ("📅 What date were they taken? Type it like 2026-07-04, or type today or yesterday.")
 
 
 def loc_id(location: str | None) -> str:
@@ -673,12 +692,30 @@ async def handle_upload_step(update: Update, context: ContextTypes.DEFAULT_TYPE,
         if not fam:
             await msg.reply_text("No family matches that. Send the last name and code again, or /done to cancel.")
             return
-        up.update(stage="files", thread_id=fam["thread_id"], name=fam["name"], count=0, last_mg=None,
+        up.update(stage="place", thread_id=fam["thread_id"], name=fam["name"], count=0, last_mg=None,
                   until=time.time() + SESSION_SECONDS)
+        await msg.reply_text(f"{fam['name']} family. {ASK_PLACE}")
+
+    elif up["stage"] == "place":
+        place = " ".join(text.split())[:80]
+        if not place:
+            await msg.reply_text(ASK_PLACE)
+            return
+        up.update(stage="date", place=place, until=time.time() + SESSION_SECONDS)
+        await msg.reply_text(ASK_DATE)
+
+    elif up["stage"] == "date":
+        day = parse_date_answer(text)
+        if not day:
+            await msg.reply_text("I couldn't read that date. " + ASK_DATE)
+            return
+        up.update(stage="files", date=day, until=time.time() + SESSION_SECONDS)
         await msg.reply_text(
-            f"Ready for the {fam['name']} family. Send the photos (or send them as Files to keep "
-            "the full quality). A caption like “2026-07-04 | Central Park” sets the date and place. "
-            "Send /done when you're finished."
+            f"Ready: {up['name']} family · {up['place']} · {pretty_date(day)}.\n"
+            "Now send the photos (or send them as Files to keep the full quality). "
+            "A photo with its own caption like “2026-07-04 | Central Park” keeps that instead. "
+            "Send /done when you're finished.",
+            reply_markup=one_button("✅ Done", "a:done") if is_owner(user.id) else None,
         )
 
     else:  # files stage but the person typed text
@@ -690,6 +727,13 @@ async def on_private_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     up, expired = get_session(context)
     if expired:
         await msg.reply_text("That upload session timed out. Send /addphotos to start again.")
+        return
+    if up and up["stage"] in ("place", "date"):
+        if once(context, f"early:{msg.media_group_id or msg.message_id}"):
+            await msg.reply_text(
+                "Not yet. I need the place and date first, so I didn't add that. "
+                + (ASK_PLACE if up["stage"] == "place" else ASK_DATE) + " Then send the photos again."
+            )
         return
     if not up or up["stage"] != "files":
         # Not in an upload session. For the owner that usually means the bot restarted (or the
@@ -709,15 +753,17 @@ async def on_private_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
     send = context.bot.send_photo if kind == "photo" else context.bot.send_document
     arg = {"photo": file_id} if kind == "photo" else {"document": file_id}
+    # the photo's own caption wins; otherwise use the place and date I asked for
+    caption = msg.caption if (msg.caption or "").strip() else f"{up['date']} | {up['place']}"
     try:
         sent = await send_with_retry(
-            lambda: send(GROUP_ID, message_thread_id=up["thread_id"], caption=msg.caption, **arg)
+            lambda: send(GROUP_ID, message_thread_id=up["thread_id"], caption=caption, **arg)
         )
     except (TelegramError, RuntimeError):
         log.exception("Failed copying a file into the group")
         await msg.reply_text("I couldn't add that file to the group. Check that I'm still an admin there.")
         return
-    await index_file(up["thread_id"], sent.message_id, file_id, msg.caption, msg.media_group_id, msg.date, kind)
+    await index_file(up["thread_id"], sent.message_id, file_id, caption, msg.media_group_id, msg.date, kind)
     up["count"] += 1
     up["until"] = time.time() + SESSION_SECONDS
     if not msg.media_group_id or msg.media_group_id != up.get("last_mg"):
@@ -1118,15 +1164,10 @@ async def on_admin_button(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         context.user_data.pop("adm", None)
         context.user_data.pop("link", None)
         context.user_data["up"] = {
-            "stage": "files", "thread_id": tid, "name": fam["name"], "count": 0,
+            "stage": "place", "thread_id": tid, "name": fam["name"], "count": 0,
             "last_mg": None, "until": time.time() + SESSION_SECONDS,
         }
-        await show(
-            f"📤 Ready for the {fam['name']} family. Send the photos (or send them as Files to keep "
-            "the full quality). A caption like “2026-07-04 | Central Park” sets the date and place. "
-            "Tap Done (or send /done) when you're finished.",
-            one_button("✅ Done", "a:done"),
-        )
+        await show(f"📤 {fam['name']} family.\n{ASK_PLACE}", one_button("Cancel", "a:done"))
 
     elif action == "done":  # end an upload session started from the panel
         up = context.user_data.pop("up", None)
