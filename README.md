@@ -54,7 +54,7 @@ Central Park
 
 **From the bot (without being in the group):** pick the family, then the bot **asks you for the
 place and the date** (both required, no skipping). Type the place, then a date like `2026-07-04`
-(or `today` / `yesterday`). After that, send the photos or files: every one in that batch gets that
+(or `today` / `yesterday`). If you don't know the date, type `unknown`: those photos show as **No date** at the bottom of the client's date list, and still appear under their place and in All photos. After that, send the photos or files: every one in that batch gets that
 place and date. A photo with its own caption keeps its own caption instead. For a different place or
 date, send `/done` and start a new batch.
 
