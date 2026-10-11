@@ -52,10 +52,17 @@ Central Park
 - For albums, one caption on any file applies to the whole album.
 - Telegram strips GPS data, so locations come from the caption.
 
-**From anywhere (without being in the group):** in a private chat with the bot send
-`/addphotos`, type the password, then the family as `LastName 123456`, then send the photos or files.
-Send `/done` when finished. The password is asked **every time**, your message with it is
-deleted, and the bot does not save anything that marks your account as an admin.
+**From the bot (without being in the group):** pick the family, then the bot **asks you for the
+place and the date** (both required, no skipping). Type the place, then a date like `2026-07-04`
+(or `today` / `yesterday`). After that, send the photos or files: every one in that batch gets that
+place and date. A photo with its own caption keeps its own caption instead. For a different place or
+date, send `/done` and start a new batch.
+
+- **You (owner):** `/admin` → **📤 Add photos** → pick the family → place → date → send photos → **Done**.
+  No password.
+- **Anyone else:** `/addphotos`, the password (asked **every time**, your message with it is deleted),
+  then `LastName 123456`, then place, date, photos, `/done`. The bot does not save anything that
+  marks your account as an admin.
 
 ## 7. What clients do
 1. Open the bot and send `/start`.
@@ -74,7 +81,7 @@ and the bot saves nothing about you in the database.
 |---|---|
 | 📋 Families | all families; tap one for its page (code, photo count, people linked) |
 | ➕ Add family | you type the last name, the bot **creates the topic in the group** and gives you the code |
-| 📤 Add photos | pick a family, then send files. No password for you |
+| 📤 Add photos | pick a family, type the place and date, then send photos. No password for you |
 | 🗑 Remove photos | pick a family, then a date; asks "Are you sure?", then deletes those photos from the group and the list |
 | 📊 Stats | families, people linked and photos |
 | (family page) 👥 Members | see who linked and unlink people |
