@@ -1,4 +1,3 @@
-# dimasphotosbot
 # Telegram Family Photo Bot
 
 You post photos **as files** (full original quality) in a private Telegram group, one topic
