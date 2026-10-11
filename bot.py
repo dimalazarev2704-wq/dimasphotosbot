@@ -291,6 +291,16 @@ async def index_file(
     )
 
 
+def once(context: ContextTypes.DEFAULT_TYPE, key: str) -> bool:
+    """True the first time a key is seen (so an album of 20 files only gets one reply)."""
+    seen = context.bot_data.setdefault("once", [])
+    if key in seen:
+        return False
+    seen.append(key)
+    del seen[:-300]
+    return True
+
+
 async def warn_compressed(msg, context: ContextTypes.DEFAULT_TYPE) -> None:
     key = msg.media_group_id or f"m{msg.message_id}"
     warned = context.bot_data.setdefault("warned", [])
@@ -683,11 +693,24 @@ async def on_private_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await msg.reply_text("That upload session timed out. Send /addphotos to start again.")
         return
     if not up or up["stage"] != "files":
-        return  # not in an upload session: ignore
+        # Not in an upload session. For the owner that usually means the bot restarted (or the
+        # session timed out), so say so instead of staying silent. Everyone else is ignored.
+        if is_owner(update.effective_user.id) and once(context, f"noup:{msg.media_group_id or msg.message_id}"):
+            await msg.reply_text(
+                "No upload is running, so I did not add that. Open /admin → Add photos, "
+                "pick the family, then send the files."
+            )
+        return
     if msg.photo:
         await warn_compressed(msg, context)
         return
     doc = msg.document
+    if not doc or not (doc.mime_type or "").startswith("image/"):
+        if once(context, f"skip:{msg.media_group_id or msg.message_id}"):
+            await msg.reply_text(
+                "I only add image files (JPG, PNG, HEIC and so on). That file was skipped."
+            )
+        return
     try:
         sent = await send_with_retry(
             lambda: context.bot.send_document(
@@ -1015,9 +1038,19 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     )
     context.user_data.pop("adm", None)
     log.info("Owner made family %s", name)
+    # Also post the name and code inside the new topic, so it's there for reference.
+    posted = True
+    try:
+        await context.bot.send_message(
+            GROUP_ID, f"🏠 {name} family\nCode: {code}", message_thread_id=tid
+        )
+    except TelegramError:
+        log.exception("Couldn't post the code in the new topic")
+        posted = False
     await msg.reply_text(
         f"✅ Family made: {name}\nCode: {code}\n\n"
-        "Their topic is ready in the group. Give them their last name and this code.",
+        "Their topic is ready in the group. Give them their last name and this code."
+        + ("" if posted else "\n\n(I couldn't post the code inside the topic, but the family is saved.)"),
         reply_markup=InlineKeyboardMarkup(
             [[_btn("🏠 Open family", f"a:f:{tid}")], [_btn("⬅️ Admin panel", "a:home")]]
         ),
@@ -1322,7 +1355,7 @@ def main() -> None:
     app.add_handler(CommandHandler("addphotos", addphotos, filters=priv))
     app.add_handler(CommandHandler("done", done, filters=priv))
     app.add_handler(MessageHandler(priv & filters.TEXT & ~filters.COMMAND, on_private_text))
-    app.add_handler(MessageHandler(priv & (filters.PHOTO | filters.Document.IMAGE), on_private_media))
+    app.add_handler(MessageHandler(priv & (filters.PHOTO | filters.Document.ALL | filters.VIDEO), on_private_media))
     app.add_handler(CallbackQueryHandler(on_admin_button, pattern=r"^a:"))
     app.add_handler(
         CallbackQueryHandler(on_button, pattern=r"^(menu|all|d:\d+|l:\d+|D:\d{4}-\d{2}-\d{2}|L:[0-9a-f]{10}|L:none)$")
