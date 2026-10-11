@@ -18,10 +18,14 @@ Group commands (group admins only, nobody gets "marked" as an admin by the bot):
     /remove              reply to a photo: asks "are you sure", then deletes that exact photo
     /families            lists every family with its code and photo count
 
-Private chat, for you when you are away from the group:
-    /addphotos           asks for the password EVERY time, then for the family (last name +
-                         code), then you send files; the bot copies them into the family's
-                         topic. Nothing about your account is saved. /done ends it.
+Private chat, for you (the owner):
+    /admin               your admin panel with buttons: families, add a family (the bot makes
+                         the topic for you), codes, members, add/remove photos, delete a
+                         family, stats. Only works for the Telegram ID in OWNER_ID.
+                         Nothing about you is saved in the database.
+    /addphotos           for the owner: pick a family from buttons, then send files, no
+                         password. For anyone else: needs ADMIN_PASSWORD every time, then
+                         the family (last name + code). /done ends it.
 
 Caption for files you post (all optional):
     Central Park
@@ -72,6 +76,9 @@ MONGODB_URI = os.environ["MONGODB_URI"]
 DB_NAME = os.getenv("MONGODB_DB", "photobot")
 GROUP_ID = int(os.getenv("GROUP_ID", "0") or 0)  # your private photo group; use /id to find it
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "")  # needed for /addphotos in private chat
+# Your own Telegram user ID (send /id to the bot in a private chat). This account gets the
+# /admin panel and skips the /addphotos password. The bot stores nothing about you.
+OWNER_ID = int(os.getenv("OWNER_ID", "0") or 0)
 TZ = ZoneInfo(os.getenv("TIMEZONE", "America/New_York"))
 # Stops clients from forwarding/saving files from the chat (they can still screenshot)
 PROTECT_CONTENT = os.getenv("PROTECT_CONTENT", "false").lower() == "true"
@@ -85,6 +92,11 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s", level=logging.INFO
 )
 log = logging.getLogger("photobot")
+
+# The HTTP library logs every request URL, and Telegram's URLs contain the bot token.
+# Keep those lines out of the logs so the token can't leak through them.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 db = None  # set in post_init (the Mongo client must be created inside the running loop)
 
@@ -193,7 +205,14 @@ async def send_with_retry(coro_factory):
     raise RuntimeError("Gave up after repeated rate limits")
 
 
+def is_owner(user_id: int | None) -> bool:
+    """True only for the Telegram ID in OWNER_ID. Nothing about the owner is stored."""
+    return bool(OWNER_ID) and user_id == OWNER_ID
+
+
 async def is_group_admin(bot, chat_id: int, user_id: int) -> bool:
+    if is_owner(user_id):  # the owner counts as an admin everywhere
+        return True
     try:
         member = await bot.get_chat_member(chat_id, user_id)
     except TelegramError:
@@ -486,6 +505,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(lock_text(lock))
         return
     context.user_data.pop("up", None)
+    context.user_data.pop("adm", None)
     context.user_data["link"] = {"stage": "first"}
     await update.message.reply_text("Hi! 👋 Let's get you to your photos. What's your first name?")
 
@@ -561,6 +581,16 @@ async def handle_link_step(update: Update, context: ContextTypes.DEFAULT_TYPE, l
 
 async def addphotos(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
+    if is_owner(user.id):  # the owner picks a family from buttons, no password
+        for k in ("up", "link", "adm"):
+            context.user_data.pop(k, None)
+        markup, empty = await family_picker(0, "a:ph", "a:phf:{tid}")
+        await update.message.reply_text(
+            "No families yet. Open /admin and add one first." if empty
+            else "Which family are you adding photos to?",
+            reply_markup=markup,
+        )
+        return
     if not ADMIN_PASSWORD:
         await update.message.reply_text("Adding photos from here isn't set up (no password configured).")
         return
@@ -684,6 +714,10 @@ async def on_private_text(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
     if up:
         await handle_upload_step(update, context, up)
+        return
+    adm = context.user_data.get("adm")
+    if adm and is_owner(update.effective_user.id):
+        await handle_admin_text(update, context, adm)
         return
     link = context.user_data.get("link")
     if link:
@@ -831,6 +865,384 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await send_photos(context.bot, chat_id, {"thread_id": thread_id})
 
 
+# ---------- owner admin panel (/admin) ----------
+# Only the Telegram ID in OWNER_ID can use any of this. Nothing about the owner is saved.
+
+def _btn(text: str, cb: str) -> InlineKeyboardButton:
+    return InlineKeyboardButton(text, callback_data=cb)
+
+
+def admin_home_markup() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [_btn("📋 Families", "a:fl:0"), _btn("➕ Add family", "a:add")],
+            [_btn("📤 Add photos", "a:ph:0"), _btn("🗑 Remove photos", "a:rm:0")],
+            [_btn("📊 Stats", "a:stats")],
+        ]
+    )
+
+
+def one_button(text: str, cb: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[_btn(text, cb)]])
+
+
+def admin_pager(items: list[tuple[str, str]], page: int, nav: str, back: str) -> InlineKeyboardMarkup:
+    """One button per item, with Prev/Next. `nav` is the callback prefix for the page buttons."""
+    page = max(page, 0)
+    chunk = items[page * PAGE_SIZE : (page + 1) * PAGE_SIZE]
+    rows = [[_btn(label[:60], cb)] for label, cb in chunk]
+    navrow = []
+    if page > 0:
+        navrow.append(_btn("⬅️ Prev", f"{nav}:{page - 1}"))
+    if (page + 1) * PAGE_SIZE < len(items):
+        navrow.append(_btn("Next ➡️", f"{nav}:{page + 1}"))
+    if navrow:
+        rows.append(navrow)
+    rows.append([_btn("⬅️ Back", back)])
+    return InlineKeyboardMarkup(rows)
+
+
+async def family_picker(page: int, nav: str, pick: str):
+    """Buttons listing every family. `pick` is a callback template containing {tid}.
+    Returns (markup, no_families_yet)."""
+    fams = await db.families.find().sort("name", 1).to_list()
+    items = [(f"{f['name']} · {f['code']}", pick.format(tid=f["thread_id"])) for f in fams]
+    return admin_pager(items, page, nav, "a:home"), not fams
+
+
+async def family_page(tid: int):
+    fam = await db.families.find_one({"thread_id": tid})
+    if not fam:
+        return None
+    photos = await db.photos.count_documents({"thread_id": tid})
+    people = await db.users.count_documents({"thread_id": tid})
+    text = (
+        f"🏠 {fam['name']} family\n"
+        f"Code: {fam['code']}\n"
+        f"Photos: {photos} · People linked: {people}"
+    )
+    markup = InlineKeyboardMarkup(
+        [
+            [_btn("📤 Add photos", f"a:phf:{tid}"), _btn("🗑 Remove photos", f"a:rmf:{tid}:0")],
+            [_btn("👥 Members", f"a:mem:{tid}"), _btn("🔄 New code", f"a:nc:{tid}")],
+            [_btn("❌ Delete family", f"a:df:{tid}")],
+            [_btn("⬅️ Families", "a:fl:0")],
+        ]
+    )
+    return text, markup
+
+
+async def members_view(tid: int):
+    fam = await db.families.find_one({"thread_id": tid})
+    if not fam:
+        return None
+    people = await db.users.find({"thread_id": tid}).sort("first_name", 1).to_list()
+    rows = [[_btn(f"Unlink {p['first_name']}"[:60], f"a:ul:{tid}:{p['_id']}")] for p in people[:50]]
+    rows.append([_btn("⬅️ Back", f"a:f:{tid}")])
+    if not people:
+        text = f"No one has linked to the {fam['name']} family yet."
+    else:
+        lines = [
+            f"• {p['first_name']} (id {p['_id']}" + (f", @{p['username']}" if p.get("username") else "") + ")"
+            for p in people[:50]
+        ]
+        text = f"👥 {fam['name']} family members:\n" + "\n".join(lines)
+    return text, InlineKeyboardMarkup(rows)
+
+
+async def stats_text() -> str:
+    fams = await db.families.find().sort("name", 1).to_list()
+    cur = await db.photos.aggregate([{"$group": {"_id": "$thread_id", "n": {"$sum": 1}}}])
+    photos = {d["_id"]: d["n"] for d in await cur.to_list()}
+    cur = await db.users.aggregate([{"$group": {"_id": "$thread_id", "n": {"$sum": 1}}}])
+    people = {d["_id"]: d["n"] for d in await cur.to_list()}
+    lines = [
+        f"• {f['name']}: {photos.get(f['thread_id'], 0)} photos, {people.get(f['thread_id'], 0)} people"
+        for f in fams[:30]
+    ]
+    if len(fams) > 30:
+        lines.append(f"…and {len(fams) - 30} more")
+    return (
+        f"📊 Stats\nFamilies: {len(fams)}\nPeople linked: {sum(people.values())}\n"
+        f"Photos: {sum(photos.values())}\n\n" + "\n".join(lines)
+    ).strip()
+
+
+async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    if not OWNER_ID:
+        await update.message.reply_text(
+            "The admin panel isn't set up yet. Send /id here to get your number, "
+            "then put it in the OWNER_ID setting."
+        )
+        return
+    if not is_owner(user.id):
+        await update.message.reply_text("Sorry, the admin panel is only for the owner.")
+        return
+    for k in ("up", "link", "adm"):
+        context.user_data.pop(k, None)
+    await update.message.reply_text("👑 Admin panel", reply_markup=admin_home_markup())
+
+
+async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE, adm: dict) -> None:
+    """The owner typed a last name after tapping 'Add family'."""
+    msg = update.message
+    name = " ".join((msg.text or "").split())[:60]
+    if not normalize(name):
+        await msg.reply_text("Please send the family's last name, for example: Garcia")
+        return
+    if not GROUP_ID:
+        context.user_data.pop("adm", None)
+        await msg.reply_text("GROUP_ID isn't set yet, so I can't make a topic. Add it in the settings first.")
+        return
+    try:
+        topic = await context.bot.create_forum_topic(GROUP_ID, name)
+    except TelegramError as e:
+        await msg.reply_text(
+            f"I couldn't make the topic ({e.message}). Check that Topics are on in the group and "
+            "that I'm an admin with the “Manage topics” right. Then send the name again."
+        )
+        return
+    tid = topic.message_thread_id
+    code = await new_code()
+    await db.families.update_one(
+        {"thread_id": tid},
+        {
+            "$set": {"name": name, "key": normalize(name)},
+            "$setOnInsert": {"code": code, "created": datetime.now(timezone.utc)},
+        },
+        upsert=True,
+    )
+    context.user_data.pop("adm", None)
+    log.info("Owner made family %s", name)
+    await msg.reply_text(
+        f"✅ Family made: {name}\nCode: {code}\n\n"
+        "Their topic is ready in the group. Give them their last name and this code.",
+        reply_markup=InlineKeyboardMarkup(
+            [[_btn("🏠 Open family", f"a:f:{tid}")], [_btn("⬅️ Admin panel", "a:home")]]
+        ),
+    )
+
+
+async def on_admin_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    if not is_owner(q.from_user.id):
+        await q.answer("This is only for the owner.", show_alert=True)
+        return
+    await q.answer()
+    parts = q.data.split(":")
+    action = parts[1] if len(parts) > 1 else ""
+
+    async def show(text: str, markup: InlineKeyboardMarkup | None = None) -> None:
+        try:
+            await q.edit_message_text(text, reply_markup=markup)
+        except TelegramError:
+            pass  # e.g. "message is not modified"
+
+    async def need_family(tid: int):
+        fam = await db.families.find_one({"thread_id": tid})
+        if not fam:
+            await show("That family no longer exists.", one_button("⬅️ Families", "a:fl:0"))
+        return fam
+
+    if action == "home":
+        context.user_data.pop("adm", None)
+        await show("👑 Admin panel", admin_home_markup())
+
+    elif action in ("fl", "ph", "rm"):  # pick a family: view / add photos / remove photos
+        page = int(parts[2])
+        pick = {"fl": "a:f:{tid}", "ph": "a:phf:{tid}", "rm": "a:rmf:{tid}:0"}[action]
+        title = {"fl": "📋 Families (tap one):", "ph": "📤 Add photos to which family?",
+                 "rm": "🗑 Remove photos from which family?"}[action]
+        markup, empty = await family_picker(page, f"a:{action}", pick)
+        await show("No families yet. Tap “Add family” in the admin panel." if empty else title, markup)
+
+    elif action == "f":
+        view = await family_page(int(parts[2]))
+        if view:
+            await show(*view)
+        else:
+            await show("That family no longer exists.", one_button("⬅️ Families", "a:fl:0"))
+
+    elif action == "add":
+        for k in ("up", "link"):
+            context.user_data.pop(k, None)
+        context.user_data["adm"] = {"stage": "name"}
+        await show(
+            "➕ Send the family's last name (for example: Garcia). I'll make their topic in the "
+            "group and give you their code.",
+            one_button("Cancel", "a:home"),
+        )
+
+    elif action == "stats":
+        await show(await stats_text(), one_button("⬅️ Admin panel", "a:home"))
+
+    elif action == "phf":  # start an upload session for this family (no password for the owner)
+        tid = int(parts[2])
+        fam = await need_family(tid)
+        if not fam:
+            return
+        if not GROUP_ID:
+            await show("GROUP_ID isn't set yet, so I can't add photos to the group.", one_button("⬅️ Back", f"a:f:{tid}"))
+            return
+        context.user_data.pop("adm", None)
+        context.user_data.pop("link", None)
+        context.user_data["up"] = {
+            "stage": "files", "thread_id": tid, "name": fam["name"], "count": 0,
+            "last_mg": None, "until": time.time() + SESSION_SECONDS,
+        }
+        await show(
+            f"📤 Ready for the {fam['name']} family. Send the photos as Files (full quality). "
+            "A caption like “2026-07-04 | Central Park” sets the date and place. "
+            "Tap Done (or send /done) when you're finished.",
+            one_button("✅ Done", "a:done"),
+        )
+
+    elif action == "done":  # end an upload session started from the panel
+        up = context.user_data.pop("up", None)
+        count = up.get("count", 0) if up else 0
+        back = f"a:f:{up['thread_id']}" if up else "a:home"
+        await show(
+            f"✅ Done. Added {count} file(s). The session is closed." if up else "No upload was running.",
+            one_button("⬅️ Back", back),
+        )
+
+    elif action == "rmf":  # choose a date to delete
+        tid, page = int(parts[2]), int(parts[3])
+        fam = await need_family(tid)
+        if not fam:
+            return
+        cur = await db.photos.aggregate(
+            [
+                {"$match": {"thread_id": tid}},
+                {"$group": {"_id": "$date", "n": {"$sum": 1}}},
+                {"$sort": {"_id": -1}},
+            ]
+        )
+        rows = await cur.to_list()
+        if not rows:
+            await show(f"The {fam['name']} family has no photos.", one_button("⬅️ Back", f"a:f:{tid}"))
+            return
+        items = [(f"{pretty_date(r['_id'])} ({r['n']})", f"a:rmd:{tid}:{r['_id']}") for r in rows]
+        await show(
+            f"🗑 Which date should I delete for the {fam['name']} family?",
+            admin_pager(items, page, f"a:rmf:{tid}", f"a:f:{tid}"),
+        )
+
+    elif action in ("rmd", "rmy"):  # confirm / do the deletion of one date
+        tid, day = int(parts[2]), parts[3]
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", day):
+            return
+        fam = await need_family(tid)
+        if not fam:
+            return
+        n = await db.photos.count_documents({"thread_id": tid, "date": day})
+        if n == 0:
+            await show("There are no photos left on that date.", one_button("⬅️ Back", f"a:rmf:{tid}:0"))
+            return
+        if action == "rmd":
+            await show(
+                f"Delete all {n} photo(s) from {pretty_date(day)} for the {fam['name']} family?\n\n"
+                "They are deleted from the group too. This can't be undone.",
+                InlineKeyboardMarkup(
+                    [[_btn(f"Yes, delete {n}", f"a:rmy:{tid}:{day}")], [_btn("Cancel", f"a:rmf:{tid}:0")]]
+                ),
+            )
+            return
+        if not GROUP_ID:
+            await show("GROUP_ID isn't set yet.", one_button("⬅️ Back", f"a:f:{tid}"))
+            return
+        docs = await db.photos.find({"thread_id": tid, "date": day}).to_list()
+        ids = [d["message_id"] for d in docs]
+        try:
+            for i in range(0, len(ids), 100):
+                await context.bot.delete_messages(GROUP_ID, ids[i : i + 100])
+        except TelegramError as e:
+            await show(
+                f"I couldn't delete them from the group ({e.message}). Nothing was removed from the "
+                "list. Check that I'm an admin with the “Delete messages” right.",
+                one_button("⬅️ Back", f"a:f:{tid}"),
+            )
+            return
+        await db.photos.delete_many({"thread_id": tid, "date": day})
+        await show(f"🗑 Deleted {len(ids)} photo(s) from {pretty_date(day)}.", one_button("⬅️ Back to family", f"a:f:{tid}"))
+
+    elif action in ("nc", "ncy"):  # new code
+        tid = int(parts[2])
+        fam = await need_family(tid)
+        if not fam:
+            return
+        if action == "nc":
+            await show(
+                f"Make a new code for the {fam['name']} family?\n\nThe old code ({fam['code']}) stops "
+                "working for new sign-ups. People who already linked stay linked.",
+                InlineKeyboardMarkup([[_btn("Yes, new code", f"a:ncy:{tid}")], [_btn("Cancel", f"a:f:{tid}")]]),
+            )
+            return
+        code = await new_code()
+        await db.families.update_one({"thread_id": tid}, {"$set": {"code": code}})
+        await show(f"🔄 New code for the {fam['name']} family: {code}", one_button("⬅️ Back to family", f"a:f:{tid}"))
+
+    elif action == "mem":
+        view = await members_view(int(parts[2]))
+        if view:
+            await show(*view)
+        else:
+            await show("That family no longer exists.", one_button("⬅️ Families", "a:fl:0"))
+
+    elif action == "ul":
+        tid, uid = int(parts[2]), int(parts[3])
+        await db.users.delete_one({"_id": uid, "thread_id": tid})
+        view = await members_view(tid)
+        if view:
+            await show(*view)
+
+    elif action == "df":  # delete a family: ask first
+        tid = int(parts[2])
+        fam = await need_family(tid)
+        if not fam:
+            return
+        await show(
+            f"❌ Delete the {fam['name']} family?\n\nThis removes the family, its code, its linked "
+            "people and its photo list from the bot. What should happen to the topic in the group?",
+            InlineKeyboardMarkup(
+                [
+                    [_btn("Delete family, keep topic and files in the group", f"a:dfk:{tid}")],
+                    [_btn("⚠️ Delete family AND the topic with ALL its files", f"a:dfd:{tid}")],
+                    [_btn("Cancel", f"a:f:{tid}")],
+                ]
+            ),
+        )
+
+    elif action in ("dfk", "dfd"):
+        tid = int(parts[2])
+        fam = await need_family(tid)
+        if not fam:
+            return
+        if action == "dfd":
+            if not GROUP_ID:
+                await show("GROUP_ID isn't set yet.", one_button("⬅️ Back", f"a:f:{tid}"))
+                return
+            try:
+                await context.bot.delete_forum_topic(GROUP_ID, tid)
+            except TelegramError as e:
+                await show(
+                    f"I couldn't delete the topic ({e.message}), so nothing was changed. Check that I'm an "
+                    "admin with the “Delete messages” and “Manage topics” rights.",
+                    one_button("⬅️ Back", f"a:f:{tid}"),
+                )
+                return
+        await db.users.delete_many({"thread_id": tid})
+        await db.photos.delete_many({"thread_id": tid})
+        await db.families.delete_one({"thread_id": tid})
+        log.info("Owner deleted family %s (topic deleted: %s)", fam["name"], action == "dfd")
+        await show(
+            f"✅ The {fam['name']} family was deleted"
+            + (" together with its topic." if action == "dfd" else ". The topic and files are still in the group."),
+            one_button("⬅️ Families", "a:fl:0"),
+        )
+
+
 # ---------- misc ----------
 
 async def chat_id_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -906,10 +1318,12 @@ def main() -> None:
     priv = filters.ChatType.PRIVATE
     app.add_handler(CommandHandler("start", start, filters=priv))
     app.add_handler(CommandHandler("menu", menu, filters=priv))
+    app.add_handler(CommandHandler("admin", admin_cmd, filters=priv))
     app.add_handler(CommandHandler("addphotos", addphotos, filters=priv))
     app.add_handler(CommandHandler("done", done, filters=priv))
     app.add_handler(MessageHandler(priv & filters.TEXT & ~filters.COMMAND, on_private_text))
     app.add_handler(MessageHandler(priv & (filters.PHOTO | filters.Document.IMAGE), on_private_media))
+    app.add_handler(CallbackQueryHandler(on_admin_button, pattern=r"^a:"))
     app.add_handler(
         CallbackQueryHandler(on_button, pattern=r"^(menu|all|d:\d+|l:\d+|D:\d{4}-\d{2}-\d{2}|L:[0-9a-f]{10}|L:none)$")
     )
