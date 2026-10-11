@@ -1,6 +1,6 @@
 # Telegram Family Photo Bot
 
-You post photos **as files** (full original quality) in a private Telegram group, one topic
+You post photos in a private Telegram group, one topic
 per family. Clients open the bot, enter their first name, last name and their family's
 6-digit code, and can then browse **only their family's photos** by date or location.
 
@@ -36,9 +36,11 @@ python bot.py
    and that code. Two families can share a last name, because each has its own code.
 
 ## 6. Adding photos
-Post them in the family's topic **as Files** (attach → File). Telegram never compresses files,
-so they keep full quality. A photo sent the normal way is compressed, so the bot refuses it
-and asks for a file.
+Post them in the family's topic either way:
+- **Normal photos** (the gallery way): easiest, but Telegram shrinks them, so clients get the shrunken version.
+- **As Files** (attach → File): Telegram never compresses these, so clients get the full original quality.
+
+The bot accepts both. In "All photos" it sends photos and files as separate albums.
 
 Optional caption for the date and place:
 ```
@@ -51,7 +53,7 @@ Central Park
 - Telegram strips GPS data, so locations come from the caption.
 
 **From anywhere (without being in the group):** in a private chat with the bot send
-`/addphotos`, type the password, then the family as `LastName 123456`, then send the files.
+`/addphotos`, type the password, then the family as `LastName 123456`, then send the photos or files.
 Send `/done` when finished. The password is asked **every time**, your message with it is
 deleted, and the bot does not save anything that marks your account as an admin.
 
