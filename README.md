@@ -67,7 +67,9 @@ date, send `/done` and start a new batch.
 ## 7. What clients do
 1. Open the bot and send `/start`.
 2. Enter first name, last name, then the 6-digit code.
-3. Use the buttons: **By date**, **By location** or **All photos**. `/menu` shows them again.
+3. Use the buttons: **By date**, **By location** or **All photos**. `/gallery` (or `/menu`) shows them again.
+4. After the photos arrive, tap **🧹 Hide these photos** to remove them from the chat and keep it clean.
+   They stay in the gallery, so the client can open them again any time.
 
 Clients can't unlink themselves. Wrong guesses are limited: 5 wrong tries lock that
 Telegram account for an hour (saved in MongoDB, so a restart doesn't reset it).
@@ -90,6 +92,11 @@ and the bot saves nothing about you in the database.
 
 Creating or deleting topics needs the bot to be a group admin with the **Manage topics** right
 (and **Delete messages** for removing photos or topics).
+
+**Browsing as a family (owner only):** send `/connect` in the private chat, pick a family, and `/gallery`
+shows exactly what its clients see (or tap **👁 Browse as this family** on the family's page). `/unlink`
+in the private chat disconnects you. This is kept in memory only, so nothing is saved about you and a
+restart disconnects you. Clients can't use `/connect` or `/unlink`.
 
 `/addphotos` in a private chat also skips the password for the owner. Everyone else still needs
 `ADMIN_PASSWORD` every time.
