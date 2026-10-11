@@ -61,7 +61,7 @@ from telegram import (
     Update,
 )
 from telegram.constants import ChatAction, ChatMemberStatus
-from telegram.error import RetryAfter, TelegramError
+from telegram.error import NetworkError, RetryAfter, TelegramError, TimedOut
 from telegram.ext import (
     Application,
     ApplicationBuilder,
@@ -218,12 +218,19 @@ async def new_code() -> str:
             return code
 
 
-async def send_with_retry(coro_factory):
-    for _ in range(5):
+async def send_with_retry(coro_factory, retry_timeouts: bool = False):
+    """Retries when Telegram says "slow down". With retry_timeouts=True it also retries slow or
+    dropped connections (safe for sends to clients; NOT used when copying into the group, because a
+    timed-out send may still have gone through and a retry would post it twice)."""
+    for attempt in range(5):
         try:
             return await coro_factory()
         except RetryAfter as e:
             await asyncio.sleep(e.retry_after + 1)
+        except (TimedOut, NetworkError):
+            if not retry_timeouts or attempt == 4:
+                raise
+            await asyncio.sleep(2 + attempt * 2)
     raise RuntimeError("Gave up after repeated rate limits")
 
 
@@ -810,6 +817,14 @@ async def on_private_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         sent = await send_with_retry(
             lambda: send(GROUP_ID, message_thread_id=up["thread_id"], caption=caption, **arg)
         )
+    except (TimedOut, NetworkError):
+        log.warning("Timed out copying a file into the group")
+        if once(context, f"slow:{msg.media_group_id or msg.message_id}"):
+            await msg.reply_text(
+                "⏳ Telegram was too slow and the connection timed out. That file may or may not "
+                "have been added. Look in the family's topic, and send it again only if it's missing."
+            )
+        return
     except (TelegramError, RuntimeError):
         log.exception("Failed copying a file into the group")
         await msg.reply_text("I couldn't add that file to the group. Check that I'm still an admin there.")
@@ -899,7 +914,8 @@ async def send_photos(bot, chat_id: int, query: dict) -> None:
                 send_one = bot.send_photo if is_photo else bot.send_document
                 arg = {"photo": first["file_id"]} if is_photo else {"document": first["file_id"]}
                 res = await send_with_retry(
-                    lambda: send_one(chat_id, caption=caption, protect_content=PROTECT_CONTENT, **arg)
+                    lambda: send_one(chat_id, caption=caption, protect_content=PROTECT_CONTENT, **arg),
+                    retry_timeouts=True,
                 )
                 sent_ids.append(res.message_id)
             else:
@@ -909,7 +925,8 @@ async def send_photos(bot, chat_id: int, query: dict) -> None:
                     for j, d in enumerate(group)
                 ]
                 res = await send_with_retry(
-                    lambda: bot.send_media_group(chat_id, media, protect_content=PROTECT_CONTENT)
+                    lambda: bot.send_media_group(chat_id, media, protect_content=PROTECT_CONTENT),
+                    retry_timeouts=True,
                 )
                 sent_ids.extend(m.message_id for m in (res or []))
         except (TelegramError, RuntimeError):
@@ -1469,7 +1486,16 @@ async def post_init(app: Application) -> None:
 
 def main() -> None:
     start_health_server()
-    app = ApplicationBuilder().token(BOT_TOKEN).post_init(post_init).build()
+    app = (
+        ApplicationBuilder()
+        .token(BOT_TOKEN)
+        .post_init(post_init)
+        .connect_timeout(20)
+        .read_timeout(60)
+        .write_timeout(60)
+        .pool_timeout(20)
+        .build()
+    )
 
     app.add_handler(CommandHandler("id", chat_id_cmd))
 
