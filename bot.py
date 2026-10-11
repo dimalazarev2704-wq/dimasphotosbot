@@ -113,7 +113,8 @@ def normalize(text: str) -> str:
     return re.sub(r"[\W_]+", "", text.casefold())
 
 
-CAPTION_RE = re.compile(r"^\s*(\d{4}-\d{2}-\d{2})\s*(?:[|,\-–]\s*)?(.*)$", re.S)
+UNKNOWN_DATE = "0000-00-00"  # stored for photos whose date nobody knows; sorts last, shown as "No date"
+CAPTION_RE = re.compile(r"^\s*(\d{4}-\d{2}-\d{2}|no date)\s*(?:[|,\-–]\s*)?(.*)$", re.S | re.I)
 
 
 def parse_caption(caption: str | None, default_date: str) -> tuple[str, str | None]:
@@ -123,7 +124,7 @@ def parse_caption(caption: str | None, default_date: str) -> tuple[str, str | No
     m = CAPTION_RE.match(caption)
     if m:
         try:
-            day = date.fromisoformat(m.group(1)).isoformat()
+            day = UNKNOWN_DATE if m.group(1).casefold() == "no date" else date.fromisoformat(m.group(1)).isoformat()
             loc = m.group(2)
         except ValueError:
             loc = caption  # looked like a date but wasn't one: treat it all as location
@@ -133,7 +134,9 @@ def parse_caption(caption: str | None, default_date: str) -> tuple[str, str | No
 
 def parse_date_answer(text: str) -> str | None:
     """'today' / 'yesterday' / '2026-07-04' -> 'YYYY-MM-DD'; None if it isn't a usable date."""
-    t = text.strip().casefold()
+    t = " ".join(text.strip().casefold().replace("'", "").replace("’", "").split())
+    if t in ("unknown", "no date", "nodate", "idk", "dont know", "i dont know", "dunno", "not sure", "skip"):
+        return UNKNOWN_DATE
     today = datetime.now(TZ).date()
     if t == "today":
         return today.isoformat()
@@ -147,7 +150,8 @@ def parse_date_answer(text: str) -> str | None:
 
 
 ASK_PLACE = "📍 Where were these photos taken? Type the place (for example: Central Park)."
-ASK_DATE = ("📅 What date were they taken? Type it like 2026-07-04, or type today or yesterday.")
+ASK_DATE = ("📅 What date were they taken? Type it like 2026-07-04, or type today or yesterday. "
+            "If you don't know, type unknown.")
 
 
 def loc_id(location: str | None) -> str:
@@ -159,6 +163,8 @@ def loc_id(location: str | None) -> str:
 
 
 def pretty_date(day: str) -> str:
+    if day == UNKNOWN_DATE:
+        return "No date"
     return date.fromisoformat(day).strftime("%b %d, %Y")
 
 
@@ -797,7 +803,9 @@ async def on_private_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     send = context.bot.send_photo if kind == "photo" else context.bot.send_document
     arg = {"photo": file_id} if kind == "photo" else {"document": file_id}
     # the photo's own caption wins; otherwise use the place and date I asked for
-    caption = msg.caption if (msg.caption or "").strip() else f"{up['date']} | {up['place']}"
+    caption = msg.caption if (msg.caption or "").strip() else (
+        f"{'No date' if up['date'] == UNKNOWN_DATE else up['date']} | {up['place']}"
+    )
     try:
         sent = await send_with_retry(
             lambda: send(GROUP_ID, message_thread_id=up["thread_id"], caption=caption, **arg)
