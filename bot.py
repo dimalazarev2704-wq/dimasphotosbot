@@ -3,9 +3,10 @@
 The idea
 --------
 * A private Telegram group with Topics on. Each family has one topic. The bot is an admin.
-* Photos are posted in a family's topic AS FILES (Telegram never compresses files, so
-  they keep full quality). The photos stay on Telegram; MongoDB only stores an index
-  (file id, family, date, location) plus who is linked to which family.
+* Photos are posted in a family's topic, either as normal photos (Telegram shrinks those) or
+  as Files (Telegram never compresses files, so they keep full quality). Clients get back
+  whichever kind was posted. The photos stay on Telegram; MongoDB only stores an index
+  (file id, kind, family, date, location) plus who is linked to which family.
 * Clients open the bot privately and link themselves with:
       first name  ->  last name  ->  the family's 6-digit code
   Then they can browse ONLY their family's photos by date or by location.
@@ -55,6 +56,7 @@ from telegram import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     InputMediaDocument,
+    InputMediaPhoto,
     Update,
 )
 from telegram.constants import ChatAction, ChatMemberStatus
@@ -99,12 +101,6 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 db = None  # set in post_init (the Mongo client must be created inside the running loop)
-
-COMPRESSED_MSG = (
-    "That came in as a compressed photo, so I did not add it. "
-    "Please send it as a File instead (attach → File, or untick “compress” on desktop) "
-    "so it keeps its full quality."
-)
 
 
 # ---------- text helpers ----------
@@ -245,8 +241,11 @@ async def index_file(
     caption: str | None,
     media_group_id: str | None,
     sent_at: datetime,
+    kind: str = "document",
 ) -> None:
-    """Save one file in the index with its date/location (from the caption)."""
+    """Save one photo or file in the index with its date/location (from the caption).
+    kind is "photo" (a normal Telegram photo, which Telegram compresses) or "document"
+    (sent as a File, which keeps the original quality)."""
     default_day = sent_at.astimezone(TZ).date().isoformat()
     day, loc = parse_caption(caption, default_day)
     has_caption = bool((caption or "").strip())
@@ -256,6 +255,7 @@ async def index_file(
     set_doc = {
         "thread_id": thread_id,
         "file_id": file_id,
+        "kind": kind,
         "media_group_id": media_group_id,
     }
     if has_caption:
@@ -301,14 +301,16 @@ def once(context: ContextTypes.DEFAULT_TYPE, key: str) -> bool:
     return True
 
 
-async def warn_compressed(msg, context: ContextTypes.DEFAULT_TYPE) -> None:
-    key = msg.media_group_id or f"m{msg.message_id}"
-    warned = context.bot_data.setdefault("warned", [])
-    if key in warned:
-        return
-    warned.append(key)
-    del warned[:-200]
-    await msg.reply_text(COMPRESSED_MSG)
+def media_of(msg):
+    """(file_id, kind) for a message's photo or image file, or (None, None) if it has neither.
+    A normal photo is kind "photo" (the largest size Telegram keeps); an image sent as a
+    File is kind "document" (original quality)."""
+    if msg.photo:
+        return msg.photo[-1].file_id, "photo"
+    doc = msg.document
+    if doc and (doc.mime_type or "").startswith("image/"):
+        return doc.file_id, "document"
+    return None, None
 
 
 # ---------- group side ----------
@@ -470,14 +472,11 @@ async def on_group_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     msg = update.effective_message
     if not msg.is_topic_message:  # ignore the General topic
         return
-    if msg.photo:  # compressed photo: refuse, ask for a file
-        await warn_compressed(msg, context)
-        return
-    doc = msg.document
-    if not doc:
+    file_id, kind = media_of(msg)
+    if not file_id:
         return
     await index_file(
-        msg.message_thread_id, msg.message_id, doc.file_id, msg.caption, msg.media_group_id, msg.date
+        msg.message_thread_id, msg.message_id, file_id, msg.caption, msg.media_group_id, msg.date, kind
     )
     if not await db.families.find_one({"thread_id": msg.message_thread_id}):
         asked = context.bot_data.setdefault("asked", set())
@@ -677,13 +676,13 @@ async def handle_upload_step(update: Update, context: ContextTypes.DEFAULT_TYPE,
         up.update(stage="files", thread_id=fam["thread_id"], name=fam["name"], count=0, last_mg=None,
                   until=time.time() + SESSION_SECONDS)
         await msg.reply_text(
-            f"Ready for the {fam['name']} family. Send the photos as Files (full quality). "
-            "A caption like “2026-07-04 | Central Park” sets the date and place. "
+            f"Ready for the {fam['name']} family. Send the photos (or send them as Files to keep "
+            "the full quality). A caption like “2026-07-04 | Central Park” sets the date and place. "
             "Send /done when you're finished."
         )
 
     else:  # files stage but the person typed text
-        await msg.reply_text("Send the photos as Files, or /done to finish.")
+        await msg.reply_text("Send the photos, or /done to finish.")
 
 
 async def on_private_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -701,27 +700,24 @@ async def on_private_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 "pick the family, then send the files."
             )
         return
-    if msg.photo:
-        await warn_compressed(msg, context)
-        return
-    doc = msg.document
-    if not doc or not (doc.mime_type or "").startswith("image/"):
+    file_id, kind = media_of(msg)
+    if not file_id:
         if once(context, f"skip:{msg.media_group_id or msg.message_id}"):
             await msg.reply_text(
-                "I only add image files (JPG, PNG, HEIC and so on). That file was skipped."
+                "I only add photos and image files (JPG, PNG, HEIC and so on). That one was skipped."
             )
         return
+    send = context.bot.send_photo if kind == "photo" else context.bot.send_document
+    arg = {"photo": file_id} if kind == "photo" else {"document": file_id}
     try:
         sent = await send_with_retry(
-            lambda: context.bot.send_document(
-                GROUP_ID, doc.file_id, message_thread_id=up["thread_id"], caption=msg.caption
-            )
+            lambda: send(GROUP_ID, message_thread_id=up["thread_id"], caption=msg.caption, **arg)
         )
     except (TelegramError, RuntimeError):
         log.exception("Failed copying a file into the group")
         await msg.reply_text("I couldn't add that file to the group. Check that I'm still an admin there.")
         return
-    await index_file(up["thread_id"], sent.message_id, doc.file_id, msg.caption, msg.media_group_id, msg.date)
+    await index_file(up["thread_id"], sent.message_id, file_id, msg.caption, msg.media_group_id, msg.date, kind)
     up["count"] += 1
     up["until"] = time.time() + SESSION_SECONDS
     if not msg.media_group_id or msg.media_group_id != up.get("last_mg"):
@@ -781,15 +777,14 @@ async def send_photos(bot, chat_id: int, query: dict) -> None:
     truncated = len(docs) > MAX_SEND
     docs = docs[:MAX_SEND]
 
-    # Albums hold up to 10 items and share ONE caption, so only files with the same
-    # date and location go in the same album (otherwise the caption would be wrong).
+    # Albums hold up to 10 items and share ONE caption, so only items with the same date,
+    # location and type go in the same album (photos and files can't be mixed in one album).
+    def album_key(d: dict):
+        return (d["date"], d.get("loc_id"), d.get("kind", "document"))
+
     groups: list[list[dict]] = []
     for d in docs:
-        same = (
-            groups
-            and len(groups[-1]) < 10
-            and (groups[-1][0]["date"], groups[-1][0].get("loc_id")) == (d["date"], d.get("loc_id"))
-        )
+        same = groups and len(groups[-1]) < 10 and album_key(groups[-1][0]) == album_key(d)
         if same:
             groups[-1].append(d)
         else:
@@ -799,17 +794,19 @@ async def send_photos(bot, chat_id: int, query: dict) -> None:
     for group in groups:
         first = group[0]
         caption = pretty_date(first["date"]) + (f" · {first['location']}" if first.get("location") else "")
-        await bot.send_chat_action(chat_id, ChatAction.UPLOAD_DOCUMENT)
+        is_photo = first.get("kind") == "photo"
+        await bot.send_chat_action(chat_id, ChatAction.UPLOAD_PHOTO if is_photo else ChatAction.UPLOAD_DOCUMENT)
         try:
             if len(group) == 1:
+                send_one = bot.send_photo if is_photo else bot.send_document
+                arg = {"photo": first["file_id"]} if is_photo else {"document": first["file_id"]}
                 await send_with_retry(
-                    lambda: bot.send_document(
-                        chat_id, first["file_id"], caption=caption, protect_content=PROTECT_CONTENT
-                    )
+                    lambda: send_one(chat_id, caption=caption, protect_content=PROTECT_CONTENT, **arg)
                 )
             else:
+                media_cls = InputMediaPhoto if is_photo else InputMediaDocument
                 media = [
-                    InputMediaDocument(media=d["file_id"], caption=caption if j == 0 else None)
+                    media_cls(media=d["file_id"], caption=caption if j == 0 else None)
                     for j, d in enumerate(group)
                 ]
                 await send_with_retry(
@@ -1125,8 +1122,8 @@ async def on_admin_button(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             "last_mg": None, "until": time.time() + SESSION_SECONDS,
         }
         await show(
-            f"📤 Ready for the {fam['name']} family. Send the photos as Files (full quality). "
-            "A caption like “2026-07-04 | Central Park” sets the date and place. "
+            f"📤 Ready for the {fam['name']} family. Send the photos (or send them as Files to keep "
+            "the full quality). A caption like “2026-07-04 | Central Park” sets the date and place. "
             "Tap Done (or send /done) when you're finished.",
             one_button("✅ Done", "a:done"),
         )
