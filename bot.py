@@ -15,6 +15,7 @@ Group commands (group admins only, nobody gets "marked" as an admin by the bot):
     /register LastName   inside a topic: makes the family and replies with its 6-digit code
     /code                inside a topic: shows the family's code again
     /members             inside a topic: lists the people linked to that family
+    /announce            (private, owner only) message everyone or one family
     /connect, /unlink    (private, owner only) browse a family like its clients; leave again
     /unlink FirstName    inside a topic: unlinks a person (or /unlink <telegram id>)
     /remove              reply to a photo: asks "are you sure", then deletes that exact photo
@@ -135,7 +136,7 @@ def parse_caption(caption: str | None, default_date: str) -> tuple[str, str | No
 def parse_date_answer(text: str) -> str | None:
     """'today' / 'yesterday' / '2026-07-04' -> 'YYYY-MM-DD'; None if it isn't a usable date."""
     t = " ".join(text.strip().casefold().replace("'", "").replace("’", "").split())
-    if t in ("unknown", "no date", "nodate", "idk", "dont know", "i dont know", "dunno", "not sure", "skip"):
+    if t in UNKNOWN_WORDS:
         return UNKNOWN_DATE
     today = datetime.now(TZ).date()
     if t == "today":
@@ -508,6 +509,8 @@ async def on_group_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     file_id, kind = media_of(msg)
     if not file_id:
         return
+    if await db.families.find_one({"sug_thread_id": msg.message_thread_id}):
+        return  # a family's suggestions topic: photos there are only waiting for approval
     await index_file(
         msg.message_thread_id, msg.message_id, file_id, msg.caption, msg.media_group_id, msg.date, kind
     )
@@ -532,6 +535,10 @@ def menu_markup(extra: list | None = None) -> InlineKeyboardMarkup:
                 InlineKeyboardButton("📍 By location", callback_data="l:0"),
             ],
             [InlineKeyboardButton("🖼 All photos", callback_data="all")],
+            [
+                InlineKeyboardButton("➕ Suggest photos", callback_data="sg:new"),
+                InlineKeyboardButton("💡 Family suggestions", callback_data="sg:gal"),
+            ],
         ]
     )
 
@@ -558,14 +565,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if lock:
         await update.message.reply_text(lock_text(lock))
         return
-    context.user_data.pop("up", None)
-    context.user_data.pop("adm", None)
+    for k in ("up", "adm", "sug"):
+        context.user_data.pop(k, None)
     context.user_data["link"] = {"stage": "first"}
     await update.message.reply_text("Hi! 👋 Let's get you to your photos. What's your first name?")
 
 
 async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """/gallery and /menu: open the gallery."""
+    context.user_data.pop("sug", None)
     if await my_thread(context, update.effective_user.id):
         await update.message.reply_text("What would you like to see?", reply_markup=menu_markup())
     elif is_owner(update.effective_user.id):
@@ -780,6 +788,14 @@ async def handle_upload_step(update: Update, context: ContextTypes.DEFAULT_TYPE,
 
 async def on_private_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     msg = update.message
+    sug, sug_expired = get_sug(context)
+    if sug_expired:
+        if once(context, f"sugexp:{msg.media_group_id or msg.message_id}"):
+            await msg.reply_text("That suggestion timed out. Tap ➕ Suggest photos to start again.", reply_markup=menu_markup())
+        return
+    if sug:
+        await handle_sug_media(update, context, sug)
+        return
     up, expired = get_session(context)
     if expired:
         await msg.reply_text("That upload session timed out. Send /addphotos to start again.")
@@ -846,6 +862,13 @@ async def on_private_text(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if up:
         await handle_upload_step(update, context, up)
         return
+    sug, sug_expired = get_sug(context)
+    if sug_expired:
+        await msg.reply_text("That suggestion timed out. Tap ➕ Suggest photos to start again.", reply_markup=menu_markup())
+        return
+    if sug:
+        await handle_sug_step(update, context, sug)
+        return
     adm = context.user_data.get("adm")
     if adm and is_owner(update.effective_user.id):
         await handle_admin_text(update, context, adm)
@@ -892,7 +915,7 @@ async def send_photos(bot, chat_id: int, query: dict) -> None:
     # Albums hold up to 10 items and share ONE caption, so only items with the same date,
     # location and type go in the same album (photos and files can't be mixed in one album).
     def album_key(d: dict):
-        return (d["date"], d.get("loc_id"), d.get("kind", "document"))
+        return (d["date"], d.get("loc_id"), d.get("kind", "document"), d.get("by"))
 
     groups: list[list[dict]] = []
     for d in docs:
@@ -906,7 +929,11 @@ async def send_photos(bot, chat_id: int, query: dict) -> None:
     sent_ids: list[int] = []
     for group in groups:
         first = group[0]
-        caption = pretty_date(first["date"]) + (f" · {first['location']}" if first.get("location") else "")
+        caption = (
+            pretty_date(first["date"])
+            + (f" · {first['location']}" if first.get("location") else "")
+            + (f" · Added by {first['by']}" if first.get("by") else "")
+        )
         is_photo = first.get("kind") == "photo"
         await bot.send_chat_action(chat_id, ChatAction.UPLOAD_PHOTO if is_photo else ChatAction.UPLOAD_DOCUMENT)
         try:
@@ -972,7 +999,42 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             pass  # e.g. "message is not modified"
 
     if data == "menu":
+        context.user_data.pop("sug", None)
         await show("What would you like to see?", menu_markup())
+
+    elif data == "sg:new":  # start suggesting photos
+        for k in ("up", "adm", "link"):
+            context.user_data.pop(k, None)
+        context.user_data["sug"] = {
+            "stage": "place", "items": [], "thread_id": thread_id, "until": time.time() + SESSION_SECONDS,
+        }
+        await show("💡 Suggest photos for your family's gallery.\n\n" + ASK_SUG_PLACE, one_button("Cancel", "menu"))
+
+    elif data == "sg:send":  # send the suggestion to the photographer for approval
+        sug, expired = get_sug(context)
+        if not sug or sug["stage"] != "files" or not sug["items"]:
+            if not sug:
+                note = "That suggestion timed out. Tap ➕ Suggest photos to start again."
+            elif sug["stage"] != "files":
+                note = "Please answer my question first, then send the photos."
+            else:
+                note = "Nothing to send yet. Send at least one photo first."
+            await q.message.reply_text(note, reply_markup=menu_markup() if not sug else sug_files_markup())
+            return
+        user_doc = await db.users.find_one({"_id": q.from_user.id})
+        problem = await submit_suggestion(context, q.from_user, user_doc, sug)
+        if problem:
+            await show(problem, sug_files_markup())
+            return
+        context.user_data.pop("sug", None)
+        await show(
+            f"✅ Sent {len(sug['items'])} photo(s) to the photographer for approval. "
+            "I'll message you when they're added.",
+            menu_markup(),
+        )
+
+    elif data == "sg:gal":  # the family-suggestions gallery
+        await send_photos(context.bot, chat_id, {"thread_id": thread_id, "sug": True})
 
     elif data.startswith("x:"):  # 🧹 hide the photos I sent into this chat
         doc = await db.sent.find_one({"_id": f"{chat_id}:{data[2:]}"})
@@ -1031,6 +1093,425 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await send_photos(context.bot, chat_id, {"thread_id": thread_id})
 
 
+# ---------- photo suggestions: clients suggest, the owner approves ----------
+
+SUG_MAX_ITEMS = 30
+UNKNOWN_WORDS = {"unknown", "no date", "nodate", "idk", "dont know", "i dont know", "dunno", "not sure", "skip"}
+ASK_SUG_PLACE = "📍 Where were they taken? Type the place, or type unknown if you don't know."
+ASK_SUG_OTHER = (
+    "👪 Are other families in these photos too? Type their last names separated by commas "
+    "(for example: Novak, Smith), or type no."
+)
+
+
+def clean_words(text: str) -> str:
+    return " ".join(text.strip().casefold().replace("'", "").replace("’", "").split())
+
+
+def sug_name(user_doc, user) -> str:
+    return (user_doc or {}).get("first_name") or getattr(user, "first_name", None) or "Guest"
+
+
+def get_sug(context: ContextTypes.DEFAULT_TYPE):
+    """Returns (suggestion-in-progress or None, expired?). Lives in memory only."""
+    sug = context.user_data.get("sug")
+    if sug and sug["until"] < time.time():
+        context.user_data.pop("sug", None)
+        return None, True
+    return sug, False
+
+
+def sug_buttons(has_others: bool, sid: str) -> InlineKeyboardMarkup:
+    rows = []
+    if has_others:
+        rows.append([InlineKeyboardButton("✅ Approve for all families listed", callback_data=f"sa:y:{sid}")])
+        rows.append([InlineKeyboardButton("✅ Approve for their own family only", callback_data=f"sa:o:{sid}")])
+    else:
+        rows.append([InlineKeyboardButton("✅ Approve", callback_data=f"sa:y:{sid}")])
+    rows.append([InlineKeyboardButton("❌ Reject", callback_data=f"sa:n:{sid}")])
+    return InlineKeyboardMarkup(rows)
+
+
+def sug_files_markup() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("✅ Send for approval", callback_data="sg:send")],
+            [InlineKeyboardButton("Cancel", callback_data="menu")],
+        ]
+    )
+
+
+def kind_chunks(items: list[dict]) -> list[list[dict]]:
+    """Groups of up to 10 of the same type (photos and files can't share an album)."""
+    out: list[list[dict]] = []
+    for it in items:
+        if out and len(out[-1]) < 10 and out[-1][0]["kind"] == it["kind"]:
+            out[-1].append(it)
+        else:
+            out.append([it])
+    return out
+
+
+async def handle_sug_step(update: Update, context: ContextTypes.DEFAULT_TYPE, sug: dict) -> None:
+    """The client typed text while suggesting photos."""
+    msg = update.message
+    text = (msg.text or "").strip()
+    stage = sug["stage"]
+    sug["until"] = time.time() + SESSION_SECONDS
+
+    if stage == "place":
+        if not text:
+            await msg.reply_text(ASK_SUG_PLACE)
+            return
+        sug["place"] = None if clean_words(text) in UNKNOWN_WORDS else " ".join(text.split())[:80]
+        sug["stage"] = "date"
+        await msg.reply_text(ASK_DATE)
+
+    elif stage == "date":
+        day = parse_date_answer(text)
+        if not day:
+            await msg.reply_text("I couldn't read that date. " + ASK_DATE)
+            return
+        sug["date"] = day
+        sug["stage"] = "other"
+        await msg.reply_text(ASK_SUG_OTHER)
+
+    elif stage == "other":
+        others, unmatched = [], []
+        if clean_words(text) not in ("no", "none", "nope", "n", "nobody", "-"):
+            own = await db.families.find_one({"thread_id": sug["thread_id"]})
+            for raw in re.split(r"[,\n;]| and ", text):
+                name = " ".join(raw.split())
+                if not normalize(name):
+                    continue
+                found = await db.families.find({"key": normalize(name)}).to_list()
+                if len(found) == 1 and found[0]["thread_id"] != sug["thread_id"] and own:
+                    if found[0]["thread_id"] not in others:
+                        others.append(found[0]["thread_id"])
+                elif len(found) == 1:
+                    continue  # that's their own family, nothing to add
+                else:
+                    unmatched.append(name)
+        sug.update(others=others, unmatched=unmatched, stage="files")
+        typed = ", ".join(" ".join(r.split()) for r in re.split(r"[,\n;]| and ", text) if normalize(r))
+        # Don't confirm which families exist: the photographer sees the matches when approving.
+        note = f"Noted other families: {typed}.\n" if others or unmatched else ""
+        await msg.reply_text(
+            note + "Now send your photos (or send them as Files to keep the full quality). "
+            "Then tap Send for approval.",
+            reply_markup=sug_files_markup(),
+        )
+
+    else:  # files stage but they typed text
+        await msg.reply_text("Send your photos, then tap Send for approval.", reply_markup=sug_files_markup())
+
+
+async def handle_sug_media(update: Update, context: ContextTypes.DEFAULT_TYPE, sug: dict) -> None:
+    msg = update.message
+    sug["until"] = time.time() + SESSION_SECONDS
+    key = msg.media_group_id or msg.message_id
+    if sug["stage"] != "files":
+        if once(context, f"sugearly:{key}"):
+            await msg.reply_text("Not yet. Please answer my question first, then send the photos again.")
+        return
+    file_id, kind = media_of(msg)
+    if not file_id:
+        if once(context, f"sugskip:{key}"):
+            await msg.reply_text("I only take photos and image files. That one was skipped.")
+        return
+    if len(sug["items"]) >= SUG_MAX_ITEMS:
+        if once(context, f"sugmax:{key}"):
+            await msg.reply_text(
+                f"That's the most I can take in one go ({SUG_MAX_ITEMS}). Tap Send for approval.",
+                reply_markup=sug_files_markup(),
+            )
+        return
+    sug["items"].append({"file_id": file_id, "kind": kind})
+    if once(context, f"sugok:{key}"):
+        await msg.reply_text("📥 Got it. Send more, or tap Send for approval.", reply_markup=sug_files_markup())
+
+
+async def ensure_sug_topic(bot, fam: dict, force_new: bool = False) -> int:
+    """The family's 💡 suggestions topic in the group (made the first time it's needed)."""
+    if fam.get("sug_thread_id") and not force_new:
+        return fam["sug_thread_id"]
+    topic = await bot.create_forum_topic(GROUP_ID, f"💡 {fam['name']} suggestions")
+    await db.families.update_one(
+        {"thread_id": fam["thread_id"]}, {"$set": {"sug_thread_id": topic.message_thread_id}}
+    )
+    fam["sug_thread_id"] = topic.message_thread_id
+    return topic.message_thread_id
+
+
+async def post_items(bot, tid: int, items: list[dict], ids: list[int]) -> None:
+    """Posts photos/files into a topic (albums of up to 10). The new message ids are added to `ids`
+    as they go, so the caller can clean up if something fails halfway."""
+    for chunk in kind_chunks(items):
+        is_photo = chunk[0]["kind"] == "photo"
+        if len(chunk) == 1:
+            send_one = bot.send_photo if is_photo else bot.send_document
+            arg = {"photo": chunk[0]["file_id"]} if is_photo else {"document": chunk[0]["file_id"]}
+            res = await send_with_retry(lambda: send_one(GROUP_ID, message_thread_id=tid, **arg))
+            ids.append(res.message_id)
+        else:
+            cls = InputMediaPhoto if is_photo else InputMediaDocument
+            media = [cls(media=d["file_id"]) for d in chunk]
+            res = await send_with_retry(lambda: bot.send_media_group(GROUP_ID, media, message_thread_id=tid))
+            ids.extend(m.message_id for m in (res or []))
+        await asyncio.sleep(1.2)
+
+
+async def delete_ids(bot, ids: list[int]) -> bool:
+    ok = True
+    for i in range(0, len(ids), 100):
+        try:
+            await bot.delete_messages(GROUP_ID, ids[i : i + 100])
+        except TelegramError:
+            ok = False
+    return ok
+
+
+async def submit_suggestion(context: ContextTypes.DEFAULT_TYPE, user, user_doc, sug: dict) -> str | None:
+    """Posts the suggestion to the family's suggestions topic with Approve/Reject buttons.
+    Returns an error text for the client, or None when it worked."""
+    bot = context.bot
+    fam = await db.families.find_one({"thread_id": sug["thread_id"]})
+    if not fam:
+        return "That family no longer exists."
+    if not GROUP_ID:
+        return "Suggestions aren't set up yet. Please tell the photographer."
+    name = sug_name(user_doc, user)
+    sid = secrets.token_hex(5)
+    board: list[int] = []
+    sug_tid = None
+    for attempt in (1, 2):
+        try:
+            sug_tid = await ensure_sug_topic(bot, fam, force_new=attempt == 2)
+            await post_items(bot, sug_tid, sug["items"], board)
+            break
+        except (TimedOut, NetworkError):
+            log.warning("Timed out posting a suggestion")
+            await delete_ids(bot, board)
+            board = []
+            return "Telegram was too slow. Please tap Send for approval again in a moment."
+        except (TelegramError, RuntimeError) as e:
+            log.exception("Couldn't post a suggestion")
+            await delete_ids(bot, board)
+            board = []
+            if attempt == 1 and "thread" in (getattr(e, "message", "") or str(e)).lower():
+                continue  # the topic was deleted by hand: make a new one and retry once
+            return "I couldn't send that to the photographer. Please try again later."
+    others = await db.families.find({"thread_id": {"$in": sug.get("others", [])}}).to_list()
+    place, day = sug.get("place"), sug["date"]
+    lines = [
+        f"💡 Photo suggestion from {name} ({fam['name']} family)",
+        f"Photos: {len(sug['items'])}",
+        f"Place: {place or 'unknown'}",
+        f"Date: {pretty_date(day)}",
+    ]
+    if others:
+        lines.append("Other families in the photos: " + ", ".join(f["name"] for f in others))
+    if sug.get("unmatched"):
+        lines.append("Names I couldn't match: " + ", ".join(sug["unmatched"]))
+    try:
+        prompt = await bot.send_message(
+            GROUP_ID, "\n".join(lines), message_thread_id=sug_tid,
+            reply_markup=sug_buttons(bool(others), sid),
+        )
+    except TelegramError:
+        log.exception("Couldn't post the approval buttons")
+        await delete_ids(bot, board)
+        return "I couldn't send that to the photographer. Please try again later."
+    await db.suggestions.update_one(
+        {"_id": sid},
+        {"$set": {
+            "status": "pending", "from_id": user.id, "from_name": name, "thread_id": sug["thread_id"],
+            "others": [f["thread_id"] for f in others], "place": place, "date": day,
+            "items": sug["items"], "board_ids": board, "prompt_id": prompt.message_id,
+            "done": [], "created": datetime.now(timezone.utc),
+        }},
+        upsert=True,
+    )
+    if OWNER_ID:
+        try:
+            await bot.send_message(
+                OWNER_ID,
+                f"💡 {name} ({fam['name']} family) suggested {len(sug['items'])} photo(s). "
+                f"Open the “{fam['name']} suggestions” topic in the group to approve or reject.",
+            )
+        except TelegramError:
+            pass  # the owner may not have opened the bot yet; the topic still has the buttons
+    return None
+
+
+async def on_suggestion_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Owner taps Approve / Reject under a suggestion in the group."""
+    q = update.callback_query
+    if not is_owner(q.from_user.id):
+        await q.answer("Only the photographer can do this.", show_alert=True)
+        return
+    await q.answer()
+    _, action, sid = q.data.split(":")
+    bot = context.bot
+    doc = await db.suggestions.find_one({"_id": sid})
+
+    async def edit(text: str, markup=None) -> None:
+        try:
+            await q.edit_message_text(text, reply_markup=markup)
+        except TelegramError:
+            pass
+
+    if not doc or doc.get("status") != "pending":
+        await edit("This suggestion was already handled.")
+        return
+    name = doc["from_name"]
+
+    async def tell_client(text: str) -> None:
+        try:
+            await bot.send_message(doc["from_id"], text)
+        except TelegramError:
+            pass  # they may have blocked the bot
+
+    if action == "n":
+        await delete_ids(bot, doc.get("board_ids", []))
+        await db.suggestions.update_one({"_id": sid}, {"$set": {"status": "rejected"}})
+        await edit(f"❌ Rejected: {len(doc['items'])} photo(s) from {name}.")
+        await tell_client("Thanks for the suggestion! The photographer didn't add those photos this time.")
+        return
+
+    targets = [doc["thread_id"]] + (doc.get("others", []) if action == "y" else [])
+    done = set(doc.get("done", []))
+    day, place = doc["date"], doc.get("place")
+    caption = pretty_date(day) + (f" · {place}" if place else "") + f" · Added by {name}"
+    chunks = kind_chunks(doc["items"])  # albums of up to 10 keep Telegram's per-minute limit happy
+    added_to, failed, timed_out = [], False, False
+    for tid in targets:
+        fam = await db.families.find_one({"thread_id": tid})
+        if not fam:
+            continue
+        for ci, chunk in enumerate(chunks):
+            key = f"{tid}:{ci}"
+            if key in done:
+                continue
+            is_photo = chunk[0]["kind"] == "photo"
+            try:
+                if len(chunk) == 1:
+                    send_one = bot.send_photo if is_photo else bot.send_document
+                    arg = {"photo": chunk[0]["file_id"]} if is_photo else {"document": chunk[0]["file_id"]}
+                    res = await send_with_retry(
+                        lambda: send_one(GROUP_ID, message_thread_id=tid, caption=caption, **arg)
+                    )
+                    sent_msgs = [res]
+                else:
+                    cls = InputMediaPhoto if is_photo else InputMediaDocument
+                    media = [
+                        cls(media=d["file_id"], caption=caption if j == 0 else None)
+                        for j, d in enumerate(chunk)
+                    ]
+                    res = await send_with_retry(
+                        lambda: bot.send_media_group(GROUP_ID, media, message_thread_id=tid)
+                    )
+                    sent_msgs = list(res or [])
+            except (TimedOut, NetworkError):
+                log.warning("Timed out adding a suggested photo")
+                failed = timed_out = True
+                break
+            except (TelegramError, RuntimeError):
+                log.exception("Couldn't add a suggested photo")
+                failed = True
+                break
+            for it, sm in zip(chunk, sent_msgs):
+                await db.photos.update_one(
+                    {"message_id": sm.message_id},
+                    {
+                        "$set": {
+                            "thread_id": tid, "file_id": it["file_id"], "kind": it["kind"],
+                            "media_group_id": None, "date": day, "location": place, "loc_id": loc_id(place),
+                            "has_caption": True, "by": name, "by_id": doc["from_id"], "sug": True,
+                        },
+                        "$setOnInsert": {"added": datetime.now(timezone.utc)},
+                    },
+                    upsert=True,
+                )
+            done.add(key)
+            await db.suggestions.update_one({"_id": sid}, {"$set": {"done": sorted(done)}})
+        if failed:
+            break
+        added_to.append(fam["name"])
+    if failed:
+        await edit(
+            f"⚠️ I couldn't add everything from {name}. Nothing was deleted from this topic."
+            + (" Telegram timed out, so the last batch may have gone through: check the family topic for "
+               "a doubled batch after you retry." if timed_out else "")
+            + "\nTap the same button again to continue where I stopped.",
+            sug_buttons(bool(doc.get("others")), sid),
+        )
+        return
+    await delete_ids(bot, doc.get("board_ids", []))
+    await db.suggestions.update_one({"_id": sid}, {"$set": {"status": "approved"}})
+    await edit(
+        f"✅ Approved: {len(doc['items'])} photo(s) from {name}, added to "
+        + (", ".join(added_to) or "no family")
+        + "."
+    )
+    await tell_client("🎉 Your suggested photos were added to the gallery. Thank you!")
+
+
+# ---------- announcements (owner only) ----------
+
+ANN_MAX = 3500
+
+
+async def ann_recipients(aud: str) -> list[int]:
+    q = {} if aud == "all" else {"thread_id": int(aud)}
+    return [u["_id"] for u in await db.users.find(q).to_list()]
+
+
+async def ann_audience_name(aud: str) -> str:
+    if aud == "all":
+        return "everyone"
+    fam = await db.families.find_one({"thread_id": int(aud)})
+    return f"the {fam['name']} family" if fam else "that family"
+
+
+async def ann_picker(page: int):
+    fams = await db.families.find().sort("name", 1).to_list()
+    items = [("📣 Everyone (all families)", "a:ana:all")] + [(f"{f['name']}", f"a:ana:{f['thread_id']}") for f in fams]
+    return admin_pager(items, page, "a:an", "a:home")
+
+
+async def handle_announce_text(update: Update, context: ContextTypes.DEFAULT_TYPE, adm: dict) -> None:
+    msg = update.message
+    text = (msg.text or "").strip()
+    if not text:
+        await msg.reply_text("Please type the announcement.")
+        return
+    if len(text) > ANN_MAX:
+        await msg.reply_text(f"That's too long ({len(text)} characters). Please keep it under {ANN_MAX}.")
+        return
+    people = await ann_recipients(adm["aud"])
+    adm.update(stage="ann_ok", text=text)
+    await msg.reply_text(
+        f"📣 Preview (this goes to {len(people)} {'person' if len(people) == 1 else 'people'} in "
+        f"{await ann_audience_name(adm['aud'])}):\n\n{text}",
+        reply_markup=InlineKeyboardMarkup(
+            [
+                [_btn(f"✅ Send to {len(people)}", "a:ans")],
+                [_btn("✏️ Rewrite", f"a:ana:{adm['aud']}"), _btn("Cancel", "a:home")],
+            ]
+        ),
+    )
+
+
+async def announce_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_owner(update.effective_user.id):
+        await update.message.reply_text("That command isn't available.")
+        return
+    for k in ("up", "link", "adm", "sug"):
+        context.user_data.pop(k, None)
+    await update.message.reply_text("📣 Who should get the announcement?", reply_markup=await ann_picker(0))
+
+
 # ---------- owner admin panel (/admin) ----------
 # Only the Telegram ID in OWNER_ID can use any of this. Nothing about the owner is saved.
 
@@ -1043,7 +1524,7 @@ def admin_home_markup() -> InlineKeyboardMarkup:
         [
             [_btn("📋 Families", "a:fl:0"), _btn("➕ Add family", "a:add")],
             [_btn("📤 Add photos", "a:ph:0"), _btn("🗑 Remove photos", "a:rm:0")],
-            [_btn("📊 Stats", "a:stats")],
+            [_btn("📣 Announce", "a:an:0"), _btn("📊 Stats", "a:stats")],
         ]
     )
 
@@ -1151,7 +1632,10 @@ async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE, adm: dict) -> None:
-    """The owner typed a last name after tapping 'Add family'."""
+    """The owner typed text: an announcement, or a last name after tapping 'Add family'."""
+    if adm.get("stage") in ("ann", "ann_ok"):
+        await handle_announce_text(update, context, adm)
+        return
     msg = update.message
     name = " ".join((msg.text or "").split())[:60]
     if not normalize(name):
@@ -1224,6 +1708,55 @@ async def on_admin_button(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if action == "home":
         context.user_data.pop("adm", None)
         await show("👑 Admin panel", admin_home_markup())
+
+    elif action == "an":  # announcement: who gets it?
+        context.user_data.pop("adm", None)
+        await show("📣 Who should get the announcement?", await ann_picker(int(parts[2])))
+
+    elif action == "ana":  # audience picked: ask for the text
+        aud = parts[2]
+        if aud != "all" and not await need_family(int(aud)):
+            return
+        people = await ann_recipients(aud)
+        if not people:
+            await show(
+                f"Nobody is linked in {await ann_audience_name(aud)} yet, so there's no one to message.",
+                one_button("⬅️ Back", "a:an:0"),
+            )
+            return
+        for k in ("up", "link", "sug"):
+            context.user_data.pop(k, None)
+        context.user_data["adm"] = {"stage": "ann", "aud": aud}
+        await show(
+            f"📣 Type your announcement. It goes to {len(people)} {'person' if len(people) == 1 else 'people'} "
+            f"in {await ann_audience_name(aud)} as a private message from the bot. I'll show a preview first.",
+            one_button("Cancel", "a:home"),
+        )
+
+    elif action == "ans":  # send it
+        adm = context.user_data.get("adm")
+        if not adm or adm.get("stage") != "ann_ok":
+            await show("There's nothing to send. Start again from the admin panel.", one_button("⬅️ Admin panel", "a:home"))
+            return
+        context.user_data.pop("adm", None)
+        people = await ann_recipients(adm["aud"])
+        sent = failed = 0
+        for uid in people:
+            try:
+                await send_with_retry(
+                    lambda: context.bot.send_message(uid, "📣 Announcement\n\n" + adm["text"]),
+                    retry_timeouts=True,
+                )
+                sent += 1
+            except (TelegramError, RuntimeError):
+                failed += 1  # e.g. they blocked the bot
+            await asyncio.sleep(0.05)
+        log.info("Owner sent an announcement to %s of %s", sent, len(people))
+        await show(
+            f"✅ Sent to {sent} of {len(people)}."
+            + (f" {failed} couldn't be reached (they may have blocked the bot)." if failed else ""),
+            one_button("⬅️ Admin panel", "a:home"),
+        )
 
     elif action == "cn":  # owner: pick a family to browse like a client
         markup, empty = await family_picker(int(parts[2]), "a:cn", "a:cnf:{tid}")
@@ -1419,8 +1952,14 @@ async def on_admin_button(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                     one_button("⬅️ Back", f"a:f:{tid}"),
                 )
                 return
+        if action == "dfd" and fam.get("sug_thread_id"):
+            try:
+                await context.bot.delete_forum_topic(GROUP_ID, fam["sug_thread_id"])
+            except TelegramError:
+                log.warning("Couldn't delete the suggestions topic of %s", fam["name"])
         await db.users.delete_many({"thread_id": tid})
         await db.photos.delete_many({"thread_id": tid})
+        await db.suggestions.delete_many({"thread_id": tid})
         await db.families.delete_one({"thread_id": tid})
         log.info("Owner deleted family %s (topic deleted: %s)", fam["name"], action == "dfd")
         await show(
@@ -1509,6 +2048,7 @@ def main() -> None:
         app.add_handler(CommandHandler("remove", remove_cmd, filters=grp))
         app.add_handler(MessageHandler(grp & (filters.PHOTO | filters.Document.IMAGE), on_group_media))
         app.add_handler(CallbackQueryHandler(on_remove_button, pattern=r"^rm:(y|n):\d+$"))
+        app.add_handler(CallbackQueryHandler(on_suggestion_button, pattern=r"^sa:(y|o|n):[0-9a-f]{10}$"))
     else:
         log.warning("GROUP_ID is not set: send /id in your group, then put it in the environment.")
 
@@ -1516,6 +2056,7 @@ def main() -> None:
     app.add_handler(CommandHandler("start", start, filters=priv))
     app.add_handler(CommandHandler(["menu", "gallery"], menu, filters=priv))
     app.add_handler(CommandHandler("connect", connect_cmd, filters=priv))
+    app.add_handler(CommandHandler("announce", announce_cmd, filters=priv))
     app.add_handler(CommandHandler("unlink", unlink_private, filters=priv))
     app.add_handler(CommandHandler("admin", admin_cmd, filters=priv))
     app.add_handler(CommandHandler("addphotos", addphotos, filters=priv))
@@ -1524,7 +2065,7 @@ def main() -> None:
     app.add_handler(MessageHandler(priv & (filters.PHOTO | filters.Document.ALL | filters.VIDEO), on_private_media))
     app.add_handler(CallbackQueryHandler(on_admin_button, pattern=r"^a:"))
     app.add_handler(
-        CallbackQueryHandler(on_button, pattern=r"^(menu|all|d:\d+|l:\d+|D:\d{4}-\d{2}-\d{2}|L:[0-9a-f]{10}|L:none|x:\d+)$")
+        CallbackQueryHandler(on_button, pattern=r"^(menu|all|d:\d+|l:\d+|D:\d{4}-\d{2}-\d{2}|L:[0-9a-f]{10}|L:none|x:\d+|sg:(new|send|gal))$")
     )
     app.add_error_handler(on_error)
 
