@@ -117,7 +117,7 @@ def normalize(text: str) -> str:
 
 
 UNKNOWN_DATE = "0000-00-00"  # stored for photos whose date nobody knows; sorts last, shown as "No date"
-CAPTION_RE = re.compile(r"^\s*(\d{4}-\d{2}-\d{2}|no date)\s*(?:[|,\-–]\s*)?(.*)$", re.S | re.I)
+CAPTION_RE = re.compile(r"^\s*(\d{4}-\d{2}-\d{2}|no date)(?!\w)\s*(?:[|,\-–]\s*)?(.*)$", re.S | re.I)
 
 
 def parse_caption(caption: str | None, default_date: str) -> tuple[str, str | None]:
@@ -329,7 +329,8 @@ async def index_file(
 
 def once(context: ContextTypes.DEFAULT_TYPE, key: str) -> bool:
     """True the first time a key is seen (so an album of 20 files only gets one reply)."""
-    seen = context.bot_data.setdefault("once", [])
+    store = context.user_data if context.user_data is not None else context.bot_data  # per person
+    seen = store.setdefault("once", [])
     if key in seen:
         return False
     seen.append(key)
@@ -362,6 +363,9 @@ async def register(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await msg.reply_text("Usage: /register LastName  (send it inside the family's topic)")
         return
     thread_id = msg.message_thread_id
+    if await db.families.find_one({"sug_thread_id": thread_id}):
+        await msg.reply_text("This is a suggestions topic, so it can't be a family. Use the family's own topic.")
+        return
     existing = await db.families.find_one({"thread_id": thread_id})
     code = existing["code"] if existing else await new_code()
     await db.families.update_one(
@@ -400,6 +404,16 @@ async def code_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await msg.reply_text(f"{fam['name']} family code: {fam['code']}")
 
 
+async def reply_long(msg, text: str) -> None:
+    """Telegram messages are limited to 4096 characters; split long lists on line breaks."""
+    while len(text) > 4000:
+        cut = text.rfind("\n", 0, 4000)
+        cut = cut if cut > 0 else 4000
+        await msg.reply_text(text[:cut])
+        text = text[cut:].lstrip("\n")
+    await msg.reply_text(text)
+
+
 @admin_only
 async def members(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     msg = update.effective_message
@@ -414,7 +428,7 @@ async def members(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"• {p['first_name']} (id {p['_id']}" + (f", @{p['username']}" if p.get("username") else "") + ")"
         for p in people
     ]
-    await msg.reply_text(f"{fam['name']} family members:\n" + "\n".join(lines))
+    await reply_long(msg, f"{fam['name']} family members:\n" + "\n".join(lines))
 
 
 @admin_only
@@ -457,7 +471,7 @@ async def families(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     cursor = await db.photos.aggregate([{"$group": {"_id": "$thread_id", "n": {"$sum": 1}}}])
     counts = {d["_id"]: d["n"] for d in await cursor.to_list()}
     lines = [f"• {f['name']}: code {f['code']}, {counts.get(f['thread_id'], 0)} file(s)" for f in fams]
-    await msg.reply_text("Families:\n" + "\n".join(lines))
+    await reply_long(msg, "Families:\n" + "\n".join(lines))
 
 
 @admin_only
@@ -495,6 +509,10 @@ async def on_remove_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     try:
         await context.bot.delete_message(q.message.chat_id, message_id)
     except TelegramError as e:
+        if "not found" in (getattr(e, "message", "") or str(e)).lower():  # already gone from the group
+            await db.photos.delete_one({"message_id": message_id})
+            await q.edit_message_text("That photo was already deleted in the group. I removed it from the list too.")
+            return
         await q.edit_message_text(
             f"I couldn't delete it ({e.message}). Make sure I'm an admin with the "
             "“Delete messages” right, and that the photo is less than 48 hours old or I'm an admin."
@@ -569,8 +587,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if lock:
         await update.message.reply_text(lock_text(lock))
         return
-    for k in ("up", "adm", "sug"):
-        context.user_data.pop(k, None)
+    clear_flows(context)
     if not is_owner(user.id):
         await record_try(user, "started, didn't finish", keep_existing=True)
     context.user_data["link"] = {"stage": "first"}
@@ -595,8 +612,7 @@ async def connect_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if not is_owner(update.effective_user.id):
         await update.message.reply_text("That command isn't available. Send /start to link your account.")
         return
-    for k in ("up", "link", "adm"):
-        context.user_data.pop(k, None)
+    clear_flows(context)
     markup, empty = await family_picker(0, "a:cn", "a:cnf:{tid}")
     await update.message.reply_text(
         "No families yet. Open /admin and add one first." if empty else "Which family do you want to browse?",
@@ -643,6 +659,10 @@ async def handle_link_step(update: Update, context: ContextTypes.DEFAULT_TYPE, l
         if lock:
             context.user_data.pop("link", None)
             await msg.reply_text(lock_text(lock))
+            return
+        if await db.users.find_one({"_id": user.id}):  # e.g. the owner added them while they were typing
+            context.user_data.pop("link", None)
+            await msg.reply_text("You're already in a family. Send /gallery to see the photos.", reply_markup=menu_markup())
             return
         code = re.sub(r"\D", "", text)
         fam = None
@@ -693,8 +713,7 @@ async def handle_link_step(update: Update, context: ContextTypes.DEFAULT_TYPE, l
 async def addphotos(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     if is_owner(user.id):  # the owner picks a family from buttons, no password
-        for k in ("up", "link", "adm"):
-            context.user_data.pop(k, None)
+        clear_flows(context)
         markup, empty = await family_picker(0, "a:ph", "a:phf:{tid}")
         await update.message.reply_text(
             "No families yet. Open /admin and add one first." if empty
@@ -709,7 +728,7 @@ async def addphotos(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if lock:
         await update.message.reply_text(lock_text(lock))
         return
-    context.user_data.pop("link", None)
+    clear_flows(context)
     context.user_data["up"] = {"stage": "password", "until": time.time() + SESSION_SECONDS}
     await update.message.reply_text(
         "Please type the password. I'll delete your message right after."
@@ -829,10 +848,17 @@ async def on_private_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if not up or up["stage"] != "files":
         # Not in an upload session. For the owner that usually means the bot restarted (or the
         # session timed out), so say so instead of staying silent. Everyone else is ignored.
-        if is_owner(update.effective_user.id) and once(context, f"noup:{msg.media_group_id or msg.message_id}"):
+        if is_owner(update.effective_user.id):
+            if once(context, f"noup:{msg.media_group_id or msg.message_id}"):
+                await msg.reply_text(
+                    "No upload is running, so I did not add that. Open /admin → Add photos, "
+                    "pick the family, then send the files."
+                )
+        elif await my_thread(context, update.effective_user.id) and once(context, f"idle:{msg.media_group_id or msg.message_id}"):
             await msg.reply_text(
-                "No upload is running, so I did not add that. Open /admin → Add photos, "
-                "pick the family, then send the files."
+                "I can only take photos when you tap ➕ Suggest photos first (it may have been reset). "
+                "Open the menu with /gallery.",
+                reply_markup=menu_markup(),
             )
         return
     file_id, kind = media_of(msg)
@@ -898,6 +924,8 @@ async def on_private_text(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
     if await my_thread(context, update.effective_user.id):
         await msg.reply_text("Pick what you'd like to see:", reply_markup=menu_markup())
+    elif is_owner(update.effective_user.id):
+        await msg.reply_text("Send /admin for the admin panel, or /connect to browse a family.")
     else:
         await msg.reply_text("Send /start to link your account.")
 
@@ -1001,12 +1029,48 @@ async def send_photos(bot, chat_id: int, query: dict) -> None:
             pass
 
 
+BACKGROUND_SENDS = True  # tests switch this off to wait for the sends
+
+
+async def start_send(context: ContextTypes.DEFAULT_TYPE, chat_id: int, query: dict) -> None:
+    """Sends a gallery without holding up the bot: a big gallery takes minutes (Telegram's limits),
+    and updates are handled one at a time, so doing it inline would freeze everyone else."""
+    sending = context.bot_data.setdefault("sending", set())
+    if chat_id in sending:
+        await context.bot.send_message(chat_id, "I'm still sending your photos. One moment! ⏳")
+        return
+
+    async def run() -> None:
+        try:
+            await send_photos(context.bot, chat_id, query)
+        except Exception:
+            log.exception("Sending a gallery failed")
+            try:
+                await context.bot.send_message(chat_id, "Something went wrong while sending. Please try again.")
+            except TelegramError:
+                pass
+        finally:
+            sending.discard(chat_id)
+
+    sending.add(chat_id)
+    if not BACKGROUND_SENDS:
+        await run()
+        return
+    task = asyncio.create_task(run())
+    tasks = context.bot_data.setdefault("tasks", set())
+    tasks.add(task)  # keep a reference so it isn't garbage-collected mid-send
+    task.add_done_callback(tasks.discard)
+
+
 async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     q = update.callback_query
     await q.answer()
     thread_id = await my_thread(context, q.from_user.id)
     if not thread_id:
-        await q.message.reply_text("Please send /start to link your account first.")
+        await q.message.reply_text(
+            "Send /connect to pick a family to browse." if is_owner(q.from_user.id)
+            else "Please send /start to link your account first."
+        )
         return
     data = q.data
     chat_id = q.message.chat_id
@@ -1021,9 +1085,15 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         context.user_data.pop("sug", None)
         await show("What would you like to see?", menu_markup())
 
+    elif data in ("sg:new", "sg:send") and is_owner(q.from_user.id):
+        await show(
+            "Suggestions are for clients, so this preview doesn't send them (it would save your account). "
+            "You can add photos yourself from /admin → Add photos.",
+            menu_markup(),
+        )
+
     elif data == "sg:new":  # start suggesting photos
-        for k in ("up", "adm", "link"):
-            context.user_data.pop(k, None)
+        clear_flows(context)
         context.user_data["sug"] = {
             "stage": "place", "items": [], "thread_id": thread_id, "until": time.time() + SESSION_SECONDS,
         }
@@ -1053,7 +1123,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
 
     elif data == "sg:gal":  # the family-suggestions gallery
-        await send_photos(context.bot, chat_id, {"thread_id": thread_id, "sug": True})
+        await start_send(context, chat_id, {"thread_id": thread_id, "sug": True})
 
     elif data.startswith("x:"):  # 🧹 hide the photos I sent into this chat
         doc = await db.sent.find_one({"_id": f"{chat_id}:{data[2:]}"})
@@ -1103,13 +1173,13 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await show("Pick a location:", paged_keyboard(items, int(data[2:]), "l"))
 
     elif data.startswith("D:"):
-        await send_photos(context.bot, chat_id, {"thread_id": thread_id, "date": data[2:]})
+        await start_send(context, chat_id, {"thread_id": thread_id, "date": data[2:]})
 
     elif data.startswith("L:"):
-        await send_photos(context.bot, chat_id, {"thread_id": thread_id, "loc_id": data[2:]})
+        await start_send(context, chat_id, {"thread_id": thread_id, "loc_id": data[2:]})
 
     elif data == "all":
-        await send_photos(context.bot, chat_id, {"thread_id": thread_id})
+        await start_send(context, chat_id, {"thread_id": thread_id})
 
 
 # ---------- photo suggestions: clients suggest, the owner approves ----------
@@ -1129,6 +1199,15 @@ def clean_words(text: str) -> str:
 
 def sug_name(user_doc, user) -> str:
     return (user_doc or {}).get("first_name") or getattr(user, "first_name", None) or "Guest"
+
+
+FLOW_KEYS = ("up", "link", "adm", "sug")
+
+
+def clear_flows(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Starting any flow ends every other half-finished one, so text and photos never go to the wrong one."""
+    for k in FLOW_KEYS:
+        context.user_data.pop(k, None)
 
 
 def get_sug(context: ContextTypes.DEFAULT_TYPE):
@@ -1526,8 +1605,7 @@ async def announce_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if not is_owner(update.effective_user.id):
         await update.message.reply_text("That command isn't available.")
         return
-    for k in ("up", "link", "adm", "sug"):
-        context.user_data.pop(k, None)
+    clear_flows(context)
     await update.message.reply_text("📣 Who should get the announcement?", reply_markup=await ann_picker(0))
 
 
@@ -1622,8 +1700,9 @@ async def tries_view(page: int):
     if not rows:
         return "🕵️ Nobody has tried to log in recently.", one_button("⬅️ Admin panel", "a:home")
     items = [(try_label(t), f"a:trp:{t['_id']}") for t in rows]
-    markup = admin_pager(items, page, "a:tr", "a:home")
-    markup.inline_keyboard.insert(-1, [_btn(f"🗑 Clear the whole list ({len(rows)})", "a:trx")])
+    markup = admin_pager(
+        items, page, "a:tr", "a:home", extra_rows=[[_btn(f"🗑 Clear the whole list ({len(rows)})", "a:trx")]]
+    )
     return "🕵️ Recent login attempts (tap one):", markup
 
 
@@ -1734,7 +1813,8 @@ def one_button(text: str, cb: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[_btn(text, cb)]])
 
 
-def admin_pager(items: list[tuple[str, str]], page: int, nav: str, back: str) -> InlineKeyboardMarkup:
+def admin_pager(items: list[tuple[str, str]], page: int, nav: str, back: str,
+                extra_rows: list | None = None) -> InlineKeyboardMarkup:
     """One button per item, with Prev/Next. `nav` is the callback prefix for the page buttons."""
     page = max(page, 0)
     chunk = items[page * PAGE_SIZE : (page + 1) * PAGE_SIZE]
@@ -1746,6 +1826,7 @@ def admin_pager(items: list[tuple[str, str]], page: int, nav: str, back: str) ->
         navrow.append(_btn("Next ➡️", f"{nav}:{page + 1}"))
     if navrow:
         rows.append(navrow)
+    rows.extend(extra_rows or [])
     rows.append([_btn("⬅️ Back", back)])
     return InlineKeyboardMarkup(rows)
 
@@ -1828,8 +1909,7 @@ async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_owner(user.id):
         await update.message.reply_text("Sorry, the admin panel is only for the owner.")
         return
-    for k in ("up", "link", "adm"):
-        context.user_data.pop(k, None)
+    clear_flows(context)
     await update.message.reply_text("👑 Admin panel", reply_markup=admin_home_markup())
 
 
@@ -1962,8 +2042,7 @@ async def on_admin_button(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await show(*await tries_view(0))
 
     elif action == "np":  # add a person from the main panel: ID + first name, then family
-        for k in ("up", "link", "sug"):
-            context.user_data.pop(k, None)
+        clear_flows(context)
         context.user_data["adm"] = {"stage": "np"}
         await show(
             "➕ Add a person to a family.\n\nSend their Telegram ID and their first name, like: "
@@ -2005,8 +2084,7 @@ async def on_admin_button(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         fam = await need_family(tid)
         if not fam:
             return
-        for k in ("up", "link", "sug"):
-            context.user_data.pop(k, None)
+        clear_flows(context)
         context.user_data["adm"] = {"stage": "addp", "tid": tid}
         await show(
             f"➕ Add someone to the {fam['name']} family.\n\nSend their Telegram ID (a number), and "
@@ -2030,8 +2108,7 @@ async def on_admin_button(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 one_button("⬅️ Back", "a:an:0"),
             )
             return
-        for k in ("up", "link", "sug"):
-            context.user_data.pop(k, None)
+        clear_flows(context)
         context.user_data["adm"] = {"stage": "ann", "aud": aud}
         await show(
             f"📣 Type your announcement. It goes to {len(people)} {'person' if len(people) == 1 else 'people'} "
@@ -2096,8 +2173,7 @@ async def on_admin_button(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await show("That family no longer exists.", one_button("⬅️ Families", "a:fl:0"))
 
     elif action == "add":
-        for k in ("up", "link"):
-            context.user_data.pop(k, None)
+        clear_flows(context)
         context.user_data["adm"] = {"stage": "name"}
         await show(
             "➕ Send the family's last name (for example: Garcia). I'll make their topic in the "
@@ -2116,8 +2192,7 @@ async def on_admin_button(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         if not GROUP_ID:
             await show("GROUP_ID isn't set yet, so I can't add photos to the group.", one_button("⬅️ Back", f"a:f:{tid}"))
             return
-        context.user_data.pop("adm", None)
-        context.user_data.pop("link", None)
+        clear_flows(context)
         context.user_data["up"] = {
             "stage": "place", "thread_id": tid, "name": fam["name"], "count": 0,
             "last_mg": None, "until": time.time() + SESSION_SECONDS,
@@ -2368,8 +2443,11 @@ def main() -> None:
     app.add_handler(CommandHandler("admin", admin_cmd, filters=priv))
     app.add_handler(CommandHandler("addphotos", addphotos, filters=priv))
     app.add_handler(CommandHandler("done", done, filters=priv))
-    app.add_handler(MessageHandler(priv & filters.TEXT & ~filters.COMMAND, on_private_text))
-    app.add_handler(MessageHandler(priv & (filters.PHOTO | filters.Document.ALL | filters.VIDEO), on_private_media))
+    app.add_handler(MessageHandler(priv & filters.UpdateType.MESSAGE & filters.TEXT & ~filters.COMMAND, on_private_text))
+    app.add_handler(MessageHandler(
+            priv & filters.UpdateType.MESSAGE & (filters.PHOTO | filters.Document.ALL | filters.VIDEO),
+            on_private_media,
+        ))
     app.add_handler(CallbackQueryHandler(on_admin_button, pattern=r"^a:"))
     app.add_handler(
         CallbackQueryHandler(on_button, pattern=r"^(menu|all|d:\d+|l:\d+|D:\d{4}-\d{2}-\d{2}|L:[0-9a-f]{10}|L:none|x:\d+|sg:(new|send|gal))$")
