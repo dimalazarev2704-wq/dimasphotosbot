@@ -83,6 +83,8 @@ ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "")  # needed for /addphotos in pri
 # Your own Telegram user ID (send /id to the bot in a private chat). This account gets the
 # /admin panel and skips the /addphotos password. The bot stores nothing about you.
 OWNER_ID = int(os.getenv("OWNER_ID", "0") or 0)
+# The name clients see when you add them yourself ("Dima has already added you to the ... family")
+OWNER_NAME = (os.getenv("OWNER_NAME", "") or "The photographer").strip()[:40]
 TZ = ZoneInfo(os.getenv("TIMEZONE", "America/New_York"))
 # Stops clients from forwarding/saving files from the chat (they can still screenshot)
 PROTECT_CONTENT = os.getenv("PROTECT_CONTENT", "false").lower() == "true"
@@ -556,6 +558,8 @@ async def my_thread(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> int | N
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
+    if await maybe_welcome(update, context):
+        return
     if await my_thread(context, user.id):
         await update.message.reply_text(
             "Welcome back! What would you like to see?", reply_markup=menu_markup()
@@ -567,6 +571,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     for k in ("up", "adm", "sug"):
         context.user_data.pop(k, None)
+    if not is_owner(user.id):
+        await record_try(user, "started, didn't finish", keep_existing=True)
     context.user_data["link"] = {"stage": "first"}
     await update.message.reply_text("Hi! 👋 Let's get you to your photos. What's your first name?")
 
@@ -574,6 +580,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """/gallery and /menu: open the gallery."""
     context.user_data.pop("sug", None)
+    if await maybe_welcome(update, context):
+        return
     if await my_thread(context, update.effective_user.id):
         await update.message.reply_text("What would you like to see?", reply_markup=menu_markup())
     elif is_owner(update.effective_user.id):
@@ -643,12 +651,23 @@ async def handle_link_step(update: Update, context: ContextTypes.DEFAULT_TYPE, l
         if not fam:
             locked = await record_fail(key)
             context.user_data.pop("link", None)
+            await record_try(user, "locked out" if locked else "wrong details", link["first"], link["last"])
+            if locked and OWNER_ID:
+                try:
+                    await context.bot.send_message(
+                        OWNER_ID,
+                        f"🔒 {link['first']} {link['last']} (ID {user.id}) entered wrong details {MAX_FAILS} times "
+                        "and is locked out for an hour. Open /admin → 🕵️ Login attempts to add them or clear the lock.",
+                    )
+                except TelegramError:
+                    pass
             await msg.reply_text(
                 "Those details didn't match any family."
                 + (" " + lock_text(LOCK_SECONDS) if locked else " Send /start to try again.")
             )
             return
         await clear_fails(key)
+        await db.tries.delete_one({"_id": user.id})
         await db.users.update_one(
             {"_id": user.id},
             {
@@ -1512,6 +1531,186 @@ async def announce_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await update.message.reply_text("📣 Who should get the announcement?", reply_markup=await ann_picker(0))
 
 
+# ---------- login attempts and adding people yourself (owner) ----------
+
+def fmt_when(dt) -> str:
+    """MongoDB hands back naive UTC times; show them in your timezone."""
+    if dt is None:
+        return "?"
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(TZ).strftime("%b %d, %H:%M")
+
+
+async def record_try(user, reason: str, first: str | None = None, last: str | None = None,
+                     keep_existing: bool = False) -> None:
+    """Remember that this person tried to get in (so the owner can see them and add them).
+    Never stores the code they typed."""
+    if keep_existing and await db.tries.find_one({"_id": user.id}):
+        return
+    await db.tries.update_one(
+        {"_id": user.id},
+        {
+            "$set": {
+                "username": getattr(user, "username", None),
+                "tg_name": getattr(user, "first_name", None),
+                "reason": reason, "first": first, "last": last, "at": datetime.now(timezone.utc),
+            },
+            "$inc": {"count": 1},
+        },
+        upsert=True,
+    )
+
+
+def try_label(t: dict) -> str:
+    who = " ".join(x for x in (t.get("first"), t.get("last")) if x) or t.get("tg_name") or str(t["_id"])
+    return f"{who} · {t.get('reason', '?')}"
+
+
+async def add_person(bot, uid: int, tid: int, first_name: str) -> tuple[str, bool]:
+    """Links a Telegram account to a family on the owner's say-so.
+    Returns (problem or '', whether the person could be messaged right away)."""
+    fam = await db.families.find_one({"thread_id": tid})
+    if not fam:
+        return "That family no longer exists.", False
+    existing = await db.users.find_one({"_id": uid})
+    if existing:
+        other = await db.families.find_one({"thread_id": existing["thread_id"]})
+        where = f"the {other['name']} family" if other else "another family"
+        if existing["thread_id"] == tid:
+            return f"They're already in the {fam['name']} family.", False
+        return f"They're already linked to {where}. Unlink them there first.", False
+    await db.users.update_one(
+        {"_id": uid},
+        {"$set": {
+            "thread_id": tid, "first_name": first_name, "username": None,
+            "linked_at": datetime.now(timezone.utc), "added_by_owner": True, "welcomed": False,
+        }},
+        upsert=True,
+    )
+    await db.tries.delete_one({"_id": uid})
+    await clear_fails(f"link:{uid}")
+    log.info("Owner added %s (%s) to family %s", first_name, uid, fam["name"])
+    try:
+        await bot.send_message(uid, welcome_text(fam["name"]), reply_markup=menu_markup())
+        await db.users.update_one({"_id": uid}, {"$set": {"welcomed": True}})
+        return "", True
+    except TelegramError:
+        return "", False  # they haven't opened the bot yet; they'll get the welcome when they do
+
+
+def welcome_text(family_name: str) -> str:
+    return f"🎉 {OWNER_NAME} has already added you to the {family_name} family. Here are your photos!"
+
+
+async def maybe_welcome(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """The first time an owner-added person opens the bot, tell them they're already in."""
+    uid = update.effective_user.id
+    doc = await db.users.find_one({"_id": uid})
+    if not doc or not doc.get("added_by_owner") or doc.get("welcomed"):
+        return False
+    fam = await db.families.find_one({"thread_id": doc["thread_id"]})
+    await db.users.update_one({"_id": uid}, {"$set": {"welcomed": True}})
+    await update.effective_message.reply_text(
+        welcome_text(fam["name"] if fam else "your"), reply_markup=menu_markup()
+    )
+    return True
+
+
+async def tries_view(page: int):
+    rows = await db.tries.find().sort("at", -1).to_list()
+    if not rows:
+        return "🕵️ Nobody has tried to log in recently.", one_button("⬅️ Admin panel", "a:home")
+    items = [(try_label(t), f"a:trp:{t['_id']}") for t in rows]
+    markup = admin_pager(items, page, "a:tr", "a:home")
+    markup.inline_keyboard.insert(-1, [_btn(f"🗑 Clear the whole list ({len(rows)})", "a:trx")])
+    return "🕵️ Recent login attempts (tap one):", markup
+
+
+async def try_detail(uid: int):
+    t = await db.tries.find_one({"_id": uid})
+    if not t:
+        return "That attempt is gone (they may already be added).", one_button("⬅️ Attempts", "a:tr:0")
+    lock = await locked_for(f"link:{uid}")
+    guess = None
+    if t.get("last"):
+        found = await db.families.find({"key": normalize(t["last"])}).to_list()
+        if len(found) == 1:
+            guess = found[0]
+    lines = [
+        "🕵️ Login attempt",
+        f"Telegram name: {t.get('tg_name') or '?'}" + (f" (@{t['username']})" if t.get("username") else ""),
+        f"Telegram ID: {uid}",
+        f"They typed: first name “{t.get('first') or '-'}”, family “{t.get('last') or '-'}”",
+        f"Result: {t.get('reason', '?')} · {t.get('count', 1)} time(s) · last {fmt_when(t.get('at'))}",
+        f"Locked out: {'yes, about ' + str(max(1, -(-lock // 60))) + ' more minute(s)' if lock else 'no'}",
+    ]
+    rows = []
+    if guess:
+        rows.append([_btn(f"✅ Add to the {guess['name']} family", f"a:tra:{uid}:{guess['thread_id']}")])
+    rows.append([_btn("➕ Add to another family…", f"a:trf:{uid}:0")])
+    if lock:
+        rows.append([_btn("🔓 Clear the lockout", f"a:trl:{uid}")])
+    rows.append([_btn("🗑 Dismiss", f"a:trd:{uid}"), _btn("⬅️ Attempts", "a:tr:0")])
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
+async def msg_reply_pick_family(update: Update) -> None:
+    await update.message.reply_text("Please tap a family above, or Cancel from the admin panel (/admin).")
+
+
+async def handle_newperson_text(update: Update, context: ContextTypes.DEFAULT_TYPE, adm: dict) -> None:
+    """From the main panel: the owner typed a Telegram ID and a first name; next they pick the family."""
+    msg = update.message
+    parts = (msg.text or "").split(None, 1)
+    if not parts or not parts[0].isdigit() or not (5 <= len(parts[0]) <= 15):
+        await msg.reply_text(
+            "Please send their Telegram ID (a number) and their first name, like: 123456789 Maria\n"
+            "They can get their ID by sending /id to this bot in a private chat."
+        )
+        return
+    name = " ".join(parts[1].split())[:40] if len(parts) > 1 else ""
+    if not name:
+        await msg.reply_text("I also need their first name after the ID, like: 123456789 Maria")
+        return
+    adm.update(stage="np_fam", uid=int(parts[0]), name=name)
+    markup, empty = await family_picker(0, "a:npf", "a:npa:{tid}")
+    if empty:
+        context.user_data.pop("adm", None)
+        await msg.reply_text("No families yet. Add a family first.", reply_markup=one_button("⬅️ Admin panel", "a:home"))
+        return
+    await msg.reply_text(f"Which family should {name} join?", reply_markup=markup)
+
+
+async def handle_addperson_text(update: Update, context: ContextTypes.DEFAULT_TYPE, adm: dict) -> None:
+    """The owner typed a Telegram ID (and maybe a first name) to add to a family."""
+    msg = update.message
+    parts = (msg.text or "").split(None, 1)
+    if not parts or not parts[0].isdigit() or not (5 <= len(parts[0]) <= 15):
+        await msg.reply_text(
+            "Please send their Telegram ID (a number like 123456789), then optionally their first name: "
+            "123456789 Maria\nThey can get their ID by sending /id to this bot in a private chat."
+        )
+        return
+    uid = int(parts[0])
+    name = " ".join(parts[1].split())[:40] if len(parts) > 1 else ""
+    if not name:
+        t = await db.tries.find_one({"_id": uid})
+        name = (t or {}).get("first") or (t or {}).get("tg_name") or "Friend"
+    problem, messaged = await add_person(context.bot, uid, adm["tid"], name)
+    if problem:
+        await msg.reply_text(problem + " Send another ID, or tap Cancel.")
+        return
+    context.user_data.pop("adm", None)
+    fam = await db.families.find_one({"thread_id": adm["tid"]})
+    await msg.reply_text(
+        f"✅ Added {name} to the {fam['name']} family. "
+        + ("They were told in the bot." if messaged
+           else "I couldn't message them yet; they'll see the welcome the first time they open the bot."),
+        reply_markup=InlineKeyboardMarkup([[_btn("🏠 Family", f"a:f:{adm['tid']}")], [_btn("⬅️ Admin panel", "a:home")]]),
+    )
+
+
 # ---------- owner admin panel (/admin) ----------
 # Only the Telegram ID in OWNER_ID can use any of this. Nothing about the owner is saved.
 
@@ -1524,7 +1723,9 @@ def admin_home_markup() -> InlineKeyboardMarkup:
         [
             [_btn("📋 Families", "a:fl:0"), _btn("➕ Add family", "a:add")],
             [_btn("📤 Add photos", "a:ph:0"), _btn("🗑 Remove photos", "a:rm:0")],
-            [_btn("📣 Announce", "a:an:0"), _btn("📊 Stats", "a:stats")],
+            [_btn("➕ Add person", "a:np"), _btn("🕵️ Login attempts", "a:tr:0")],
+            [_btn("📣 Announce", "a:an:0")],
+            [_btn("📊 Stats", "a:stats")],
         ]
     )
 
@@ -1572,6 +1773,7 @@ async def family_page(tid: int):
         [
             [_btn("📤 Add photos", f"a:phf:{tid}"), _btn("🗑 Remove photos", f"a:rmf:{tid}:0")],
             [_btn("👥 Members", f"a:mem:{tid}"), _btn("🔄 New code", f"a:nc:{tid}")],
+            [_btn("➕ Add person by ID", f"a:ap:{tid}")],
             [_btn("👁 Browse as this family", f"a:cnf:{tid}"), _btn("❌ Delete family", f"a:df:{tid}")],
             [_btn("⬅️ Families", "a:fl:0")],
         ]
@@ -1635,6 +1837,15 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     """The owner typed text: an announcement, or a last name after tapping 'Add family'."""
     if adm.get("stage") in ("ann", "ann_ok"):
         await handle_announce_text(update, context, adm)
+        return
+    if adm.get("stage") == "addp":
+        await handle_addperson_text(update, context, adm)
+        return
+    if adm.get("stage") == "np":
+        await handle_newperson_text(update, context, adm)
+        return
+    if adm.get("stage") == "np_fam":
+        await msg_reply_pick_family(update)
         return
     msg = update.message
     name = " ".join((msg.text or "").split())[:60]
@@ -1708,6 +1919,101 @@ async def on_admin_button(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if action == "home":
         context.user_data.pop("adm", None)
         await show("👑 Admin panel", admin_home_markup())
+
+    elif action == "tr":  # who tried to log in
+        context.user_data.pop("adm", None)
+        await show(*await tries_view(int(parts[2])))
+
+    elif action == "trp":
+        await show(*await try_detail(int(parts[2])))
+
+    elif action == "trf":  # pick the family to add them to
+        uid, page = int(parts[2]), int(parts[3])
+        markup, empty = await family_picker(page, f"a:trf:{uid}", "a:tra:" + str(uid) + ":{tid}")
+        await show("No families yet." if empty else "Add them to which family?", markup)
+
+    elif action == "tra":  # add that person
+        uid, tid = int(parts[2]), int(parts[3])
+        t = await db.tries.find_one({"_id": uid})
+        name = (t or {}).get("first") or (t or {}).get("tg_name") or "Friend"
+        problem, messaged = await add_person(context.bot, uid, tid, name)
+        fam = await db.families.find_one({"thread_id": tid})
+        if problem:
+            await show(problem, one_button("⬅️ Attempts", "a:tr:0"))
+            return
+        await show(
+            f"✅ Added {name} to the {fam['name']} family. "
+            + ("They were told in the bot." if messaged
+               else "I couldn't message them yet; they'll see the welcome the first time they open the bot."),
+            InlineKeyboardMarkup([[_btn("🕵️ More attempts", "a:tr:0")], [_btn("⬅️ Admin panel", "a:home")]]),
+        )
+
+    elif action == "trl":  # clear a lockout
+        uid = int(parts[2])
+        await clear_fails(f"link:{uid}")
+        await show("🔓 The lockout is cleared. They can try again with /start.", one_button("⬅️ Back", f"a:trp:{uid}"))
+
+    elif action == "trx":  # clear the whole list (just the list: nobody is unlinked or unlocked)
+        await db.tries.delete_many({})
+        await show(*await tries_view(0))
+
+    elif action == "trd":  # dismiss an attempt from the list
+        await db.tries.delete_one({"_id": int(parts[2])})
+        await show(*await tries_view(0))
+
+    elif action == "np":  # add a person from the main panel: ID + first name, then family
+        for k in ("up", "link", "sug"):
+            context.user_data.pop(k, None)
+        context.user_data["adm"] = {"stage": "np"}
+        await show(
+            "➕ Add a person to a family.\n\nSend their Telegram ID and their first name, like: "
+            "123456789 Maria\n\nThey can get their ID by sending /id to this bot in a private chat. "
+            "Next you'll pick their family.",
+            one_button("Cancel", "a:home"),
+        )
+
+    elif action == "npf":  # page through the family list
+        adm = context.user_data.get("adm")
+        if not adm or adm.get("stage") != "np_fam":
+            await show("Start again from the admin panel.", one_button("⬅️ Admin panel", "a:home"))
+            return
+        markup, empty = await family_picker(int(parts[2]), "a:npf", "a:npa:{tid}")
+        await show(f"Which family should {adm['name']} join?", markup)
+
+    elif action == "npa":  # family picked: add the person
+        adm = context.user_data.get("adm")
+        if not adm or adm.get("stage") != "np_fam":
+            await show("Start again from the admin panel.", one_button("⬅️ Admin panel", "a:home"))
+            return
+        tid = int(parts[2])
+        problem, messaged = await add_person(context.bot, adm["uid"], tid, adm["name"])
+        fam = await db.families.find_one({"thread_id": tid})
+        if problem:
+            await show(problem, one_button("⬅️ Admin panel", "a:home"))
+            context.user_data.pop("adm", None)
+            return
+        context.user_data.pop("adm", None)
+        await show(
+            f"✅ Added {adm['name']} to the {fam['name']} family. "
+            + ("They were told in the bot." if messaged
+               else "I couldn't message them yet; they'll see the welcome the first time they open the bot."),
+            InlineKeyboardMarkup([[_btn("➕ Add another", "a:np")], [_btn("⬅️ Admin panel", "a:home")]]),
+        )
+
+    elif action == "ap":  # add a person by Telegram ID
+        tid = int(parts[2])
+        fam = await need_family(tid)
+        if not fam:
+            return
+        for k in ("up", "link", "sug"):
+            context.user_data.pop(k, None)
+        context.user_data["adm"] = {"stage": "addp", "tid": tid}
+        await show(
+            f"➕ Add someone to the {fam['name']} family.\n\nSend their Telegram ID (a number), and "
+            "optionally their first name, like: 123456789 Maria\n\nThey can get their ID by sending /id to "
+            "this bot in a private chat. When they open the bot they'll be told you added them.",
+            one_button("Cancel", f"a:f:{tid}"),
+        )
 
     elif action == "an":  # announcement: who gets it?
         context.user_data.pop("adm", None)
@@ -2019,6 +2325,7 @@ async def post_init(app: Application) -> None:
     await db.photos.create_index([("thread_id", 1), ("loc_id", 1)])
     await db.photos.create_index("media_group_id")
     await db.users.create_index("thread_id")
+    await db.tries.create_index("at", expireAfterSeconds=2592000)  # forget login attempts after 30 days
     await db.sent.create_index("at", expireAfterSeconds=172800)  # forget hide-buttons after 2 days
     log.info("Connected to MongoDB database '%s'", DB_NAME)
 
