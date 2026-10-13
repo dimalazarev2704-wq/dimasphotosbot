@@ -71,6 +71,23 @@ date, send `/done` and start a new batch.
 4. After the photos arrive, tap **🧹 Hide these photos** to remove them from the chat and keep it clean.
    They stay in the gallery, so the client can open them again any time.
 
+### Suggesting photos
+Clients can add their own photos to the gallery, and you approve each one first:
+1. Client taps **➕ Suggest photos**, types the place and date (`unknown` is allowed for either),
+   names any other families in the photos by last name (or `no`), sends the photos and taps
+   **Send for approval**.
+2. The bot makes a **💡 [Family] suggestions** topic in the group (the first time) and posts the photos
+   there with the details and buttons. You also get a private heads-up.
+3. Only you can tap the buttons: **Approve for all families listed**, **Approve for their own family only**,
+   or **Reject**. Approving copies the photos into the family topic(s), saves place, date and the
+   client's first name, deletes them from the suggestions topic and tells the client. Rejecting deletes
+   them and tells the client kindly.
+4. Approved photos show in the normal date/location galleries and in a **💡 Family suggestions** gallery,
+   each captioned with place, date and "Added by [name]".
+
+If two families share the last name a client types, the bot doesn't guess; it passes the name on to you.
+The bot needs the **Manage topics** and **Delete messages** rights for this.
+
 Clients can't unlink themselves. Wrong guesses are limited: 5 wrong tries lock that
 Telegram account for an hour (saved in MongoDB, so a restart doesn't reset it).
 
@@ -85,6 +102,10 @@ and the bot saves nothing about you in the database.
 | ➕ Add family | you type the last name, the bot **creates the topic in the group** and gives you the code |
 | 📤 Add photos | pick a family, type the place and date, then send photos. No password for you |
 | 🗑 Remove photos | pick a family, then a date; asks "Are you sure?", then deletes those photos from the group and the list |
+| 🕵️ Login attempts | everyone who recently opened the bot or got their details wrong: name, family they typed, Telegram ID, why it failed and whether they're locked out. One tap adds them to the family, **Clear the lockout** lets them retry, **Dismiss** removes them. You also get a private message when someone is locked out |
+| ➕ Add person | from the main panel: type a Telegram ID and first name, then tap the family. They get the "already added you" message |
+| (family page) ➕ Add person by ID | type a Telegram ID (and first name) to link someone yourself. They can get their ID by sending `/id` to the bot. When they open the bot they see "[OWNER_NAME] has already added you to the … family" (they get it right away if they've opened the bot before) |
+| 📣 Announce | pick everyone or one family, type the message, check the preview, then send. It goes to each linked client as a private message from the bot (`/announce` does the same) |
 | 📊 Stats | families, people linked and photos |
 | (family page) 👥 Members | see who linked and unlink people |
 | (family page) 🔄 New code | makes a new code; people already linked stay linked |
