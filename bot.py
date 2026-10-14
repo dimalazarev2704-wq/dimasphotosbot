@@ -59,6 +59,8 @@ from telegram import (
     InlineKeyboardMarkup,
     InputMediaDocument,
     InputMediaPhoto,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
     Update,
 )
 from telegram.constants import ChatAction, ChatMemberStatus
@@ -87,6 +89,8 @@ OWNER_ID = int(os.getenv("OWNER_ID", "0") or 0)
 OWNER_NAME = (os.getenv("OWNER_NAME", "") or "The photographer").strip()[:40]
 TZ = ZoneInfo(os.getenv("TIMEZONE", "America/New_York"))
 # Stops clients from forwarding/saving files from the chat (they can still screenshot)
+COPYRIGHT = (os.getenv("COPYRIGHT_NOTICE", "") or "© 2024 Dima Lazarev. All photos are protected by copyright.").strip()
+COPYRIGHT_WARNING = f"⚠️ {COPYRIGHT}"
 PROTECT_CONTENT = os.getenv("PROTECT_CONTENT", "false").lower() == "true"
 MAX_SEND = int(os.getenv("MAX_SEND", "200"))  # max files sent per button press
 PAGE_SIZE = 20  # buttons per page in the date/location lists
@@ -283,6 +287,9 @@ async def index_file(
     kind is "photo" (a normal Telegram photo, which Telegram compresses) or "document"
     (sent as a File, which keeps the original quality)."""
     default_day = sent_at.astimezone(TZ).date().isoformat()
+    star = "⭐" in (caption or "")  # a ⭐ in the caption marks the photo(s) as a best shot
+    if star:
+        caption = caption.replace("⭐", " ").strip()
     day, loc = parse_caption(caption, default_day)
     has_caption = bool((caption or "").strip())
     lid = loc_id(loc)
@@ -294,6 +301,8 @@ async def index_file(
         "kind": kind,
         "media_group_id": media_group_id,
     }
+    if star:
+        set_doc["best"] = True
     if has_caption:
         set_doc.update(date=day, location=loc, loc_id=lid, has_caption=True)
         insert_doc = {"added": now}
@@ -304,7 +313,7 @@ async def index_file(
                     "has_caption": {"$ne": True},
                     "message_id": {"$ne": message_id},
                 },
-                {"$set": {"date": day, "location": loc, "loc_id": lid}},
+                {"$set": {"date": day, "location": loc, "loc_id": lid, **({"best": True} if star else {})}},
             )
     else:
         inherit = (
@@ -319,6 +328,8 @@ async def index_file(
             "has_caption": False,
             "added": now,
         }
+        if not star:  # (a star already goes in $set; the same field can't be in both)
+            insert_doc["best"] = bool(inherit and inherit.get("best"))
 
     await db.photos.update_one(
         {"message_id": message_id},
@@ -578,10 +589,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     if await maybe_welcome(update, context):
         return
-    if await my_thread(context, user.id):
+    tid = await my_thread(context, user.id)
+    if tid:
         await update.message.reply_text(
-            "Welcome back! What would you like to see?", reply_markup=menu_markup()
+            "Welcome back! What would you like to see?", reply_markup=await family_menu(tid)
         )
+        await ensure_keyboard(context.bot, update.effective_message.chat_id, user.id)
         return
     lock = await locked_for(f"link:{user.id}")
     if lock:
@@ -599,8 +612,10 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.pop("sug", None)
     if await maybe_welcome(update, context):
         return
-    if await my_thread(context, update.effective_user.id):
-        await update.message.reply_text("What would you like to see?", reply_markup=menu_markup())
+    tid = await my_thread(context, update.effective_user.id)
+    if tid:
+        await update.message.reply_text("What would you like to see?", reply_markup=await family_menu(tid))
+        await ensure_keyboard(context.bot, update.effective_message.chat_id, update.effective_user.id)
     elif is_owner(update.effective_user.id):
         await update.message.reply_text("No family picked yet. Send /connect to choose one to browse.")
     else:
@@ -704,8 +719,9 @@ async def handle_link_step(update: Update, context: ContextTypes.DEFAULT_TYPE, l
         log.info("Linked %s (%s) to family %s", link["first"], user.id, fam["name"])
         await msg.reply_text(
             f"You're in, {link['first']}! 🎉 Here are the {fam['name']} family's photos.",
-            reply_markup=menu_markup(),
+            reply_markup=await family_menu(fam["thread_id"]),
         )
+        await ensure_keyboard(context.bot, msg.chat_id, user.id)
 
 
 # ---------- private chat: /addphotos (password every time, nothing saved about you) ----------
@@ -740,7 +756,10 @@ async def done(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not up:
         await update.message.reply_text("Nothing to finish. Send /addphotos to add photos.")
         return
-    await update.message.reply_text(f"Done. Added {up.get('count', 0)} file(s). The session is closed.")
+    offer, markup = await notify_offer(context, up, update.effective_user.id)
+    await update.message.reply_text(
+        f"Done. Added {up.get('count', 0)} file(s). The session is closed." + offer, reply_markup=markup
+    )
 
 
 def get_session(context: ContextTypes.DEFAULT_TYPE):
@@ -891,6 +910,7 @@ async def on_private_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await msg.reply_text("I couldn't add that file to the group. Check that I'm still an admin there.")
         return
     await index_file(up["thread_id"], sent.message_id, file_id, caption, msg.media_group_id, msg.date, kind)
+    note_batch(up, caption, msg.date)
     up["count"] += 1
     up["until"] = time.time() + SESSION_SECONDS
     if not msg.media_group_id or msg.media_group_id != up.get("last_mg"):
@@ -900,6 +920,15 @@ async def on_private_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 async def on_private_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     msg = update.message
+    if (msg.text or "").strip() in (PHOTOS_BUTTON, HELP_BUTTON) and not is_owner(update.effective_user.id):
+        clear_flows(context)  # tapping a pinned button always works, even in the middle of something
+        if msg.text.strip() == HELP_BUTTON:
+            await help_cmd(update, context)
+        elif await my_thread(context, update.effective_user.id):
+            await menu(update, context)
+        else:
+            await msg.reply_text(help_text(False))
+        return
     up, expired = get_session(context)
     if expired:
         await msg.reply_text("That upload session timed out. Send /addphotos to start again.")
@@ -922,8 +951,13 @@ async def on_private_text(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if link:
         await handle_link_step(update, context, link)
         return
-    if await my_thread(context, update.effective_user.id):
-        await msg.reply_text("Pick what you'd like to see:", reply_markup=menu_markup())
+    tid = await my_thread(context, update.effective_user.id)
+    if tid:
+        await msg.reply_text(
+            "Hi! 👋 I can show you your family's photos. Tap what you'd like to see (or tap ❓ Help):",
+            reply_markup=await family_menu(tid),
+        )
+        await ensure_keyboard(context.bot, msg.chat_id, update.effective_user.id)
     elif is_owner(update.effective_user.id):
         await msg.reply_text("Send /admin for the admin panel, or /connect to browse a family.")
     else:
@@ -982,7 +1016,10 @@ async def send_photos(bot, chat_id: int, query: dict) -> None:
             + (f" · Added by {first['by']}" if first.get("by") else "")
         )
         is_photo = first.get("kind") == "photo"
-        await bot.send_chat_action(chat_id, ChatAction.UPLOAD_PHOTO if is_photo else ChatAction.UPLOAD_DOCUMENT)
+        try:
+            await bot.send_chat_action(chat_id, ChatAction.UPLOAD_PHOTO if is_photo else ChatAction.UPLOAD_DOCUMENT)
+        except TelegramError:
+            pass  # just the "sending…" indicator, not worth stopping for
         try:
             if len(group) == 1:
                 send_one = bot.send_photo if is_photo else bot.send_document
@@ -1013,7 +1050,10 @@ async def send_photos(bot, chat_id: int, query: dict) -> None:
         note += f"\n\nShowing the first {MAX_SEND}. Use “By date” or “By location” to see the rest."
     if failed:
         note += f"\n\n{failed} file(s) couldn't be sent. Please tell the photographer."
-    last = await bot.send_message(chat_id, "That's everything! 📸" + note + "\n\nAnything else?", reply_markup=menu_markup())
+    tid = query.get("thread_id")
+    last = await bot.send_message(
+        chat_id, "That's everything! 📸" + note + "\n\n" + COPYRIGHT_WARNING + "\n\nAnything else?", reply_markup=await family_menu(tid)
+    )
     extra = []
     if sent_ids:
         # remember which messages were photos so the 🧹 button can remove them from the chat
@@ -1024,7 +1064,7 @@ async def send_photos(bot, chat_id: int, query: dict) -> None:
         )
         extra = [[InlineKeyboardButton("🧹 Hide these photos", callback_data=f"x:{last.message_id}")]]
         try:
-            await bot.edit_message_reply_markup(chat_id, last.message_id, reply_markup=menu_markup(extra))
+            await bot.edit_message_reply_markup(chat_id, last.message_id, reply_markup=await family_menu(tid, extra))
         except TelegramError:
             pass
 
@@ -1078,18 +1118,25 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     async def show(text: str, markup: InlineKeyboardMarkup) -> None:
         try:
             await q.edit_message_text(text, reply_markup=markup)
-        except TelegramError:
-            pass  # e.g. "message is not modified"
+        except TelegramError as e:
+            if "not modified" not in str(e.message).lower():
+                log.warning("Couldn't update the admin screen: %s", e.message)
 
     if data == "menu":
         context.user_data.pop("sug", None)
-        await show("What would you like to see?", menu_markup())
+        await show("What would you like to see?", await family_menu(thread_id))
+
+    elif data == "bs":  # ⭐ Best shots
+        if not await has_best(thread_id):
+            await show("No best shots have been picked for your family yet. Check back soon!", await family_menu(thread_id))
+            return
+        await start_send(context, chat_id, {"thread_id": thread_id, "best": True})
 
     elif data in ("sg:new", "sg:send") and is_owner(q.from_user.id):
         await show(
             "Suggestions are for clients, so this preview doesn't send them (it would save your account). "
             "You can add photos yourself from /admin → Add photos.",
-            menu_markup(),
+            await family_menu(thread_id),
         )
 
     elif data == "sg:new":  # start suggesting photos
@@ -1108,7 +1155,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 note = "Please answer my question first, then send the photos."
             else:
                 note = "Nothing to send yet. Send at least one photo first."
-            await q.message.reply_text(note, reply_markup=menu_markup() if not sug else sug_files_markup())
+            await q.message.reply_text(note, reply_markup=await family_menu(thread_id) if not sug else sug_files_markup())
             return
         user_doc = await db.users.find_one({"_id": q.from_user.id})
         problem = await submit_suggestion(context, q.from_user, user_doc, sug)
@@ -1119,7 +1166,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await show(
             f"✅ Sent {len(sug['items'])} photo(s) to the photographer for approval. "
             "I'll message you when they're added.",
-            menu_markup(),
+            await family_menu(thread_id),
         )
 
     elif data == "sg:gal":  # the family-suggestions gallery
@@ -1139,7 +1186,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await show(
             "🧹 Photos hidden. Open the gallery again whenever you like." if deleted
             else "Those photos are too old for me to hide now. You can delete them by hand.",
-            menu_markup(),
+            await family_menu(thread_id),
         )
 
     elif data.startswith("d:"):
@@ -1152,7 +1199,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         rows = await cur.to_list()
         if not rows:
-            await show("No photos yet. Check back soon!", menu_markup())
+            await show("No photos yet. Check back soon!", await family_menu(thread_id))
             return
         items = [(f"{pretty_date(r['_id'])} ({r['n']})", f"D:{r['_id']}") for r in rows]
         await show("Pick a date:", paged_keyboard(items, int(data[2:]), "d"))
@@ -1166,7 +1213,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         rows = await cur.to_list()
         if not rows:
-            await show("No photos yet. Check back soon!", menu_markup())
+            await show("No photos yet. Check back soon!", await family_menu(thread_id))
             return
         rows.sort(key=lambda r: (r["_id"] == "none", (r["loc"] or "").casefold()))
         items = [((r["loc"] or "No location")[:40] + f" ({r['n']})", f"L:{r['_id']}") for r in rows]
@@ -1180,6 +1227,184 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     elif data == "all":
         await start_send(context, chat_id, {"thread_id": thread_id})
+
+
+# ---------- friendly help + pinned button, best shots, "new photos are ready" ----------
+
+PHOTOS_BUTTON = "📷 My photos"
+HELP_BUTTON = "❓ Help"
+
+
+def client_keyboard() -> ReplyKeyboardMarkup:
+    """The two buttons that stay at the bottom of a client's chat."""
+    return ReplyKeyboardMarkup(
+        [[KeyboardButton(PHOTOS_BUTTON), KeyboardButton(HELP_BUTTON)]],
+        resize_keyboard=True,
+        is_persistent=True,
+    )
+
+
+async def has_best(thread_id: int | None) -> bool:
+    return bool(thread_id) and await db.photos.count_documents({"thread_id": thread_id, "best": True}) > 0
+
+
+async def family_menu(thread_id: int | None, extra: list | None = None) -> InlineKeyboardMarkup:
+    """The client menu, with ⭐ Best shots on top when the photographer has picked some."""
+    rows = list(extra or [])
+    if await has_best(thread_id):
+        rows.append([InlineKeyboardButton("⭐ Best shots", callback_data="bs")])
+    return menu_markup(rows)
+
+
+async def ensure_keyboard(bot, chat_id: int, user_id: int) -> None:
+    """Shows the pinned 📷 My photos / ❓ Help buttons once to every linked client."""
+    doc = await db.users.find_one({"_id": user_id})
+    if not doc or doc.get("kb"):
+        return
+    try:
+        await bot.send_message(
+            chat_id,
+            "👇 I put a “📷 My photos” button at the bottom of this chat, so you can always find your "
+            "photos. “❓ Help” explains everything.",
+            reply_markup=client_keyboard(),
+        )
+        await db.users.update_one({"_id": user_id}, {"$set": {"kb": True}})
+    except TelegramError:
+        pass
+
+
+def help_text(linked: bool) -> str:
+    if not linked:
+        return (
+            "👋 Hi! This bot gives you your family's photos.\n\n"
+            "Send /start, then type your first name, your family's last name and the 6-digit code you "
+            f"were given. If you don't have a code, ask {OWNER_NAME}."
+        )
+    return (
+        "ℹ️ How this works\n\n"
+        "📷 My photos opens your menu. Pick By date, By location or All photos.\n"
+        "⭐ Best shots (when it's there) has the favourites picked for you.\n"
+        "🧹 Under your photos, “Hide these photos” clears your chat. They stay in the gallery, so you "
+        "can open them again any time.\n"
+        "➕ Suggest photos lets you share your own for the gallery.\n\n"
+        f"{COPYRIGHT_WARNING}\n\n"
+        f"Stuck? Message {OWNER_NAME}."
+    )
+
+
+async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    uid = update.effective_user.id
+    linked = bool(await my_thread(context, uid))
+    await update.effective_message.reply_text(help_text(linked))
+    if linked:
+        await ensure_keyboard(context.bot, update.effective_message.chat_id, uid)
+
+
+@admin_only
+async def best_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Reply to a photo with /best to add it to (or take it out of) the family's ⭐ Best shots."""
+    msg = update.effective_message
+    target = msg.reply_to_message
+    if not target or not (target.photo or target.document):
+        await msg.reply_text(
+            "Reply to a photo with /best to add it to the family's ⭐ Best shots (reply again to take it out).\n"
+            "You can also put a ⭐ in a caption when you post, for example: 2026-07-04 | Central Park ⭐"
+        )
+        return
+    row = await db.photos.find_one({"message_id": target.message_id})
+    if not row:
+        await msg.reply_text("I don't have that photo in my list, so I can't mark it.")
+        return
+    now_best = not row.get("best", False)
+    await db.photos.update_one({"message_id": target.message_id}, {"$set": {"best": now_best}})
+    await msg.reply_text("⭐ Added to Best shots." if now_best else "Taken out of Best shots.")
+
+
+# --- "New photos are ready": after you finish adding photos, offer to tell the family ---
+
+def note_batch(up: dict, caption: str | None, sent_at: datetime) -> None:
+    """Remember which dates and places this batch covered (for the notification)."""
+    day, loc = parse_caption((caption or "").replace("⭐", ""), sent_at.astimezone(TZ).date().isoformat())
+    dates = up.setdefault("dates", [])
+    if day not in dates and len(dates) < 10:
+        dates.append(day)
+    places = up.setdefault("places", [])
+    if loc and loc not in places and len(places) < 10:
+        places.append(loc)
+
+
+async def notify_offer(context: ContextTypes.DEFAULT_TYPE, up: dict, who: int):
+    """Returns (extra text, buttons) offering to tell the family, or ("", None) if there's no one to tell."""
+    if not up or not up.get("count"):
+        return "", None
+    people = [u for u in await db.users.find({"thread_id": up["thread_id"]}).to_list() if u["_id"] != who]
+    if not people:
+        return "", None
+    token = secrets.token_hex(4)
+    pending = context.bot_data.setdefault("notify", {})
+    pending[token] = {
+        "tid": up["thread_id"], "name": up["name"], "who": who,
+        "dates": list(up.get("dates", [])), "places": list(up.get("places", [])),
+    }
+    while len(pending) > 20:
+        pending.pop(next(iter(pending)))
+    n = len(people)
+    text = f"\n\n📣 Tell the {up['name']} family their new photos are ready? ({n} {'person' if n == 1 else 'people'})"
+    return text, InlineKeyboardMarkup(
+        [[_btn(f"✅ Yes, tell them", f"nt:y:{token}"), _btn("No thanks", f"nt:n:{token}")]]
+    )
+
+
+def notify_message(info: dict) -> tuple[str, InlineKeyboardMarkup]:
+    lines = [f"📸 {OWNER_NAME} added new photos for your family!"]
+    if len(info["dates"]) == 1:
+        lines.append("📅 " + pretty_date(info["dates"][0]))
+    if len(info["places"]) == 1:
+        lines.append("📍 " + info["places"][0])
+    rows = [
+        [InlineKeyboardButton(f"📅 Open {pretty_date(d)}", callback_data=f"D:{d}")] for d in info["dates"][:3]
+    ]
+    rows.append([InlineKeyboardButton("🏠 Open the gallery", callback_data="menu")])
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
+async def on_notify_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    _, action, token = q.data.split(":")
+    info = context.bot_data.get("notify", {}).get(token)
+    if info and q.from_user.id != info["who"]:
+        await q.answer("This isn't yours to answer.", show_alert=True)
+        return
+    await q.answer()
+
+    async def show(text: str) -> None:
+        try:
+            await q.edit_message_text(text)
+        except TelegramError:
+            pass
+
+    if not info:
+        await show("That was already handled (or the bot restarted). If you need to, you can send a message from /admin → 📣 Announce.")
+        return
+    context.bot_data["notify"].pop(token, None)
+    if action == "n":
+        await show("OK, I won't message them.")
+        return
+    text, markup = notify_message(info)
+    sent = failed = 0
+    for u in await db.users.find({"thread_id": info["tid"]}).to_list():
+        if u["_id"] == info["who"]:
+            continue
+        try:
+            await send_with_retry(lambda: context.bot.send_message(u["_id"], text, reply_markup=markup), retry_timeouts=True)
+            sent += 1
+        except (TelegramError, RuntimeError):
+            failed += 1  # e.g. they blocked the bot
+        await asyncio.sleep(0.05)
+    await show(
+        f"✅ Told {sent} {'person' if sent == 1 else 'people'} in the {info['name']} family."
+        + (f" {failed} couldn't be reached." if failed else "")
+    )
 
 
 # ---------- photo suggestions: clients suggest, the owner approves ----------
@@ -1276,10 +1501,11 @@ async def handle_sug_step(update: Update, context: ContextTypes.DEFAULT_TYPE, su
 
     elif stage == "other":
         others, unmatched = [], []
+        text = text[:400]  # (keeps the replies and the photographer's message under Telegram's size limit)
         if clean_words(text) not in ("no", "none", "nope", "n", "nobody", "-"):
             own = await db.families.find_one({"thread_id": sug["thread_id"]})
-            for raw in re.split(r"[,\n;]| and ", text):
-                name = " ".join(raw.split())
+            for raw in re.split(r"[,\n;]| and ", text)[:10]:
+                name = " ".join(raw.split())[:40]
                 if not normalize(name):
                     continue
                 found = await db.families.find({"key": normalize(name)}).to_list()
@@ -1291,7 +1517,7 @@ async def handle_sug_step(update: Update, context: ContextTypes.DEFAULT_TYPE, su
                 else:
                     unmatched.append(name)
         sug.update(others=others, unmatched=unmatched, stage="files")
-        typed = ", ".join(" ".join(r.split()) for r in re.split(r"[,\n;]| and ", text) if normalize(r))
+        typed = ", ".join(" ".join(r.split())[:40] for r in re.split(r"[,\n;]| and ", text)[:10] if normalize(r))
         # Don't confirm which families exist: the photographer sees the matches when approving.
         note = f"Noted other families: {typed}.\n" if others or unmatched else ""
         await msg.reply_text(
@@ -1378,6 +1604,8 @@ async def submit_suggestion(context: ContextTypes.DEFAULT_TYPE, user, user_doc, 
         return "That family no longer exists."
     if not GROUP_ID:
         return "Suggestions aren't set up yet. Please tell the photographer."
+    if user_doc and user_doc.get("thread_id") not in (None, sug["thread_id"]):
+        return "Your family was changed, so please start the suggestion again."
     name = sug_name(user_doc, user)
     sid = secrets.token_hex(5)
     board: list[int] = []
@@ -1670,7 +1898,7 @@ async def add_person(bot, uid: int, tid: int, first_name: str) -> tuple[str, boo
     await clear_fails(f"link:{uid}")
     log.info("Owner added %s (%s) to family %s", first_name, uid, fam["name"])
     try:
-        await bot.send_message(uid, welcome_text(fam["name"]), reply_markup=menu_markup())
+        await bot.send_message(uid, welcome_text(fam["name"]), reply_markup=await family_menu(tid))
         await db.users.update_one({"_id": uid}, {"$set": {"welcomed": True}})
         return "", True
     except TelegramError:
@@ -1678,7 +1906,7 @@ async def add_person(bot, uid: int, tid: int, first_name: str) -> tuple[str, boo
 
 
 def welcome_text(family_name: str) -> str:
-    return f"🎉 {OWNER_NAME} has already added you to the {family_name} family. Here are your photos!"
+    return f"🎉 {OWNER_NAME} has already added you to the {family_name} family. Here are your photos!\n\n{COPYRIGHT_WARNING}"
 
 
 async def maybe_welcome(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
@@ -1690,8 +1918,9 @@ async def maybe_welcome(update: Update, context: ContextTypes.DEFAULT_TYPE) -> b
     fam = await db.families.find_one({"thread_id": doc["thread_id"]})
     await db.users.update_one({"_id": uid}, {"$set": {"welcomed": True}})
     await update.effective_message.reply_text(
-        welcome_text(fam["name"] if fam else "your"), reply_markup=menu_markup()
+        welcome_text(fam["name"] if fam else "your"), reply_markup=await family_menu(doc["thread_id"])
     )
+    await ensure_keyboard(context.bot, update.effective_message.chat_id, uid)
     return True
 
 
@@ -1742,7 +1971,7 @@ async def handle_newperson_text(update: Update, context: ContextTypes.DEFAULT_TY
     """From the main panel: the owner typed a Telegram ID and a first name; next they pick the family."""
     msg = update.message
     parts = (msg.text or "").split(None, 1)
-    if not parts or not parts[0].isdigit() or not (5 <= len(parts[0]) <= 15):
+    if not parts or not (parts[0].isascii() and parts[0].isdigit()) or not (5 <= len(parts[0]) <= 15):
         await msg.reply_text(
             "Please send their Telegram ID (a number) and their first name, like: 123456789 Maria\n"
             "They can get their ID by sending /id to this bot in a private chat."
@@ -1765,7 +1994,7 @@ async def handle_addperson_text(update: Update, context: ContextTypes.DEFAULT_TY
     """The owner typed a Telegram ID (and maybe a first name) to add to a family."""
     msg = update.message
     parts = (msg.text or "").split(None, 1)
-    if not parts or not parts[0].isdigit() or not (5 <= len(parts[0]) <= 15):
+    if not parts or not (parts[0].isascii() and parts[0].isdigit()) or not (5 <= len(parts[0]) <= 15):
         await msg.reply_text(
             "Please send their Telegram ID (a number like 123456789), then optionally their first name: "
             "123456789 Maria\nThey can get their ID by sending /id to this bot in a private chat."
@@ -1845,10 +2074,11 @@ async def family_page(tid: int):
         return None
     photos = await db.photos.count_documents({"thread_id": tid})
     people = await db.users.count_documents({"thread_id": tid})
+    best = await db.photos.count_documents({"thread_id": tid, "best": True})
     text = (
         f"🏠 {fam['name']} family\n"
         f"Code: {fam['code']}\n"
-        f"Photos: {photos} · People linked: {people}"
+        f"Photos: {photos} · People linked: {people} · ⭐ Best shots: {best}"
     )
     markup = InlineKeyboardMarkup(
         [
@@ -1856,6 +2086,7 @@ async def family_page(tid: int):
             [_btn("👥 Members", f"a:mem:{tid}"), _btn("🔄 New code", f"a:nc:{tid}")],
             [_btn("➕ Add person by ID", f"a:ap:{tid}")],
             [_btn("👁 Browse as this family", f"a:cnf:{tid}"), _btn("❌ Delete family", f"a:df:{tid}")],
+            *([[_btn(f"⭐ Clear best shots ({best})", f"a:bsx:{tid}")]] if best else []),
             [_btn("⬅️ Families", "a:fl:0")],
         ]
     )
@@ -1867,16 +2098,18 @@ async def members_view(tid: int):
     if not fam:
         return None
     people = await db.users.find({"thread_id": tid}).sort("first_name", 1).to_list()
-    rows = [[_btn(f"Unlink {p['first_name']}"[:60], f"a:ul:{tid}:{p['_id']}")] for p in people[:50]]
+    rows = [[_btn(f"Unlink {p['first_name']}"[:60], f"a:ul:{tid}:{p['_id']}")] for p in people[:25]]
     rows.append([_btn("⬅️ Back", f"a:f:{tid}")])
     if not people:
         text = f"No one has linked to the {fam['name']} family yet."
     else:
         lines = [
             f"• {p['first_name']} (id {p['_id']}" + (f", @{p['username']}" if p.get("username") else "") + ")"
-            for p in people[:50]
+            for p in people[:25]
         ]
         text = f"👥 {fam['name']} family members:\n" + "\n".join(lines)
+        if len(people) > 25:
+            text += f"\n…and {len(people) - 25} more."
     return text, InlineKeyboardMarkup(rows)
 
 
@@ -2033,6 +2266,12 @@ async def on_admin_button(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await clear_fails(f"link:{uid}")
         await show("🔓 The lockout is cleared. They can try again with /start.", one_button("⬅️ Back", f"a:trp:{uid}"))
 
+    elif action == "bsx":  # take every photo out of a family's Best shots
+        tid = int(parts[2])
+        await db.photos.update_many({"thread_id": tid, "best": True}, {"$set": {"best": False}})
+        view = await family_page(tid)
+        await show(*view) if view else await show("That family no longer exists.", one_button("⬅️ Families", "a:fl:0"))
+
     elif action == "trx":  # clear the whole list (just the list: nobody is unlinked or unlocked)
         await db.tries.delete_many({})
         await show(*await tries_view(0))
@@ -2154,7 +2393,7 @@ async def on_admin_button(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await show(
             f"👁 Connected to the {fam['name']} family. You see exactly what they see. "
             "Nothing is saved about you. /unlink disconnects you.",
-            menu_markup(),
+            await family_menu(tid),
         )
 
     elif action in ("fl", "ph", "rm"):  # pick a family: view / add photos / remove photos
@@ -2203,9 +2442,12 @@ async def on_admin_button(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         up = context.user_data.pop("up", None)
         count = up.get("count", 0) if up else 0
         back = f"a:f:{up['thread_id']}" if up else "a:home"
+        offer, markup = await notify_offer(context, up, q.from_user.id) if up else ("", None)
+        rows = [list(r) for r in markup.inline_keyboard] if markup else []
+        rows.append([_btn("⬅️ Back", back)])
         await show(
-            f"✅ Done. Added {count} file(s). The session is closed." if up else "No upload was running.",
-            one_button("⬅️ Back", back),
+            f"✅ Done. Added {count} file(s). The session is closed." + offer if up else "No upload was running.",
+            InlineKeyboardMarkup(rows),
         )
 
     elif action == "rmf":  # choose a date to delete
@@ -2327,12 +2569,15 @@ async def on_admin_button(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             try:
                 await context.bot.delete_forum_topic(GROUP_ID, tid)
             except TelegramError as e:
-                await show(
-                    f"I couldn't delete the topic ({e.message}), so nothing was changed. Check that I'm an "
-                    "admin with the “Delete messages” and “Manage topics” rights.",
-                    one_button("⬅️ Back", f"a:f:{tid}"),
-                )
-                return
+                if "not found" in str(e.message).lower():
+                    pass  # the topic was already removed by hand, carry on deleting the family
+                else:
+                    await show(
+                        f"I couldn't delete the topic ({e.message}), so nothing was changed. Check that I'm an "
+                        "admin with the “Delete messages” and “Manage topics” rights.",
+                        one_button("⬅️ Back", f"a:f:{tid}"),
+                    )
+                    return
         if action == "dfd" and fam.get("sug_thread_id"):
             try:
                 await context.bot.delete_forum_topic(GROUP_ID, fam["sug_thread_id"])
@@ -2389,19 +2634,34 @@ def start_health_server() -> None:
     log.info("Health endpoint listening on port %s", port)
 
 
+async def safe_index(make) -> None:
+    try:
+        await make()
+    except Exception:  # an old index with different options must not stop the bot from starting
+        log.exception("Couldn't create a database index (the bot will still work)")
+
+
+async def post_shutdown(app: Application) -> None:
+    if db is not None:
+        try:
+            await db.client.close()
+        except Exception:
+            pass
+
+
 async def post_init(app: Application) -> None:
     global db
     db = AsyncMongoClient(MONGODB_URI)[DB_NAME]
-    await db.families.create_index("thread_id", unique=True)
-    await db.families.create_index("code", unique=True)
-    await db.families.create_index("key")
-    await db.photos.create_index("message_id", unique=True)
-    await db.photos.create_index([("thread_id", 1), ("date", 1)])
-    await db.photos.create_index([("thread_id", 1), ("loc_id", 1)])
-    await db.photos.create_index("media_group_id")
-    await db.users.create_index("thread_id")
-    await db.tries.create_index("at", expireAfterSeconds=2592000)  # forget login attempts after 30 days
-    await db.sent.create_index("at", expireAfterSeconds=172800)  # forget hide-buttons after 2 days
+    await safe_index(lambda: db.families.create_index("thread_id", unique=True))
+    await safe_index(lambda: db.families.create_index("code", unique=True))
+    await safe_index(lambda: db.families.create_index("key"))
+    await safe_index(lambda: db.photos.create_index("message_id", unique=True))
+    await safe_index(lambda: db.photos.create_index([("thread_id", 1), ("date", 1)]))
+    await safe_index(lambda: db.photos.create_index([("thread_id", 1), ("loc_id", 1)]))
+    await safe_index(lambda: db.photos.create_index("media_group_id"))
+    await safe_index(lambda: db.users.create_index("thread_id"))
+    await safe_index(lambda: db.tries.create_index("at", expireAfterSeconds=2592000))  # forget login attempts after 30 days
+    await safe_index(lambda: db.sent.create_index("at", expireAfterSeconds=172800))  # forget hide-buttons after 2 days
     log.info("Connected to MongoDB database '%s'", DB_NAME)
 
 
@@ -2411,6 +2671,7 @@ def main() -> None:
         ApplicationBuilder()
         .token(BOT_TOKEN)
         .post_init(post_init)
+        .post_shutdown(post_shutdown)
         .connect_timeout(20)
         .read_timeout(60)
         .write_timeout(60)
@@ -2428,16 +2689,19 @@ def main() -> None:
         app.add_handler(CommandHandler("unlink", unlink, filters=grp))
         app.add_handler(CommandHandler("families", families, filters=grp))
         app.add_handler(CommandHandler("remove", remove_cmd, filters=grp))
+        app.add_handler(CommandHandler("best", best_cmd, filters=grp))
         app.add_handler(MessageHandler(grp & (filters.PHOTO | filters.Document.IMAGE), on_group_media))
         app.add_handler(CallbackQueryHandler(on_remove_button, pattern=r"^rm:(y|n):\d+$"))
         app.add_handler(CallbackQueryHandler(on_suggestion_button, pattern=r"^sa:(y|o|n):[0-9a-f]{10}$"))
     else:
         log.warning("GROUP_ID is not set: send /id in your group, then put it in the environment.")
 
-    priv = filters.ChatType.PRIVATE
+    priv = filters.ChatType.PRIVATE & filters.UpdateType.MESSAGE
     app.add_handler(CommandHandler("start", start, filters=priv))
     app.add_handler(CommandHandler(["menu", "gallery"], menu, filters=priv))
     app.add_handler(CommandHandler("connect", connect_cmd, filters=priv))
+    app.add_handler(CommandHandler("help", help_cmd, filters=priv))
+    app.add_handler(CallbackQueryHandler(on_notify_button, pattern=r"^nt:(y|n):[0-9a-f]{8}$"))
     app.add_handler(CommandHandler("announce", announce_cmd, filters=priv))
     app.add_handler(CommandHandler("unlink", unlink_private, filters=priv))
     app.add_handler(CommandHandler("admin", admin_cmd, filters=priv))
@@ -2450,7 +2714,7 @@ def main() -> None:
         ))
     app.add_handler(CallbackQueryHandler(on_admin_button, pattern=r"^a:"))
     app.add_handler(
-        CallbackQueryHandler(on_button, pattern=r"^(menu|all|d:\d+|l:\d+|D:\d{4}-\d{2}-\d{2}|L:[0-9a-f]{10}|L:none|x:\d+|sg:(new|send|gal))$")
+        CallbackQueryHandler(on_button, pattern=r"^(menu|all|d:\d+|l:\d+|D:\d{4}-\d{2}-\d{2}|L:[0-9a-f]{10}|L:none|x:\d+|bs|sg:(new|send|gal))$")
     )
     app.add_error_handler(on_error)
 
