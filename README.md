@@ -91,6 +91,37 @@ The bot needs the **Manage topics** and **Delete messages** rights for this.
 Clients can't unlink themselves. Wrong guesses are limited: 5 wrong tries lock that
 Telegram account for an hour (saved in MongoDB, so a restart doesn't reset it).
 
+### Family members adding relatives
+
+Clients get **👪 Add a family member** in their menu. Nobody types a Telegram ID:
+
+1. **Choose a person**: they tap "👤 Choose a person" and pick the relative from their Telegram contacts (or send
+   the contact card). Typing a name or `@username` doesn't work (Telegram doesn't let bots look people up), so the
+   bot asks them to use the picker.
+2. They type the relative's **first name**, then their **last name**.
+3. The bot shows a **summary** (the person's photo, @username, Telegram name, the first and last name typed, and
+   their Telegram ID) and asks "Is this right?". Nothing is added until they tap **✅ Yes**. **✏️ Start over** and
+   Cancel are there too.
+
+- The relative is added to **the same family only**, but sees nothing yet. When they open the bot they must type
+  their first and last name exactly as the family member wrote it (capitals and spacing don't matter). Wrong
+  tries are limited like logins. Until they confirm they get no photos, announcements or "photos ready" messages.
+- You get a message with the name and **added by [family member + family name]**, and a **Remove** button. In
+  Family → members, each person added this way shows "added by …" and "hasn't confirmed their name yet" if they
+  haven't.
+- The limit is 12 people per family (`FAMILY_MAX_MEMBERS` to change it). Someone already in another family (or the photographer) can't
+  be taken, and the client is never told which family. Clients still can't remove anyone; only you can.
+
+### Help, pinned buttons, Best shots, "photos are ready"
+
+- Families get two permanent buttons at the bottom of the chat: **📷 My photos** and **❓ Help** (also `/help`). Any
+  random message gets a friendly reply pointing to them.
+- **⭐ Best shots**: in the group, reply to a photo with `/best` (again to remove), or put a ⭐ in the caption when
+  uploading. Once any exist, families see a **⭐ Best shots** gallery. On a family's admin page you can
+  **Clear best shots**.
+- After you tap **Done** (or `/done`) on an upload, the bot asks "Tell the family their photos are ready?" and says how
+  many people will get it. Yes sends them a message with an Open button to those photos; No sends nothing.
+
 ## 8. The owner's admin panel (`/admin`)
 Set `OWNER_ID` to your own Telegram ID (send `/id` to the bot in a **private chat**, the number
 it replies with is your ID). Then send `/admin` to the bot. Only that account sees the panel,
@@ -106,6 +137,7 @@ and the bot saves nothing about you in the database.
 | ➕ Add person | from the main panel: type a Telegram ID and first name, then tap the family. They get the "already added you" message |
 | (family page) ➕ Add person by ID | type a Telegram ID (and first name) to link someone yourself. They can get their ID by sending `/id` to the bot. When they open the bot they see "[OWNER_NAME] has already added you to the … family" (they get it right away if they've opened the bot before) |
 | 📣 Announce | pick everyone or one family, type the message, check the preview, then send. It goes to each linked client as a private message from the bot (`/announce` does the same) |
+| 🕒 Scheduled | on the preview tap **🕒 Schedule it** and type when, like `tomorrow 9am` or `2026-10-20 18:30` (your time zone). Open **🕒 Scheduled** in the panel to see or cancel them. Saved in the database, so a restart doesn't lose them; the bot checks every 30 seconds and tells you when one went out. If the bot is asleep at that time (free hosting), it goes out as soon as it wakes, so keep UptimeRobot running |
 | 📊 Stats | families, people linked and photos |
 | (family page) 👥 Members | see who linked and unlink people |
 | (family page) 🔄 New code | makes a new code; people already linked stay linked |
