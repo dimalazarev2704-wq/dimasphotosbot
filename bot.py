@@ -60,6 +60,7 @@ from telegram import (
     InputMediaDocument,
     InputMediaPhoto,
     KeyboardButton,
+    KeyboardButtonRequestUsers,
     ReplyKeyboardMarkup,
     Update,
 )
@@ -96,6 +97,7 @@ MAX_SEND = int(os.getenv("MAX_SEND", "200"))  # max files sent per button press
 PAGE_SIZE = 20  # buttons per page in the date/location lists
 MAX_FAILS = 5  # wrong guesses allowed before a lock ...
 LOCK_SECONDS = 3600  # ... and how long the lock lasts
+FAMILY_MAX_MEMBERS = int(os.getenv("FAMILY_MAX_MEMBERS", "12") or 12)  # most people one family can have
 SESSION_SECONDS = 900  # /addphotos session idle timeout (15 minutes)
 
 logging.basicConfig(
@@ -570,6 +572,7 @@ def menu_markup(extra: list | None = None) -> InlineKeyboardMarkup:
                 InlineKeyboardButton("➕ Suggest photos", callback_data="sg:new"),
                 InlineKeyboardButton("💡 Family suggestions", callback_data="sg:gal"),
             ],
+            [InlineKeyboardButton("👪 Add a family member", callback_data="fm:new")],
         ]
     )
 
@@ -579,7 +582,7 @@ async def my_thread(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> int | N
     the family they picked with /connect. The owner's pick lives in memory only, never in the database."""
     doc = await db.users.find_one({"_id": user_id})
     if doc:
-        return doc["thread_id"]
+        return None if doc.get("pending") else doc["thread_id"]  # (pending = added by a relative, hasn't confirmed their name yet)
     if is_owner(user_id):
         return context.bot_data.get("preview", {}).get(user_id)
     return None
@@ -587,6 +590,8 @@ async def my_thread(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> int | N
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
+    if await handle_pending(update, context, None):
+        return
     if await maybe_welcome(update, context):
         return
     tid = await my_thread(context, user.id)
@@ -610,6 +615,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """/gallery and /menu: open the gallery."""
     context.user_data.pop("sug", None)
+    if await handle_pending(update, context, None):
+        return
     if await maybe_welcome(update, context):
         return
     tid = await my_thread(context, update.effective_user.id)
@@ -920,6 +927,8 @@ async def on_private_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 async def on_private_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     msg = update.message
+    if await handle_pending(update, context, msg.text or ""):
+        return
     if (msg.text or "").strip() in (PHOTOS_BUTTON, HELP_BUTTON) and not is_owner(update.effective_user.id):
         clear_flows(context)  # tapping a pinned button always works, even in the middle of something
         if msg.text.strip() == HELP_BUTTON:
@@ -942,6 +951,10 @@ async def on_private_text(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
     if sug:
         await handle_sug_step(update, context, sug)
+        return
+    fm = context.user_data.get("fm")
+    if fm:
+        await handle_family_member_text(update, context, fm)
         return
     adm = context.user_data.get("adm")
     if adm and is_owner(update.effective_user.id):
@@ -1119,8 +1132,16 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         try:
             await q.edit_message_text(text, reply_markup=markup)
         except TelegramError as e:
-            if "not modified" not in str(e.message).lower():
-                log.warning("Couldn't update the admin screen: %s", e.message)
+            if "not modified" in str(e.message).lower():
+                return
+            try:  # e.g. the message is a photo (the add-a-relative summary): replace it instead
+                await q.message.delete()
+            except (TelegramError, AttributeError):
+                pass
+            try:
+                await context.bot.send_message(chat_id, text, reply_markup=markup)
+            except TelegramError:
+                log.warning("Couldn't update the screen: %s", e.message)
 
     if data == "menu":
         context.user_data.pop("sug", None)
@@ -1138,6 +1159,34 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "You can add photos yourself from /admin → Add photos.",
             await family_menu(thread_id),
         )
+
+    elif data in ("fm:new", "fm:x", "fm:ok") and is_owner(q.from_user.id):
+        await show(
+            "This is for clients (it would save your account). To add someone yourself, use /admin → Add person.",
+            await family_menu(thread_id),
+        )
+
+    elif data == "fm:new":  # a client adds a relative
+        clear_flows(context)
+        context.user_data["fm"] = {"thread_id": thread_id, "until": time.time() + SESSION_SECONDS, "stage": "who"}
+        await db.users.update_one({"_id": q.from_user.id}, {"$set": {"kb": False}})  # so the pinned buttons come back later
+        await show(FM_ASK, one_button("Cancel", "fm:x"))
+        await context.bot.send_message(chat_id, "👇 Tap “Choose a person”", reply_markup=fm_pick_keyboard())
+
+    elif data == "fm:ok":
+        fm = context.user_data.get("fm")
+        if not fm or fm.get("stage") != "ok" or fm["until"] < time.time() or fm["thread_id"] != thread_id:
+            context.user_data.pop("fm", None)
+            await context.bot.send_message(chat_id, "That timed out. Tap 👪 Add a family member to start again.",
+                                           reply_markup=await family_menu(thread_id))
+            return
+        await fm_confirm(update, context, fm, q)
+
+    elif data == "fm:x":
+        had = context.user_data.pop("fm", None)
+        await show("What would you like to see?", await family_menu(thread_id))
+        if had:
+            await restore_keyboard(context.bot, chat_id)
 
     elif data == "sg:new":  # start suggesting photos
         clear_flows(context)
@@ -1286,7 +1335,8 @@ def help_text(linked: bool) -> str:
         "⭐ Best shots (when it's there) has the favourites picked for you.\n"
         "🧹 Under your photos, “Hide these photos” clears your chat. They stay in the gallery, so you "
         "can open them again any time.\n"
-        "➕ Suggest photos lets you share your own for the gallery.\n\n"
+        "➕ Suggest photos lets you share your own for the gallery.\n"
+        "👪 Add a family member lets you add a relative: pick them from your contacts, then type their name.\n\n"
         f"{COPYRIGHT_WARNING}\n\n"
         f"Stuck? Message {OWNER_NAME}."
     )
@@ -1337,7 +1387,7 @@ async def notify_offer(context: ContextTypes.DEFAULT_TYPE, up: dict, who: int):
     """Returns (extra text, buttons) offering to tell the family, or ("", None) if there's no one to tell."""
     if not up or not up.get("count"):
         return "", None
-    people = [u for u in await db.users.find({"thread_id": up["thread_id"]}).to_list() if u["_id"] != who]
+    people = [u for u in await db.users.find({"thread_id": up["thread_id"], "pending": {"$ne": True}}).to_list() if u["_id"] != who]
     if not people:
         return "", None
     token = secrets.token_hex(4)
@@ -1392,7 +1442,7 @@ async def on_notify_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
     text, markup = notify_message(info)
     sent = failed = 0
-    for u in await db.users.find({"thread_id": info["tid"]}).to_list():
+    for u in await db.users.find({"thread_id": info["tid"], "pending": {"$ne": True}}).to_list():
         if u["_id"] == info["who"]:
             continue
         try:
@@ -1426,7 +1476,7 @@ def sug_name(user_doc, user) -> str:
     return (user_doc or {}).get("first_name") or getattr(user, "first_name", None) or "Guest"
 
 
-FLOW_KEYS = ("up", "link", "adm", "sug")
+FLOW_KEYS = ("up", "link", "adm", "sug", "fm")
 
 
 def clear_flows(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1789,7 +1839,9 @@ ANN_MAX = 3500
 
 
 async def ann_recipients(aud: str) -> list[int]:
-    q = {} if aud == "all" else {"thread_id": int(aud)}
+    q = {"pending": {"$ne": True}}
+    if aud != "all":
+        q["thread_id"] = int(aud)
     return [u["_id"] for u in await db.users.find(q).to_list()]
 
 
@@ -1804,6 +1856,128 @@ async def ann_picker(page: int):
     fams = await db.families.find().sort("name", 1).to_list()
     items = [("📣 Everyone (all families)", "a:ana:all")] + [(f"{f['name']}", f"a:ana:{f['thread_id']}") for f in fams]
     return admin_pager(items, page, "a:an", "a:home")
+
+
+WHEN_HELP = (
+    "🕒 When should it go out? (your time, " + str(TZ) + ")\n\n"
+    "Examples:\n• tomorrow 9am\n• 2026-10-20 18:30\n• today 7:15pm"
+)
+
+
+def parse_when(text: str) -> datetime | None:
+    """'tomorrow 9am' / '2026-10-20 18:30' / 'today 7pm' -> an aware datetime in TZ; None if unusable."""
+    t = " ".join(text.strip().casefold().split())
+    m = re.fullmatch(r"(today|tomorrow|\d{4}-\d{2}-\d{2})?\s*(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?", t)
+    if not m:
+        return None
+    day_s, hh, mm, ap = m.group(1), int(m.group(2)), int(m.group(3) or 0), m.group(4)
+    if not ap and m.group(3) is None:
+        return None  # a bare number like "9" is too easy to misread
+    if ap:
+        if not 1 <= hh <= 12:
+            return None
+        hh = hh % 12 + (12 if ap == "pm" else 0)
+    if hh > 23 or mm > 59:
+        return None
+    today = datetime.now(TZ).date()
+    if day_s == "tomorrow":
+        d = today + timedelta(days=1)
+    elif day_s in (None, "today"):
+        d = today
+    else:
+        try:
+            d = date.fromisoformat(day_s)
+        except ValueError:
+            return None
+    local = datetime(d.year, d.month, d.day, hh, mm, tzinfo=TZ)
+    utc = local.astimezone(timezone.utc)
+    when = utc.astimezone(TZ)  # (a time that doesn't exist on a clock-change night shifts to the real one)
+    now = datetime.now(timezone.utc)
+    if utc <= now + timedelta(minutes=1) or utc > now + timedelta(days=366):
+        return None
+    return when
+
+
+async def broadcast(bot, aud: str, text: str) -> tuple[int, int, int]:
+    """Sends an announcement to everyone in the audience. Returns (sent, failed, total)."""
+    people = await ann_recipients(aud)
+    sent = failed = 0
+    for uid in people:
+        try:
+            await send_with_retry(
+                lambda: bot.send_message(uid, "📣 Announcement\n\n" + text),
+                retry_timeouts=True,
+            )
+            sent += 1
+        except (TelegramError, RuntimeError):
+            failed += 1  # e.g. they blocked the bot
+        await asyncio.sleep(0.05)
+    return sent, failed, len(people)
+
+
+def when_label(at: datetime) -> str:
+    local = at.astimezone(TZ)
+    return local.strftime("%a %b %d, %Y at %I:%M %p").replace(" 0", " ")
+
+
+async def scheduled_view(page: int = 0):
+    docs = await db.scheduled.find().sort("at", 1).to_list()
+    items = []
+    for d in docs:
+        at = d["at"].replace(tzinfo=timezone.utc) if d["at"].tzinfo is None else d["at"]
+        items.append((f"{when_label(at)} · {d['text'][:25]}", f"a:scv:{d['_id']}"))
+    markup = admin_pager(items, page, "a:sc", "a:home")
+    text = "🕒 Scheduled announcements (tap one to see or cancel it):" if docs else "🕒 Nothing is scheduled."
+    return text, markup
+
+
+async def scheduler_loop(app: Application) -> None:
+    """Every 30 seconds: send announcements whose time has come. They live in Mongo, so a restart
+    doesn't lose them (if the bot was asleep, they go out as soon as it wakes up)."""
+    while True:
+        try:
+            await asyncio.sleep(30)
+            while True:
+                now = datetime.now(timezone.utc)
+                # "Claim" it (not delete) so a crash or restart mid-send doesn't lose it: an unfinished
+                # claim is picked up again after 10 minutes. It's deleted only once it has been sent.
+                doc = await db.scheduled.find_one_and_update(
+                    {"at": {"$lte": now}, "claimed": {"$lte": now - timedelta(minutes=10)}},
+                    {"$set": {"claimed": now}},
+                )
+                if not doc:
+                    break
+                at = doc["at"].replace(tzinfo=timezone.utc) if doc["at"].tzinfo is None else doc["at"]
+                if now - at > timedelta(hours=12):  # the bot was down for ages: don't send it out of the blue
+                    await db.scheduled.delete_one({"_id": doc["_id"]})
+                    if OWNER_ID:
+                        try:
+                            await app.bot.send_message(
+                                OWNER_ID,
+                                f"⚠️ A scheduled announcement for {when_label(at)} was NOT sent, because the bot "
+                                f"was offline until much later.\n\n{doc['text'][:300]}",
+                            )
+                        except TelegramError:
+                            pass
+                    continue
+                sent, failed, total = await broadcast(app.bot, doc["aud"], doc["text"])
+                await db.scheduled.delete_one({"_id": doc["_id"]})
+                log.info("Sent a scheduled announcement to %s of %s", sent, total)
+                if OWNER_ID:
+                    try:
+                        await app.bot.send_message(
+                            OWNER_ID,
+                            f"🕒 Your scheduled announcement went out to {await ann_audience_name(doc['aud'])}: "
+                            f"{sent} of {total} received it."
+                            + (f" {failed} couldn't be reached." if failed else "")
+                            + f"\n\n{doc['text'][:200]}",
+                        )
+                    except TelegramError:
+                        pass
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("Scheduler problem (will try again)")
 
 
 async def handle_announce_text(update: Update, context: ContextTypes.DEFAULT_TYPE, adm: dict) -> None:
@@ -1822,7 +1996,8 @@ async def handle_announce_text(update: Update, context: ContextTypes.DEFAULT_TYP
         f"{await ann_audience_name(adm['aud'])}):\n\n{text}",
         reply_markup=InlineKeyboardMarkup(
             [
-                [_btn(f"✅ Send to {len(people)}", "a:ans")],
+                [_btn(f"✅ Send to {len(people)} now", "a:ans")],
+                [_btn("🕒 Schedule it", "a:ansc")],
                 [_btn("✏️ Rewrite", f"a:ana:{adm['aud']}"), _btn("Cancel", "a:home")],
             ]
         ),
@@ -1873,13 +2048,31 @@ def try_label(t: dict) -> str:
     return f"{who} · {t.get('reason', '?')}"
 
 
-async def add_person(bot, uid: int, tid: int, first_name: str) -> tuple[str, bool]:
-    """Links a Telegram account to a family on the owner's say-so.
+async def client_add_problem(uid: int, tid: int, final: bool = False) -> str:
+    """Why a family member can't add this account (or '' if they can). Never reveals other families.
+    The check that could reveal whether an account is known elsewhere only runs at the very end (final)."""
+    existing = await db.users.find_one({"_id": uid})
+    if existing and existing["thread_id"] == tid:
+        return "That person is already in your family."
+    if final and (existing or is_owner(uid)):
+        return f"I couldn't add them. Please ask {OWNER_NAME} for help."
+    if await db.users.count_documents({"thread_id": tid}) >= FAMILY_MAX_MEMBERS:
+        return f"Your family already has the most people I can add ({FAMILY_MAX_MEMBERS}). Please ask {OWNER_NAME}."
+    return ""
+
+
+async def add_person(bot, uid: int, tid: int, first_name: str, by: str | None = None) -> tuple[str, bool]:
+    """Links a Telegram account to a family, on the owner's say-so, or (when `by` is the first name of a
+    family member) because a family member added a relative.
     Returns (problem or '', whether the person could be messaged right away)."""
     fam = await db.families.find_one({"thread_id": tid})
     if not fam:
         return "That family no longer exists.", False
     existing = await db.users.find_one({"_id": uid})
+    if by:
+        problem = await client_add_problem(uid, tid, final=True)
+        if problem:
+            return problem, False
     if existing:
         other = await db.families.find_one({"thread_id": existing["thread_id"]})
         where = f"the {other['name']} family" if other else "another family"
@@ -1890,35 +2083,84 @@ async def add_person(bot, uid: int, tid: int, first_name: str) -> tuple[str, boo
         {"_id": uid},
         {"$set": {
             "thread_id": tid, "first_name": first_name, "username": None,
-            "linked_at": datetime.now(timezone.utc), "added_by_owner": True, "welcomed": False,
+            "linked_at": datetime.now(timezone.utc), "added_by_owner": not by, "welcomed": False,
+            "added_by": by, "pending": bool(by),
         }},
         upsert=True,
     )
     await db.tries.delete_one({"_id": uid})
     await clear_fails(f"link:{uid}")
-    log.info("Owner added %s (%s) to family %s", first_name, uid, fam["name"])
+    log.info("%s added %s (%s) to family %s", by or "Owner", first_name, uid, fam["name"])
     try:
-        await bot.send_message(uid, welcome_text(fam["name"]), reply_markup=await family_menu(tid))
+        if by:  # a relative added them: they confirm who they are before seeing anything
+            await bot.send_message(uid, confirm_prompt(by))
+            return "", True
+        await bot.send_message(uid, welcome_text(fam["name"], by), reply_markup=await family_menu(tid))
         await db.users.update_one({"_id": uid}, {"$set": {"welcomed": True}})
         return "", True
     except TelegramError:
         return "", False  # they haven't opened the bot yet; they'll get the welcome when they do
 
 
-def welcome_text(family_name: str) -> str:
-    return f"🎉 {OWNER_NAME} has already added you to the {family_name} family. Here are your photos!\n\n{COPYRIGHT_WARNING}"
+def welcome_text(family_name: str, by: str | None = None) -> str:
+    return f"🎉 {by or OWNER_NAME} has already added you to the {family_name} family. Here are your photos!\n\n{COPYRIGHT_WARNING}"
+
+
+def confirm_prompt(by: str) -> str:
+    return (
+        f"👋 {by} added you to a family photo gallery.\n\nTo see the photos, please type your first and last "
+        f"name, written the same way {by} wrote it."
+    )
+
+
+async def handle_pending(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str | None) -> bool:
+    """Someone a relative added must type their own name exactly as the relative wrote it before they get in.
+    Returns True when this message was handled here."""
+    uid = update.effective_user.id
+    if is_owner(uid):
+        return False
+    doc = await db.users.find_one({"_id": uid})
+    if not doc or not doc.get("pending"):
+        return False
+    msg = update.effective_message
+    by = doc.get("added_by") or "A family member"
+    if text is None or text.strip() in (PHOTOS_BUTTON, HELP_BUTTON) or text.strip().startswith("/"):
+        await msg.reply_text(confirm_prompt(by))
+        return True
+    key = f"confirm:{uid}"
+    lock = await locked_for(key)
+    if lock:
+        await msg.reply_text(lock_text(lock))
+        return True
+    if normalize(text) != normalize(doc.get("first_name", "")) or not normalize(text):
+        locked = await record_fail(key)
+        await msg.reply_text(
+            "That isn't the name I was given. Please type your first and last name exactly as "
+            f"{by} wrote it (ask them if you're not sure)."
+            + ("\n\nToo many tries, so please wait a bit." if locked else "")
+        )
+        return True
+    await db.users.update_one({"_id": uid}, {"$set": {"pending": False, "welcomed": True}})
+    await clear_fails(key)
+    fam = await db.families.find_one({"thread_id": doc["thread_id"]})
+    log.info("%s confirmed (added by %s)", doc.get("first_name"), by)
+    await msg.reply_text(
+        welcome_text(fam["name"] if fam else "your", by), reply_markup=await family_menu(doc["thread_id"])
+    )
+    await ensure_keyboard(context.bot, msg.chat_id, uid)
+    return True
 
 
 async def maybe_welcome(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     """The first time an owner-added person opens the bot, tell them they're already in."""
     uid = update.effective_user.id
     doc = await db.users.find_one({"_id": uid})
-    if not doc or not doc.get("added_by_owner") or doc.get("welcomed"):
+    if not doc or not doc.get("added_by_owner") or doc.get("welcomed") or doc.get("pending"):
         return False
     fam = await db.families.find_one({"thread_id": doc["thread_id"]})
     await db.users.update_one({"_id": uid}, {"$set": {"welcomed": True}})
     await update.effective_message.reply_text(
-        welcome_text(fam["name"] if fam else "your"), reply_markup=await family_menu(doc["thread_id"])
+        welcome_text(fam["name"] if fam else "your", doc.get("added_by")), reply_markup=await family_menu(doc["thread_id"])
     )
     await ensure_keyboard(context.bot, update.effective_message.chat_id, uid)
     return True
@@ -1990,6 +2232,207 @@ async def handle_newperson_text(update: Update, context: ContextTypes.DEFAULT_TY
     await msg.reply_text(f"Which family should {name} join?", reply_markup=markup)
 
 
+FM_ASK = (
+    "👪 Add a family member\n\nStep 1: tap “👤 Choose a person” at the bottom and pick them from your "
+    "contacts (or send me their contact card). Then I'll ask for their first name and last name, and show you "
+    "everything to check.\n\nWhen they open this bot they'll have to type that same name before they can see "
+    "your family's photos (never anyone else's). Only the photographer can remove someone."
+)
+FM_NOT_FOUND = (
+    "I can't look people up by name or @username (Telegram doesn't let bots do that). Please tap "
+    "“👤 Choose a person” at the bottom and pick them from your contacts, or send me their contact card."
+)
+
+
+def fm_pick_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        [
+            [KeyboardButton(
+                "👤 Choose a person",
+                request_users=KeyboardButtonRequestUsers(
+                    request_id=1, user_is_bot=False, max_quantity=1,
+                    request_name=True, request_username=True, request_photo=True,
+                ),
+            )],
+            [KeyboardButton("Cancel")],
+        ],
+        resize_keyboard=True, one_time_keyboard=True,
+    )
+
+
+async def restore_keyboard(bot, chat_id: int, text: str = "👍") -> None:
+    """Puts the pinned 📷 My photos / ❓ Help buttons back after the person-picker."""
+    try:
+        await bot.send_message(chat_id, text, reply_markup=client_keyboard())
+        await db.users.update_one({"_id": chat_id}, {"$set": {"kb": True}})  # (a private chat's id is the person's id)
+    except TelegramError:
+        pass
+
+
+async def fm_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """The add-a-relative flow for this person if it's still valid, else None (and says why)."""
+    fm = context.user_data.get("fm")
+    if not fm:
+        return None
+    msg = update.effective_message
+    if fm["until"] < time.time():
+        context.user_data.pop("fm", None)
+        await msg.reply_text("That timed out. Tap 👪 Add a family member to start again.")
+        await restore_keyboard(context.bot, msg.chat_id)
+        return None
+    tid = await my_thread(context, update.effective_user.id)
+    if not tid or tid != fm["thread_id"]:
+        context.user_data.pop("fm", None)
+        await msg.reply_text("Send /start to link your account.")
+        return None
+    fm["until"] = time.time() + SESSION_SECONDS
+    return fm
+
+
+async def fm_got_person(update: Update, context: ContextTypes.DEFAULT_TYPE, fm: dict, uid: int, tg_name: str,
+                        username: str | None, photo_id: str | None) -> None:
+    msg = update.effective_message
+    if uid == update.effective_user.id or uid == context.bot.id:
+        await msg.reply_text("That's you! Please choose someone else." if uid != context.bot.id else "That's me! Please choose a person.")
+        return
+    problem = await client_add_problem(uid, fm["thread_id"])
+    if problem:
+        await msg.reply_text(problem + " Choose someone else, or tap Cancel.")
+        return
+    fm.update(stage="first", uid=uid, tg_name=tg_name, username=username, photo=photo_id)
+    await msg.reply_text(
+        f"Got it: {tg_name}" + (f" (@{username})" if username else "") + " ✅",
+        reply_markup=client_keyboard(),
+    )
+    await msg.reply_text("Step 2: type their FIRST name.", reply_markup=one_button("Cancel", "fm:x"))
+
+
+async def on_users_shared(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    fm = await fm_session(update, context)
+    if not fm or fm.get("stage") != "who":
+        if not fm:  # a stale picker: put the normal buttons back
+            await restore_keyboard(context.bot, update.effective_message.chat_id, "That's no longer active.")
+        return
+    users = list(update.effective_message.users_shared.users or [])
+    if not users:
+        return
+    u = users[0]
+    photo = getattr(u, "photo", None)
+    name = " ".join(x for x in (getattr(u, "first_name", None), getattr(u, "last_name", None)) if x) or "that person"
+    await fm_got_person(update, context, fm, u.user_id, name, getattr(u, "username", None),
+                        photo[-1].file_id if photo else None)
+
+
+async def on_contact_shared(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    fm = await fm_session(update, context)
+    if not fm or fm.get("stage") != "who":
+        return
+    c = update.effective_message.contact
+    if not c or not c.user_id:
+        await update.effective_message.reply_text(
+            "That contact isn't on Telegram, so I can't add them. Choose someone else, or tap Cancel."
+        )
+        return
+    name = " ".join(x for x in (c.first_name, c.last_name) if x) or "that person"
+    await fm_got_person(update, context, fm, c.user_id, name, None, None)
+
+
+def fm_name_ok(text: str) -> str:
+    name = " ".join((text or "").split())
+    return name if 1 <= len(name) <= 40 and not re.search(r"[\d@/]", name) and normalize(name) else ""
+
+
+async def handle_family_member_text(update: Update, context: ContextTypes.DEFAULT_TYPE, fm: dict) -> None:
+    """The person adding a relative typed something: a cancel, a @username, or a first / last name."""
+    msg = update.message
+    fm = await fm_session(update, context)
+    if not fm:
+        return
+    text = (msg.text or "").strip()
+    stage = fm.get("stage")
+    if text.casefold() == "cancel":
+        context.user_data.pop("fm", None)
+        await msg.reply_text("Cancelled.", reply_markup=client_keyboard())
+        await msg.reply_text("What would you like to see?", reply_markup=await family_menu(fm["thread_id"]))
+        return
+    if stage == "who":
+        await msg.reply_text(FM_NOT_FOUND, reply_markup=fm_pick_keyboard())
+    elif stage == "first":
+        name = fm_name_ok(text)
+        if not name or len(name.split()) > 1:
+            await msg.reply_text("Please type just their FIRST name (letters only).", reply_markup=one_button("Cancel", "fm:x"))
+            return
+        fm.update(first=name, stage="last")
+        await msg.reply_text("Step 3: type their LAST name.", reply_markup=one_button("Cancel", "fm:x"))
+    elif stage == "last":
+        name = fm_name_ok(text)
+        if not name:
+            await msg.reply_text("Please type their LAST name (letters only).", reply_markup=one_button("Cancel", "fm:x"))
+            return
+        fm.update(last=name, stage="ok")
+        await fm_summary(context, msg.chat_id, fm)
+    else:
+        await msg.reply_text("Please tap ✅ Yes or ✏️ Start over above.")
+
+
+def fm_summary_text(fm: dict) -> str:
+    return (
+        "Please check that everything is right:\n\n"
+        f"👤 Telegram: {fm['tg_name']}\n"
+        f"🔗 Username: {'@' + fm['username'] if fm.get('username') else 'none'}\n"
+        f"📝 Name: {fm['first']} {fm['last']}\n"
+        f"🆔 ID: {fm['uid']}\n"
+        f"📸 Photo: {'shown above' if fm.get('photo') else 'none'}\n\n"
+        "Is this right? They'll have to type that name when they open the bot."
+    )
+
+
+async def fm_summary(context: ContextTypes.DEFAULT_TYPE, chat_id: int, fm: dict) -> None:
+    markup = InlineKeyboardMarkup(
+        [[_btn("✅ Yes, that's right", "fm:ok")], [_btn("✏️ Start over", "fm:new"), _btn("Cancel", "fm:x")]]
+    )
+    if fm.get("photo"):
+        try:
+            await context.bot.send_photo(chat_id, fm["photo"], caption=fm_summary_text(fm)[:1000], reply_markup=markup)
+            return
+        except TelegramError:
+            fm["photo"] = None
+    await context.bot.send_message(chat_id, fm_summary_text(fm), reply_markup=markup)
+
+
+async def fm_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE, fm: dict, q) -> None:
+    """They tapped 'Yes, that's right': add the relative (waiting for them to confirm their name)."""
+    user = update.effective_user
+    tid = fm["thread_id"]
+    name = f"{fm['first']} {fm['last']}"
+    me = await db.users.find_one({"_id": user.id})
+    mine = await db.families.find_one({"thread_id": tid})
+    by = f"{sug_name(me, user)} {mine['name'] if mine else ''}".strip()
+    problem, messaged = await add_person(context.bot, fm["uid"], tid, name, by=by)
+    context.user_data.pop("fm", None)
+    chat_id = q.message.chat_id
+    if problem:
+        await context.bot.send_message(chat_id, problem, reply_markup=await family_menu(tid))
+        return
+    await context.bot.send_message(
+        chat_id,
+        f"✅ Added {name}. When they open this bot they'll type their first and last name, exactly like "
+        "you wrote it, and then they'll see your photos." + (" I messaged them." if messaged else ""),
+        reply_markup=await family_menu(tid),
+    )
+    if OWNER_ID and mine:
+        try:
+            await context.bot.send_message(
+                OWNER_ID,
+                f"👪 {name} was added to the {mine['name']} family (added by {by}). Telegram: {fm['tg_name']}"
+                + (f" (@{fm['username']})" if fm.get("username") else "") + f", id {fm['uid']}. "
+                "They see nothing until they type that name.",
+                reply_markup=InlineKeyboardMarkup([[_btn(f"🗑 Remove {name}"[:60], f"a:ul:{tid}:{fm['uid']}")]]),
+            )
+        except TelegramError:
+            pass
+
+
 async def handle_addperson_text(update: Update, context: ContextTypes.DEFAULT_TYPE, adm: dict) -> None:
     """The owner typed a Telegram ID (and maybe a first name) to add to a family."""
     msg = update.message
@@ -2032,7 +2475,7 @@ def admin_home_markup() -> InlineKeyboardMarkup:
             [_btn("📋 Families", "a:fl:0"), _btn("➕ Add family", "a:add")],
             [_btn("📤 Add photos", "a:ph:0"), _btn("🗑 Remove photos", "a:rm:0")],
             [_btn("➕ Add person", "a:np"), _btn("🕵️ Login attempts", "a:tr:0")],
-            [_btn("📣 Announce", "a:an:0")],
+            [_btn("📣 Announce", "a:an:0"), _btn("🕒 Scheduled", "a:sc:0")],
             [_btn("📊 Stats", "a:stats")],
         ]
     )
@@ -2105,6 +2548,8 @@ async def members_view(tid: int):
     else:
         lines = [
             f"• {p['first_name']} (id {p['_id']}" + (f", @{p['username']}" if p.get("username") else "") + ")"
+            + (f" — added by {p['added_by']}" if p.get("added_by") else "")
+            + (" ⏳ hasn't confirmed their name yet" if p.get("pending") else "")
             for p in people[:25]
         ]
         text = f"👥 {fam['name']} family members:\n" + "\n".join(lines)
@@ -2150,6 +2595,28 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     """The owner typed text: an announcement, or a last name after tapping 'Add family'."""
     if adm.get("stage") in ("ann", "ann_ok"):
         await handle_announce_text(update, context, adm)
+        return
+    if adm.get("stage") == "ann_when":
+        when = parse_when(update.message.text or "")
+        if not when:
+            await update.message.reply_text("I couldn't read that time, or it's already past.\n\n" + WHEN_HELP)
+            return
+        if await db.scheduled.count_documents({}) >= 50:
+            await update.message.reply_text("You already have 50 scheduled. Cancel one first.")
+            return
+        sid = secrets.token_hex(4)
+        await db.scheduled.insert_one(
+            {"_id": sid, "aud": adm["aud"], "text": adm["text"], "at": when.astimezone(timezone.utc),
+             "claimed": datetime(1970, 1, 1, tzinfo=timezone.utc)}
+        )
+        context.user_data.pop("adm", None)
+        await update.message.reply_text(
+            f"✅ Scheduled for {when_label(when)} to {await ann_audience_name(adm['aud'])}.\n"
+            "I'll message you when it goes out. (If the bot is asleep then, it goes out as soon as it wakes.)",
+            reply_markup=InlineKeyboardMarkup(
+                [[_btn("🕒 Scheduled", "a:sc:0")], [_btn("⬅️ Admin panel", "a:home")]]
+            ),
+        )
         return
     if adm.get("stage") == "addp":
         await handle_addperson_text(update, context, adm)
@@ -2361,23 +2828,43 @@ async def on_admin_button(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await show("There's nothing to send. Start again from the admin panel.", one_button("⬅️ Admin panel", "a:home"))
             return
         context.user_data.pop("adm", None)
-        people = await ann_recipients(adm["aud"])
-        sent = failed = 0
-        for uid in people:
-            try:
-                await send_with_retry(
-                    lambda: context.bot.send_message(uid, "📣 Announcement\n\n" + adm["text"]),
-                    retry_timeouts=True,
-                )
-                sent += 1
-            except (TelegramError, RuntimeError):
-                failed += 1  # e.g. they blocked the bot
-            await asyncio.sleep(0.05)
+        sent, failed, total = await broadcast(context.bot, adm["aud"], adm["text"])
+        people = range(total)
         log.info("Owner sent an announcement to %s of %s", sent, len(people))
         await show(
             f"✅ Sent to {sent} of {len(people)}."
             + (f" {failed} couldn't be reached (they may have blocked the bot)." if failed else ""),
             one_button("⬅️ Admin panel", "a:home"),
+        )
+
+    elif action == "ansc":  # schedule instead of sending now
+        adm = context.user_data.get("adm")
+        if not adm or adm.get("stage") != "ann_ok":
+            await show("There's nothing to schedule. Start again from the admin panel.", one_button("⬅️ Admin panel", "a:home"))
+            return
+        adm["stage"] = "ann_when"
+        await show(WHEN_HELP, one_button("Cancel", "a:home"))
+
+    elif action == "sc":  # list of scheduled announcements
+        context.user_data.pop("adm", None)
+        text, markup = await scheduled_view(int(parts[2]))
+        await show(text, markup)
+
+    elif action in ("scv", "scx"):  # see / cancel one
+        doc = await db.scheduled.find_one({"_id": parts[2]})
+        if not doc:
+            await show("That one already went out or was cancelled.", one_button("⬅️ Scheduled", "a:sc:0"))
+            return
+        if action == "scx":
+            await db.scheduled.delete_one({"_id": parts[2]})
+            await show("🗑 Cancelled.", one_button("⬅️ Scheduled", "a:sc:0"))
+            return
+        at = doc["at"].replace(tzinfo=timezone.utc) if doc["at"].tzinfo is None else doc["at"]
+        await show(
+            f"🕒 {when_label(at)}\nTo: {await ann_audience_name(doc['aud'])}\n\n{doc['text']}",
+            InlineKeyboardMarkup(
+                [[_btn("🗑 Cancel this one", f"a:scx:{doc['_id']}")], [_btn("⬅️ Scheduled", "a:sc:0")]]
+            ),
         )
 
     elif action == "cn":  # owner: pick a family to browse like a client
@@ -2642,6 +3129,9 @@ async def safe_index(make) -> None:
 
 
 async def post_shutdown(app: Application) -> None:
+    task = app.bot_data.get("scheduler")
+    if task:
+        task.cancel()
     if db is not None:
         try:
             await db.client.close()
@@ -2662,6 +3152,7 @@ async def post_init(app: Application) -> None:
     await safe_index(lambda: db.users.create_index("thread_id"))
     await safe_index(lambda: db.tries.create_index("at", expireAfterSeconds=2592000))  # forget login attempts after 30 days
     await safe_index(lambda: db.sent.create_index("at", expireAfterSeconds=172800))  # forget hide-buttons after 2 days
+    app.bot_data["scheduler"] = asyncio.create_task(scheduler_loop(app))
     log.info("Connected to MongoDB database '%s'", DB_NAME)
 
 
@@ -2708,13 +3199,15 @@ def main() -> None:
     app.add_handler(CommandHandler("addphotos", addphotos, filters=priv))
     app.add_handler(CommandHandler("done", done, filters=priv))
     app.add_handler(MessageHandler(priv & filters.UpdateType.MESSAGE & filters.TEXT & ~filters.COMMAND, on_private_text))
+    app.add_handler(MessageHandler(priv & filters.StatusUpdate.USERS_SHARED, on_users_shared))
+    app.add_handler(MessageHandler(priv & filters.UpdateType.MESSAGE & filters.CONTACT, on_contact_shared))
     app.add_handler(MessageHandler(
             priv & filters.UpdateType.MESSAGE & (filters.PHOTO | filters.Document.ALL | filters.VIDEO),
             on_private_media,
         ))
     app.add_handler(CallbackQueryHandler(on_admin_button, pattern=r"^a:"))
     app.add_handler(
-        CallbackQueryHandler(on_button, pattern=r"^(menu|all|d:\d+|l:\d+|D:\d{4}-\d{2}-\d{2}|L:[0-9a-f]{10}|L:none|x:\d+|bs|sg:(new|send|gal))$")
+        CallbackQueryHandler(on_button, pattern=r"^(menu|all|d:\d+|l:\d+|D:\d{4}-\d{2}-\d{2}|L:[0-9a-f]{10}|L:none|x:\d+|bs|sg:(new|send|gal)|fm:(new|x|ok))$")
     )
     app.add_error_handler(on_error)
 
