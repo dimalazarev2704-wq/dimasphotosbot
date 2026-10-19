@@ -112,6 +112,24 @@ Clients get **👪 Add a family member** in their menu. Nobody types a Telegram 
 - The limit is 12 people per family (`FAMILY_MAX_MEMBERS` to change it). Someone already in another family (or the photographer) can't
   be taken, and the client is never told which family. Clients still can't remove anyone; only you can.
 
+### New families setting themselves up
+
+If you give someone the bot and they don't have a code (for example at an event), they send `/start`, type their
+first name and last name, and tap **🆕 I'm new, I don't have a code**. The bot asks "Is the last name spelled
+right?" (**Yes** / **No, retype**). On Yes, the bot posts the request in one topic in the group called
+**➕ Add families**. The topic is made the first time and reused after that (if you delete it, it's made again).
+The post shows their name, last name and Telegram ID, with three choices:
+
+- **🆕 Make a new [Last name] family and add [name]**: makes the family's topic and code and adds them. They're
+  welcomed with their photos link.
+- **➕ Add [name] to the existing [Last name] family**: shown when a family with that name already exists (it also
+  warns you), in case it's a relative.
+- **❌ Reject**: they're told politely.
+
+Only you can answer. Each person can have one request waiting (an unanswered one expires after a day so they can ask again), at most 30 can wait at once, and each person can send only a few per hour. If something fails halfway, the request stays and tapping the button again retries without making a second family. The bot gives the same
+replies whether or not a last name exists, so nobody can find out which families exist. `/register` refuses the
+Add families topic.
+
 ### Help, pinned buttons, Best shots, "photos are ready"
 
 - Families get two permanent buttons at the bottom of the chat: **📷 My photos** and **❓ Help** (also `/help`). Any
