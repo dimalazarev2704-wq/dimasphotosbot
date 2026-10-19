@@ -379,6 +379,9 @@ async def register(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if await db.families.find_one({"sug_thread_id": thread_id}):
         await msg.reply_text("This is a suggestions topic, so it can't be a family. Use the family's own topic.")
         return
+    if await db.meta.find_one({"_id": "addfam", "thread_id": thread_id}):
+        await msg.reply_text("This is the ➕ Add families topic, so it can't be a family. Use the family's own topic.")
+        return
     existing = await db.families.find_one({"thread_id": thread_id})
     code = existing["code"] if existing else await new_code()
     await db.families.update_one(
@@ -544,6 +547,8 @@ async def on_group_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
     if await db.families.find_one({"sug_thread_id": msg.message_thread_id}):
         return  # a family's suggestions topic: photos there are only waiting for approval
+    if await db.meta.find_one({"_id": "addfam", "thread_id": msg.message_thread_id}):
+        return  # the ➕ Add families topic is never a family
     await index_file(
         msg.message_thread_id, msg.message_id, file_id, msg.caption, msg.media_group_id, msg.date, kind
     )
@@ -605,6 +610,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if lock:
         await update.message.reply_text(lock_text(lock))
         return
+    if not is_owner(user.id) and await pending_newfam(user.id):
+        await update.message.reply_text(
+            f"Your request is waiting for {OWNER_NAME}. I'll message you here as soon as your family is set up. 🙂"
+        )
+        return
     clear_flows(context)
     if not is_owner(user.id):
         await record_try(user, "started, didn't finish", keep_existing=True)
@@ -665,7 +675,7 @@ async def handle_link_step(update: Update, context: ContextTypes.DEFAULT_TYPE, l
         if not normalize(text) or len(text) > 40:
             await msg.reply_text("Please send just your first name.")
             return
-        link.update(stage="last", first=text)
+        link.update(stage="last", first=" ".join(text.split()))
         await msg.reply_text(f"Nice to meet you, {text}! What's your family's last name?")
 
     elif stage == "last":
@@ -673,7 +683,13 @@ async def handle_link_step(update: Update, context: ContextTypes.DEFAULT_TYPE, l
             await msg.reply_text("Please send your family's last name.")
             return
         link.update(stage="code", last=text)
-        await msg.reply_text("Thanks! Now the 6-digit code you were given.")
+        await msg.reply_text(
+            "Thanks! Now the 6-digit code you were given.\n\nNew here and don't have a code?",
+            reply_markup=one_button("🆕 I'm new, I don't have a code", "nf:new"),
+        )
+
+    elif stage == "nf":
+        await msg.reply_text("Please tap ✅ Yes or ✏️ No above.")
 
     elif stage == "code":
         key = f"link:{user.id}"
@@ -2089,6 +2105,7 @@ async def add_person(bot, uid: int, tid: int, first_name: str, by: str | None = 
         upsert=True,
     )
     await db.tries.delete_one({"_id": uid})
+    await db.newfam.delete_many({"uid": uid})  # (a waiting new-family request is settled now)
     await clear_fails(f"link:{uid}")
     log.info("%s added %s (%s) to family %s", by or "Owner", first_name, uid, fam["name"])
     try:
@@ -2340,6 +2357,225 @@ async def on_contact_shared(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 def fm_name_ok(text: str) -> str:
     name = " ".join((text or "").split())
     return name if 1 <= len(name) <= 40 and not re.search(r"[\d@/]", name) and normalize(name) else ""
+
+
+# ---------- new families asking to be set up (a stranger starts the bot and has no code) ----------
+
+NEWFAM_STALE = 24 * 3600  # a request nobody answered for a day can be made again
+
+
+async def pending_newfam(uid: int):
+    """The person's waiting new-family request, or None (an old unanswered one is forgotten)."""
+    r = await db.newfam.find_one({"uid": uid})
+    if r:
+        at = r["at"].replace(tzinfo=timezone.utc) if r["at"].tzinfo is None else r["at"]
+        if (datetime.now(timezone.utc) - at).total_seconds() > NEWFAM_STALE:
+            await db.newfam.delete_one({"_id": r["_id"]})
+            return None
+    return r
+
+
+async def make_family(bot, name: str) -> tuple[int, str, bool]:
+    """Makes the family's topic in the group, saves the family and posts its code there.
+    Returns (topic id, code, whether the code was posted in the topic). Raises TelegramError."""
+    topic = await bot.create_forum_topic(GROUP_ID, name)
+    tid = topic.message_thread_id
+    code = await new_code()
+    await db.families.update_one(
+        {"thread_id": tid},
+        {"$set": {"name": name, "key": normalize(name)},
+         "$setOnInsert": {"code": code, "created": datetime.now(timezone.utc)}},
+        upsert=True,
+    )
+    log.info("Made family %s", name)
+    try:
+        await bot.send_message(GROUP_ID, f"🏠 {name} family\nCode: {code}", message_thread_id=tid)
+        return tid, code, True
+    except TelegramError:
+        log.exception("Couldn't post the code in the new topic")
+        return tid, code, False
+
+
+async def post_in_addfam_topic(bot, text: str, markup: InlineKeyboardMarkup) -> int:
+    """Posts in the one '➕ Add families' topic (made the first time, reused after that)."""
+    meta = await db.meta.find_one({"_id": "addfam"})
+    for attempt in (1, 2):
+        if not meta or attempt == 2:
+            topic = await bot.create_forum_topic(GROUP_ID, "➕ Add families")
+            await db.meta.update_one({"_id": "addfam"}, {"$set": {"thread_id": topic.message_thread_id}}, upsert=True)
+            meta = {"_id": "addfam", "thread_id": topic.message_thread_id}
+        try:
+            sent = await bot.send_message(GROUP_ID, text, message_thread_id=meta["thread_id"], reply_markup=markup)
+            return sent.message_id
+        except TelegramError as e:
+            if attempt == 2 or "thread" not in str(e.message).lower():
+                raise  # (a deleted topic says "message thread not found": then we make it again)
+    raise RuntimeError("unreachable")
+
+
+async def on_newfamily_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """A person who started the bot and has no code taps 'I'm new', then confirms the spelling."""
+    q = update.callback_query
+    user = q.from_user
+    await q.answer()
+    chat_id = q.message.chat_id
+    link = context.user_data.get("link")
+    if is_owner(user.id) or not link or not link.get("last") or not link.get("first"):
+        await context.bot.send_message(chat_id, "Send /start to begin.")
+        return
+    if await db.users.find_one({"_id": user.id}):
+        context.user_data.pop("link", None)
+        await context.bot.send_message(chat_id, "You're already in a family. Send /gallery to see the photos.")
+        return
+
+    async def show(text: str, markup=None) -> None:
+        try:
+            await q.edit_message_text(text, reply_markup=markup)
+        except TelegramError:
+            await context.bot.send_message(chat_id, text, reply_markup=markup)
+
+    if q.data == "nf:yes" and link.get("stage") != "nf":
+        q.data = "nf:new"  # an old button: start the spelling check first
+    if q.data == "nf:new":
+        link["stage"] = "nf"
+        await show(
+            f"Welcome, {link['first']}! I'll ask {OWNER_NAME} to set up your family.\n\n"
+            f"Is the last name spelled right?\n\n👉 {link['last']}",
+            InlineKeyboardMarkup(
+                [[InlineKeyboardButton("✅ Yes, that's right", callback_data="nf:yes")],
+                 [InlineKeyboardButton("✏️ No, let me retype it", callback_data="nf:no")]]
+            ),
+        )
+    elif q.data == "nf:no":
+        link.update(stage="last")
+        link.pop("last", None)
+        await show("OK! What's your family's last name?")
+    elif q.data == "nf:yes":
+        if await pending_newfam(user.id):
+            context.user_data.pop("link", None)
+            await show(f"Your request is already waiting for {OWNER_NAME}. I'll message you here when it's done. 🙂")
+            return
+        lock = await locked_for(f"nf:{user.id}") or await locked_for(f"link:{user.id}")
+        if lock:
+            context.user_data.pop("link", None)
+            await show(lock_text(lock))
+            return
+        if not GROUP_ID or not OWNER_ID:
+            context.user_data.pop("link", None)
+            await show("Sorry, I can't set up new families yet. Please ask the photographer.")
+            return
+        if await db.newfam.count_documents({}) >= 30:  # too many waiting at once: don't flood the group
+            context.user_data.pop("link", None)
+            await show(f"Sorry, {OWNER_NAME} has a lot of requests waiting. Please try again later.")
+            return
+        tok = secrets.token_hex(4)
+        first = " ".join(link["first"].split())[:40]
+        last = " ".join(link["last"].split())[:60]
+        tg_name = " ".join((getattr(user, "first_name", None) or "?").split())[:40]
+        same = await db.families.find({"key": normalize(last)}).to_list()
+        rows, listing = [], []
+        for i, f in enumerate(same[:3], 1):
+            members = await db.users.count_documents({"thread_id": f["thread_id"]})
+            made = f["created"].strftime("%b %d, %Y") if f.get("created") else "?"
+            listing.append(f"#{i} {f['name']}: {members} {'person' if members == 1 else 'people'}, made {made}")
+            rows.append([InlineKeyboardButton(f"➕ Add to #{i} ({f['name']})"[:60], callback_data=f"nfa:e:{tok}:{f['thread_id']}")])
+        rows.append([InlineKeyboardButton(f"🆕 Make a new {last[:25]} family"[:60], callback_data=f"nfa:c:{tok}")])
+        rows.append([InlineKeyboardButton("❌ Reject", callback_data=f"nfa:r:{tok}")])
+        text = (
+            "🆕 New family request\n\n"
+            f"Name: {first}\nFamily last name: {last}\n"
+            f"Telegram: {tg_name}"
+            + (f" (@{user.username})" if getattr(user, "username", None) else "") + f", id {user.id}\n"
+            + (f"\n⚠️ A family called {last} already exists. Is this person one of them?\n" + "\n".join(listing) if same else "")
+        )
+        await db.newfam.insert_one(
+            {"_id": tok, "uid": user.id, "first": first, "last": last, "username": getattr(user, "username", None),
+             "at": datetime.now(timezone.utc)}
+        )
+        try:
+            await post_in_addfam_topic(context.bot, text, InlineKeyboardMarkup(rows))
+        except TelegramError:
+            log.exception("Couldn't post a new-family request")
+            await db.newfam.delete_one({"_id": tok})
+            context.user_data.pop("link", None)
+            await show("Sorry, I couldn't send your request right now. Please try again later.")
+            return
+        await record_fail(f"nf:{user.id}")  # a few requests per hour at most (only counted when it was sent)
+        context.user_data.pop("link", None)
+        await record_try(user, "asked to add a new family", first, last)
+        await show(
+            f"✅ Sent to {OWNER_NAME}! As soon as your family is set up, I'll message you here with your photos. "
+            "You can close this chat."
+        )
+
+
+async def on_newfamily_owner(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """The owner answers a request in the '➕ Add families' topic."""
+    q = update.callback_query
+    if not is_owner(q.from_user.id):
+        await q.answer("This is only for the photographer.", show_alert=True)
+        return
+    await q.answer()
+    parts = q.data.split(":")
+    action, tok = parts[1], parts[2]
+
+    async def show(text: str) -> None:
+        try:
+            await q.edit_message_text(text)
+        except TelegramError:
+            pass
+
+    r = await db.newfam.find_one({"_id": tok})
+    if not r:
+        await show("That request was already answered.")
+        return
+    if action == "r":
+        await db.newfam.delete_one({"_id": tok})
+        await db.tries.delete_one({"_id": r["uid"]})
+        await show(f"❌ Rejected {r['first']} {r['last']}.")
+        try:
+            await context.bot.send_message(
+                r["uid"], f"Sorry, {OWNER_NAME} couldn't set up your family. Please ask them directly."
+            )
+        except TelegramError:
+            pass
+        return
+    if await db.users.find_one({"_id": r["uid"]}):  # got in another way in the meantime
+        await db.newfam.delete_one({"_id": tok})
+        await show(f"{r['first']} {r['last']} is already in a family, so this request was dropped.")
+        return
+    code = r.get("made_code")
+    try:
+        if action == "c":
+            tid = r.get("made_tid")
+            if not tid:  # (if an earlier try got this far, don't make a second family)
+                tid, code, _ = await make_family(context.bot, r["last"])
+                await db.newfam.update_one({"_id": tok}, {"$set": {"made_tid": tid, "made_code": code}})
+        else:
+            tid = int(parts[3])
+            if not await db.families.find_one({"thread_id": tid}):
+                await db.newfam.delete_one({"_id": tok})
+                await show("That family no longer exists. The request was dropped.")
+                return
+        problem, messaged = await add_person(context.bot, r["uid"], tid, r["first"])
+    except Exception as e:  # the request stays, so tapping again retries
+        log.exception("Couldn't finish a new-family request")
+        await q.message.reply_text(
+            f"Something went wrong ({getattr(e, 'message', None) or type(e).__name__}). The request is still "
+            "waiting: tap the button again to retry. If the topic can't be made, check that I'm an admin "
+            "with “Manage topics”."
+        )
+        return
+    await db.newfam.delete_one({"_id": tok})
+    fam = await db.families.find_one({"thread_id": tid})
+    if problem:
+        await show(f"{r['first']} {r['last']}: {problem}" + (f"\nThe {fam['name']} family was made (code {code})." if code and fam else ""))
+        return
+    await show(
+        (f"✅ Made the {fam['name']} family (code {code}) and added {r['first']}." if code
+         else f"✅ Added {r['first']} to the {fam['name']} family.")
+        + ("" if messaged else " (I couldn't message them yet; they'll see the welcome when they open the bot.)")
+    )
 
 
 async def handle_family_member_text(update: Update, context: ContextTypes.DEFAULT_TYPE, fm: dict) -> None:
@@ -3192,6 +3428,8 @@ def main() -> None:
     app.add_handler(CommandHandler(["menu", "gallery"], menu, filters=priv))
     app.add_handler(CommandHandler("connect", connect_cmd, filters=priv))
     app.add_handler(CommandHandler("help", help_cmd, filters=priv))
+    app.add_handler(CallbackQueryHandler(on_newfamily_button, pattern=r"^nf:(new|yes|no)$"))
+    app.add_handler(CallbackQueryHandler(on_newfamily_owner, pattern=r"^nfa:(c|r|e):[0-9a-f]{8}(:\d+)?$"))
     app.add_handler(CallbackQueryHandler(on_notify_button, pattern=r"^nt:(y|n):[0-9a-f]{8}$"))
     app.add_handler(CommandHandler("announce", announce_cmd, filters=priv))
     app.add_handler(CommandHandler("unlink", unlink_private, filters=priv))
