@@ -45,11 +45,9 @@ import logging
 import os
 import re
 import secrets
-import threading
 import time
 import unicodedata
 from datetime import date, datetime, timedelta, timezone
-from http.server import BaseHTTPRequestHandler, HTTPServer
 from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
@@ -61,8 +59,10 @@ from telegram import (
     InputMediaPhoto,
     KeyboardButton,
     KeyboardButtonRequestUsers,
+    MenuButtonWebApp,
     ReplyKeyboardMarkup,
     Update,
+    WebAppInfo,
 )
 from telegram.constants import ChatAction, ChatMemberStatus
 from telegram.error import NetworkError, RetryAfter, TelegramError, TimedOut
@@ -77,6 +77,8 @@ from telegram.ext import (
 )
 
 load_dotenv()
+
+import webapp  # the Mini App's web server (webapp.py, next to this file)
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 MONGODB_URI = os.environ["MONGODB_URI"]
@@ -93,6 +95,10 @@ TZ = ZoneInfo(os.getenv("TIMEZONE", "America/New_York"))
 COPYRIGHT = (os.getenv("COPYRIGHT_NOTICE", "") or "© 2024 Dima Lazarev. All photos are protected by copyright.").strip()
 COPYRIGHT_WARNING = f"⚠️ {COPYRIGHT}"
 PROTECT_CONTENT = os.getenv("PROTECT_CONTENT", "false").lower() == "true"
+# The public https address of this service, for the Mini App. Render sets RENDER_EXTERNAL_URL by itself.
+WEBAPP_URL = (os.getenv("WEBAPP_URL", "") or os.getenv("RENDER_EXTERNAL_URL", "")).strip().rstrip("/")
+if WEBAPP_URL and not WEBAPP_URL.startswith("https://"):
+    WEBAPP_URL = ""  # Telegram only opens https pages
 MAX_SEND = int(os.getenv("MAX_SEND", "200"))  # max files sent per button press
 PAGE_SIZE = 20  # buttons per page in the date/location lists
 MAX_FAILS = 5  # wrong guesses allowed before a lock ...
@@ -284,6 +290,7 @@ async def index_file(
     media_group_id: str | None,
     sent_at: datetime,
     kind: str = "document",
+    thumb: str | None = None,
 ) -> None:
     """Save one photo or file in the index with its date/location (from the caption).
     kind is "photo" (a normal Telegram photo, which Telegram compresses) or "document"
@@ -303,6 +310,8 @@ async def index_file(
         "kind": kind,
         "media_group_id": media_group_id,
     }
+    if thumb:
+        set_doc["thumb"] = thumb
     if star:
         set_doc["best"] = True
     if has_caption:
@@ -361,6 +370,22 @@ def media_of(msg):
     if doc and (doc.mime_type or "").startswith("image/"):
         return doc.file_id, "document"
     return None, None
+
+
+def thumb_of(msg) -> str | None:
+    """The file_id of Telegram's own small preview of a photo or image file (about 320 px).
+    The Mini App uses it for the grid, so it loads fast and also works for files over 20 MB."""
+    try:
+        if msg.photo:
+            sizes = sorted(msg.photo, key=lambda p: p.width or 0)
+            for p in sizes:
+                if (p.width or 0) >= 300:
+                    return p.file_id
+            return sizes[-1].file_id if sizes else None
+        th = getattr(msg.document, "thumbnail", None) if msg.document else None
+        return th.file_id if th else None
+    except Exception:
+        return None
 
 
 # ---------- group side ----------
@@ -550,7 +575,8 @@ async def on_group_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if await db.meta.find_one({"_id": "addfam", "thread_id": msg.message_thread_id}):
         return  # the ➕ Add families topic is never a family
     await index_file(
-        msg.message_thread_id, msg.message_id, file_id, msg.caption, msg.media_group_id, msg.date, kind
+        msg.message_thread_id, msg.message_id, file_id, msg.caption, msg.media_group_id, msg.date, kind,
+        thumb_of(msg),
     )
     if not await db.families.find_one({"thread_id": msg.message_thread_id}):
         asked = context.bot_data.setdefault("asked", set())
@@ -564,9 +590,17 @@ async def on_group_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 # ---------- private chat: linking ----------
 
+def app_row() -> list:
+    """The 📱 button that opens the Mini App (only when the service has a public https address)."""
+    if not WEBAPP_URL:
+        return []
+    return [[InlineKeyboardButton("📱 Open the photo app", web_app=WebAppInfo(url=f"{WEBAPP_URL}/app"))]]
+
+
 def menu_markup(extra: list | None = None) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
-        (extra or [])
+        app_row()
+        + (extra or [])
         + [
             [
                 InlineKeyboardButton("📅 By date", callback_data="d:0"),
@@ -932,7 +966,8 @@ async def on_private_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         log.exception("Failed copying a file into the group")
         await msg.reply_text("I couldn't add that file to the group. Check that I'm still an admin there.")
         return
-    await index_file(up["thread_id"], sent.message_id, file_id, caption, msg.media_group_id, msg.date, kind)
+    await index_file(up["thread_id"], sent.message_id, file_id, caption, msg.media_group_id, msg.date, kind,
+                     thumb_of(sent) or thumb_of(msg))
     note_batch(up, caption, msg.date)
     up["count"] += 1
     up["until"] = time.time() + SESSION_SECONDS
@@ -1347,7 +1382,9 @@ def help_text(linked: bool) -> str:
         )
     return (
         "ℹ️ How this works\n\n"
-        "📷 My photos opens your menu. Pick By date, By location or All photos.\n"
+        + ("📱 Open the photo app is the nicest way to look at your photos: big pictures, swipe, zoom, "
+           "and a button to send any photo to this chat in full quality.\n" if WEBAPP_URL else "")
+        + "📷 My photos opens your menu. Pick By date, By location or All photos.\n"
         "⭐ Best shots (when it's there) has the favourites picked for you.\n"
         "🧹 Under your photos, “Hide these photos” clears your chat. They stay in the gallery, so you "
         "can open them again any time.\n"
@@ -1820,6 +1857,7 @@ async def on_suggestion_button(update: Update, context: ContextTypes.DEFAULT_TYP
                             "thread_id": tid, "file_id": it["file_id"], "kind": it["kind"],
                             "media_group_id": None, "date": day, "location": place, "loc_id": loc_id(place),
                             "has_caption": True, "by": name, "by_id": doc["from_id"], "sug": True,
+                            **({"thumb": thumb_of(sm)} if thumb_of(sm) else {}),
                         },
                         "$setOnInsert": {"added": datetime.now(timezone.utc)},
                     },
@@ -3328,33 +3366,70 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     log.error("Unhandled error", exc_info=context.error)
 
 
-class Health(BaseHTTPRequestHandler):
-    """Tiny web endpoint so UptimeRobot can ping the bot (hosts like Render need a port)."""
+class WebDeps:
+    """What the Mini App's web server needs from the bot (see webapp.WebApp)."""
 
-    def _ok(self, body: bool = True) -> None:
-        self.send_response(200)
-        self.send_header("Content-Type", "text/plain")
-        self.end_headers()
-        if body:
-            self.wfile.write(b"ok")
+    token = BOT_TOKEN
+    copyright = COPYRIGHT
+    owner_name = OWNER_NAME
 
-    def do_GET(self) -> None:  # noqa: N802
-        self._ok()
+    def __init__(self, app: Application) -> None:
+        self.app = app
 
-    def do_HEAD(self) -> None:  # noqa: N802
-        self._ok(body=False)
+    def db(self):
+        return db
 
-    def log_message(self, *args) -> None:
-        pass
+    def bot(self):
+        return self.app.bot
+
+    def is_owner(self, uid: int) -> bool:
+        return is_owner(uid)
+
+    async def has_best(self, tid: int) -> bool:
+        return await has_best(tid)
+
+    def help_text(self) -> str:
+        return help_text(True)
+
+    def pretty_date(self, day: str) -> str:
+        return pretty_date(day)
+
+    async def family_name(self, tid: int) -> str:
+        fam = await db.families.find_one({"thread_id": tid})
+        return (fam or {}).get("name", "")
+
+    async def send_original(self, uid: int, doc: dict) -> bool:
+        """The app's "Send me the photo in chat" button: the full-quality file, in the person's own chat."""
+        caption = (
+            pretty_date(doc["date"])
+            + (f" · {doc['location']}" if doc.get("location") else "")
+            + (f" · Added by {doc['by']}" if doc.get("by") else "")
+            + f"\n\n{COPYRIGHT_WARNING}"
+        )
+        is_photo = doc.get("kind") == "photo"
+        send_one = self.app.bot.send_photo if is_photo else self.app.bot.send_document
+        arg = {"photo": doc["file_id"]} if is_photo else {"document": doc["file_id"]}
+        try:
+            await send_with_retry(
+                lambda: send_one(uid, caption=caption[:1000], protect_content=PROTECT_CONTENT, **arg),
+                retry_timeouts=True,
+            )
+            return True
+        except (TelegramError, RuntimeError):
+            log.exception("Couldn't send a photo from the app")
+            return False
 
 
-def start_health_server() -> None:
-    port = os.getenv("PORT")  # set automatically by hosts like Render
+async def start_web(app: Application) -> None:
+    """The web server: the Mini App, plus the little "ok" page UptimeRobot pings.
+    It runs inside the bot's own event loop. Hosts like Render give the port in $PORT."""
+    port = os.getenv("PORT")
     if not port:
         return
-    server = HTTPServer(("0.0.0.0", int(port)), Health)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    log.info("Health endpoint listening on port %s", port)
+    try:
+        app.bot_data["web"] = await webapp.WebApp(WebDeps(app)).start(int(port))
+    except OSError:
+        log.exception("Couldn't start the web server on port %s (the bot still works)", port)
 
 
 async def safe_index(make) -> None:
@@ -3368,6 +3443,9 @@ async def post_shutdown(app: Application) -> None:
     task = app.bot_data.get("scheduler")
     if task:
         task.cancel()
+    web = app.bot_data.get("web")
+    if web:
+        web.close()
     if db is not None:
         try:
             await db.client.close()
@@ -3377,7 +3455,8 @@ async def post_shutdown(app: Application) -> None:
 
 async def post_init(app: Application) -> None:
     global db
-    db = AsyncMongoClient(MONGODB_URI)[DB_NAME]
+    db = AsyncMongoClient(MONGODB_URI)[DB_NAME]  # (made lazily; no connection yet)
+    await start_web(app)  # then the web server, so the host sees the port open right away
     await safe_index(lambda: db.families.create_index("thread_id", unique=True))
     await safe_index(lambda: db.families.create_index("code", unique=True))
     await safe_index(lambda: db.families.create_index("key"))
@@ -3385,15 +3464,25 @@ async def post_init(app: Application) -> None:
     await safe_index(lambda: db.photos.create_index([("thread_id", 1), ("date", 1)]))
     await safe_index(lambda: db.photos.create_index([("thread_id", 1), ("loc_id", 1)]))
     await safe_index(lambda: db.photos.create_index("media_group_id"))
+    await safe_index(lambda: db.photos.create_index([("thread_id", 1), ("best", 1)]))
+    await safe_index(lambda: db.photos.create_index([("thread_id", 1), ("added", -1)]))
     await safe_index(lambda: db.users.create_index("thread_id"))
     await safe_index(lambda: db.tries.create_index("at", expireAfterSeconds=2592000))  # forget login attempts after 30 days
     await safe_index(lambda: db.sent.create_index("at", expireAfterSeconds=172800))  # forget hide-buttons after 2 days
     app.bot_data["scheduler"] = asyncio.create_task(scheduler_loop(app))
+    if WEBAPP_URL:  # the blue "Open" button next to the message box, for everyone who opens the bot
+        try:
+            await app.bot.set_chat_menu_button(
+                menu_button=MenuButtonWebApp(text="📷 Photos", web_app=WebAppInfo(url=f"{WEBAPP_URL}/app"))
+            )
+        except TelegramError:
+            log.exception("Couldn't set the bot's Open button (the 📱 button in the menu still works)")
+    else:
+        log.warning("WEBAPP_URL / RENDER_EXTERNAL_URL is not set (or isn't https): the photo app is off.")
     log.info("Connected to MongoDB database '%s'", DB_NAME)
 
 
 def main() -> None:
-    start_health_server()
     app = (
         ApplicationBuilder()
         .token(BOT_TOKEN)
