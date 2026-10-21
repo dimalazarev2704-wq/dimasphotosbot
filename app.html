@@ -95,9 +95,11 @@ function h(tag, attrs, ...kids) {
 }
 async function api(path, body) {
   let res;
+  const ctl = new AbortController(), timer = setTimeout(() => ctl.abort(), 60000);  // (a sleeping server can take a while to wake)
   try {
-    res = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json", "X-Init-Data": initData }, body: JSON.stringify(body || {}) });
-  } catch (e) { throw new Error("No connection. Please check your internet and try again."); }
+    res = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json", "X-Init-Data": initData }, body: JSON.stringify(body || {}), signal: ctl.signal });
+  } catch (e) { throw new Error("No connection, or the server is still waking up. Please wait a moment and try again."); }
+  finally { clearTimeout(timer); }
   let data = {};
   try { data = await res.json(); } catch (e) {}
   if (!res.ok) throw new Error(data.error || "Something went wrong. Please try again.");
@@ -262,7 +264,7 @@ function showPhoto() {
   resetZoom();
   vimg.style.opacity = ".4";
   vimg.onload = () => { vimg.style.opacity = "1"; };
-  vimg.onerror = () => { vimg.style.opacity = "1"; document.getElementById("vcap").textContent = "Couldn\u2019t load this photo. Close it and open it again."; };
+  vimg.onerror = () => { vimg.style.opacity = "1"; document.getElementById("vcap").textContent = "Couldn\u2019t load this photo. Close the app and open it again."; };
   vimg.src = p.f;
   document.getElementById("vcap").textContent = [p.dt, p.loc, p.by ? "Added by " + p.by : ""].filter(Boolean).join(" · ") + "   (" + (cur + 1) + " of " + viewList.length + ")";
   document.getElementById("vprev").style.visibility = cur > 0 ? "visible" : "hidden";
