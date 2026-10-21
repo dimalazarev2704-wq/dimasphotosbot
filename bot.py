@@ -78,7 +78,11 @@ from telegram.ext import (
 
 load_dotenv()
 
-import webapp  # the Mini App's web server (webapp.py, next to this file)
+try:
+    import webapp  # the Mini App's web server (webapp.py, next to this file)
+except Exception:  # missing or broken file: the bot still runs, only the photo app is off
+    logging.getLogger("photobot").exception("Couldn't load webapp.py, so the photo app is OFF")
+    webapp = None
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 MONGODB_URI = os.environ["MONGODB_URI"]
@@ -99,6 +103,10 @@ PROTECT_CONTENT = os.getenv("PROTECT_CONTENT", "false").lower() == "true"
 WEBAPP_URL = (os.getenv("WEBAPP_URL", "") or os.getenv("RENDER_EXTERNAL_URL", "")).strip().rstrip("/")
 if WEBAPP_URL and not WEBAPP_URL.startswith("https://"):
     WEBAPP_URL = ""  # Telegram only opens https pages
+if webapp is None:
+    WEBAPP_URL = ""  # no photo app without its server file
+# "no" = the bot never changes the blue Open button; you set it yourself in BotFather
+AUTO_MENU_BUTTON = os.getenv("AUTO_MENU_BUTTON", "yes").strip().lower() not in ("no", "off", "false", "0")
 MAX_SEND = int(os.getenv("MAX_SEND", "200"))  # max files sent per button press
 PAGE_SIZE = 20  # buttons per page in the date/location lists
 MAX_FAILS = 5  # wrong guesses allowed before a lock ...
@@ -3348,6 +3356,9 @@ async def on_admin_button(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await db.photos.delete_many({"thread_id": tid})
         await db.suggestions.delete_many({"thread_id": tid})
         await db.families.delete_one({"thread_id": tid})
+        for _uid, _t in list(context.bot_data.get("preview", {}).items()):
+            if _t == tid:  # (nobody is left browsing a family that no longer exists)
+                context.bot_data["preview"].pop(_uid, None)
         log.info("Owner deleted family %s (topic deleted: %s)", fam["name"], action == "dfd")
         await show(
             f"✅ The {fam['name']} family was deleted"
@@ -3384,6 +3395,10 @@ class WebDeps:
 
     def is_owner(self, uid: int) -> bool:
         return is_owner(uid)
+
+    def preview_family(self, uid: int) -> int | None:
+        """The family the owner picked with /connect (in memory only)."""
+        return self.app.bot_data.get("preview", {}).get(uid)
 
     async def has_best(self, tid: int) -> bool:
         return await has_best(tid)
@@ -3426,9 +3441,25 @@ async def start_web(app: Application) -> None:
     port = os.getenv("PORT")
     if not port:
         return
+    if webapp is None:
+        log.error("webapp.py is missing next to bot.py, so the photo app is OFF. Upload webapp.py and app.html to GitHub.")
+        try:  # still answer the health check, so Render and UptimeRobot are happy
+            async def ok(reader, writer):
+                try:
+                    await asyncio.wait_for(reader.read(2048), 5)
+                    writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                    await writer.drain()
+                except Exception:
+                    pass
+                writer.close()
+
+            app.bot_data["web"] = await asyncio.start_server(ok, "0.0.0.0", int(port))
+        except (OSError, ValueError, OverflowError):
+            log.exception("Couldn't start the health server on port %s", port)
+        return
     try:
         app.bot_data["web"] = await webapp.WebApp(WebDeps(app)).start(int(port))
-    except OSError:
+    except (OSError, ValueError, OverflowError):
         log.exception("Couldn't start the web server on port %s (the bot still works)", port)
 
 
@@ -3470,7 +3501,9 @@ async def post_init(app: Application) -> None:
     await safe_index(lambda: db.tries.create_index("at", expireAfterSeconds=2592000))  # forget login attempts after 30 days
     await safe_index(lambda: db.sent.create_index("at", expireAfterSeconds=172800))  # forget hide-buttons after 2 days
     app.bot_data["scheduler"] = asyncio.create_task(scheduler_loop(app))
-    if WEBAPP_URL:  # the blue "Open" button next to the message box, for everyone who opens the bot
+    if WEBAPP_URL and not AUTO_MENU_BUTTON:
+        log.info("AUTO_MENU_BUTTON is off: the blue Open button is yours to set in BotFather (the 📱 menu button still works).")
+    elif WEBAPP_URL:  # the blue "Open" button next to the message box, for everyone who opens the bot
         try:
             await app.bot.set_chat_menu_button(
                 menu_button=MenuButtonWebApp(text="📷 Photos", web_app=WebAppInfo(url=f"{WEBAPP_URL}/app"))
