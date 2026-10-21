@@ -188,12 +188,49 @@ All of these only work for admins of the group (and for the owner).
 1. Push this project to a private GitHub repo (never commit `.env`).
 2. In Render: **New → Web Service**, connect the repo, choose the **Free** instance.
    Build: `pip install -r requirements.txt`. Start: `python bot.py`.
+   Upload **bot.py, webapp.py and app.html** together (the photo app needs all three).
 3. Add the variables from `.env.example` (`BOT_TOKEN`, `MONGODB_URI`, `GROUP_ID`, `OWNER_ID`, `ADMIN_PASSWORD`, ...).
 4. In UptimeRobot add an **HTTP(s)** monitor for your Render URL at the shortest interval
    (5 minutes on free). Free instances sleep after about 15 minutes without traffic, and the
    bot answers `200 ok` on the port Render provides.
 
 No disk is needed. Check Render's current free-tier limits before relying on it.
+
+## 11. The photo app (Telegram Mini App)
+A nicer way to look at photos, inside Telegram. Clients open it with the **📱 Open the photo app**
+button in the bot's menu, or the blue **📷 Photos** button next to the message box.
+
+**What it has**
+- **Welcome screen**, decided per person:
+  - 2 or more photos added in the last 14 days, and the person hasn't seen the newest yet → **✨ New photos**.
+  - After they have seen those once, and you have picked Best shots → **⭐ Best shots**.
+  - Older than 14 days → Best shots. No Best shots yet (and they've already seen the new photos) → the latest photos.
+  - Each family member has their own record, so one person opening the app doesn't change it for the others.
+  - Photos approved from the Suggestions box don't count as "new".
+- Tabs at the bottom: **Home, Dates, Places, All, Best** (only when you have picked some), **Suggested** (the Suggestions box).
+- Tap a photo for full screen: swipe for the next one, pinch or double-tap to zoom.
+  **📥 Send me the photo in chat** sends the full-quality file to the person's chat. The copyright notice shows in the viewer.
+- Bigger/smaller text buttons and a Help page.
+- Each person only ever sees **their own family's** photos. Everything is checked on the server using
+  Telegram's signed login data, and the photo links are signed and expire.
+- The owner account sees a "this app is for families" message. An admin tab for you comes later.
+
+**How it works.** The web server runs inside the bot (same Render service, same `$PORT`), so there is
+nothing extra to host. Photos stay on Telegram: the app asks the bot to fetch each picture and passes it on,
+so the bot token never reaches the phone. When a photo is added, the bot also saves the id of Telegram's own
+small preview, which makes the grids fast (and works for files over 20 MB). Older photos don't have that, so
+their first view is a bit slower while a small copy is made.
+
+**Setup.** Nothing to do in BotFather: the bot sets the Open button itself when it starts. It needs the
+service's public https address. On Render that is `RENDER_EXTERNAL_URL`, which Render fills in; elsewhere set
+`WEBAPP_URL=https://your-address`. If neither is set the app is simply off.
+
+**Limits**
+- On the free Render plan the first open after a sleep takes a few seconds.
+- A web page can't stop saving or screenshots; the copyright line is shown, nothing more.
+- HEIC photos can't be shown in the grid by the server; the Telegram preview is used when it exists.
+- Bot downloads are limited to 20 MB, so for bigger files the app shows Telegram's smaller preview.
+  "Send me the photo in chat" still delivers the full original.
 
 ## Limits to know about
 - The bot can't see files posted **before** it joined the group, or topics it hasn't been told about.
