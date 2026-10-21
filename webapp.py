@@ -49,7 +49,7 @@ def validate_init_data(init_data: str, token: str, now: float | None = None) -> 
     except ValueError:
         return None
     given = pairs.pop("hash", None)
-    if not given:
+    if not given or not re.fullmatch(r"[0-9a-f]{64}", given):
         return None
     check = "\n".join(f"{k}={v}" for k, v in sorted(pairs.items()))
     secret = hmac.new(b"WebAppData", token.encode(), hashlib.sha256).digest()
@@ -96,29 +96,39 @@ def sniff(data: bytes) -> str:
     return "application/octet-stream"
 
 
-def resize(data: bytes, side: int, quality: int) -> bytes:
-    from PIL import Image, ImageOps
+MAX_PIXELS = 30_000_000  # for PNG and the like, which must be decoded at full size
+MAX_JPEG_PIXELS = 150_000_000  # JPEGs are decoded at a reduced size, so even a big camera original is cheap
 
+
+def resize(data: bytes, side: int, quality: int) -> bytes:
+    """Shrink a picture to fit side x side as a JPEG, using as little memory as possible
+    (the free Render plan has only 512 MB)."""
     import warnings
 
-    Image.MAX_IMAGE_PIXELS = 50_000_000  # refuse decompression bombs
+    from PIL import Image, ImageOps
+
+    Image.MAX_IMAGE_PIXELS = MAX_JPEG_PIXELS  # refuse decompression bombs
     warnings.simplefilter("error", Image.DecompressionBombWarning)  # (a warning becomes a refusal)
     im = Image.open(io.BytesIO(data))
-    if im.size[0] * im.size[1] > 50_000_000:
+    if im.size[0] * im.size[1] > (MAX_JPEG_PIXELS if im.format == "JPEG" else MAX_PIXELS):
         raise ValueError("image too large")
     try:
-        im.draft("RGB", (side * 2, side * 2))  # JPEGs decode much faster at a smaller scale
+        im.draft("RGB", (side, side))  # a JPEG is decoded at a smaller scale, which saves most of the memory
     except Exception:
         pass
     im = ImageOps.exif_transpose(im)
-    if im.mode in ("RGBA", "LA", "P"):
+    if im.mode.startswith(("I", "F")):  # 16-bit greys: scale down to 8 bits first (convert alone turns them white)
+        im = im.point(lambda i: i * (1 / 256)).convert("L")
+    elif im.mode == "P" and im.size[0] * im.size[1] <= 6_000_000:
+        im = im.convert("RGBA")
+    im.thumbnail((side, side))  # shrink BEFORE any colour conversion, so the big copies never exist
+    if im.mode in ("RGBA", "LA", "P", "PA"):
         im = im.convert("RGBA")
         bg = Image.new("RGB", im.size, (255, 255, 255))
         bg.paste(im, mask=im.split()[-1])
         im = bg
     elif im.mode != "RGB":
         im = im.convert("RGB")
-    im.thumbnail((side, side))
     out = io.BytesIO()
     im.save(out, "JPEG", quality=quality, optimize=True, progressive=True)
     return out.getvalue()
@@ -167,7 +177,8 @@ class WebApp:
         self.url_secret = hmac.new(deps.token.encode(), b"photo-urls", hashlib.sha256).digest()
         self.cache = Cache(CACHE_BYTES)
         self.dl_gate = asyncio.Semaphore(4)
-        self.cpu_gate = asyncio.Semaphore(2)
+        self.cpu_gate = asyncio.Semaphore(1)  # (one CPU: more at once only slows the bot down)
+        self.inflight: dict = {}
         self.last_orig: dict[int, float] = {}
         self.conns = 0
 
@@ -183,9 +194,13 @@ class WebApp:
         return f"/img/{mid}?s={size}&u={uid}&e={exp}&sig={self.sign(mid, size, uid, exp)}"
 
     async def family_of(self, uid: int) -> int | None:
-        """The family this person may browse. Owners and unconfirmed people get None."""
+        """The family this person may browse. Unconfirmed people get None. The owner gets only the family
+        they picked with /connect (kept in memory by the bot, never saved), so nothing about them is stored."""
         if self.d.is_owner(uid):
-            return None
+            tid = self.d.preview_family(uid)
+            if tid and not await self.d.db().families.find_one({"thread_id": tid}):
+                return None  # that family was deleted
+            return tid
         doc = await self.d.db().users.find_one({"_id": uid})
         if not doc or doc.get("pending"):
             return None
@@ -196,9 +211,10 @@ class WebApp:
         user = validate_init_data(headers.get("x-init-data", ""), self.d.token)
         if not user:
             return None, None, err(401, "Please close this and open the app again from Telegram.")
-        if self.d.is_owner(user["id"]):
-            return None, None, err(403, "This app is for families. (Your own admin view isn't in the app yet.)")
         tid = await self.family_of(user["id"])
+        if self.d.is_owner(user["id"]) and not tid:
+            return None, None, err(403, "This app shows a family's photos. In the chat, send /connect and pick a family, "
+                                        "then open the app again. (Your own admin view isn't in the app yet.)")
         if not tid:
             return None, None, err(403, "Please send /start to the bot and link your account first.")
         return user, tid, None
@@ -235,10 +251,17 @@ class WebApp:
 
     # ---------- api ----------
 
+    def pd(self, day) -> str:
+        try:
+            return self.d.pretty_date(day)
+        except Exception:  # an odd date in old data must not break the whole family's screen
+            return str(day or "")
+
+
     def card(self, doc: dict, uid: int) -> dict:
         return {
             "id": doc["message_id"], "k": doc.get("kind", "document"), "d": doc["date"],
-            "dt": self.d.pretty_date(doc["date"]), "loc": doc.get("location") or "",
+            "dt": self.pd(doc["date"]), "loc": doc.get("location") or "",
             "by": doc.get("by") or "", "best": bool(doc.get("best")),
             "t": self.photo_url(doc["message_id"], "thumb", uid),
             "f": self.photo_url(doc["message_id"], "full", uid),
@@ -260,7 +283,8 @@ class WebApp:
         if n_new >= NEW_MIN:
             newest = await db.photos.find(new_q).sort([("added", -1)]).limit(1).to_list()
             newest_at = naive_utc(newest[0].get("added")) if newest else None
-            user = await db.users.find_one({"_id": uid}) or {}
+            owner = self.d.is_owner(uid)  # (the owner's preview never reads or saves anything about them)
+            user = {} if owner else (await db.users.find_one({"_id": uid}) or {})
             seen = naive_utc(user.get("seen_new"))
             if seen is None or newest_at is None or newest_at > seen:
                 mode = "new"  # they haven't seen the newest photos yet
@@ -276,7 +300,7 @@ class WebApp:
             q, sort = {"thread_id": tid}, [("message_id", -1)]
             title, sub = "📸 Latest photos", ""
         docs = await db.photos.find(q).sort(sort).limit(WELCOME_ITEMS).to_list()
-        if mode == "new" and docs:
+        if mode == "new" and docs and not self.d.is_owner(uid):
             newest_at = max((naive_utc(x.get("added")) for x in docs if x.get("added")), default=None)
             if newest_at:
                 await db.users.update_one({"_id": uid}, {"$set": {"seen_new": newest_at}})
@@ -293,7 +317,7 @@ class WebApp:
             req = json.loads(body.decode() or "{}")
             if not isinstance(req, dict):
                 raise ValueError
-        except ValueError:
+        except (ValueError, RecursionError):
             return err(400, "Bad request")
 
         if path == "/api/home":
@@ -315,7 +339,7 @@ class WebApp:
             ])
             rows = await cur.to_list()
             return jresp({"rows": [
-                {"v": r["_id"], "label": self.d.pretty_date(r["_id"]), "n": r["n"],
+                {"v": r["_id"], "label": self.pd(r["_id"]), "n": r["n"],
                  "cover": self.photo_url(r["cover"], "thumb", uid)} for r in rows]})
 
         if path == "/api/places":
@@ -344,13 +368,16 @@ class WebApp:
                 q["loc_id"] = {"$in": ["none", None]} if value == "none" else value
             elif mode == "best":
                 q["best"] = True
+                sort = [("date", -1), ("message_id", 1)]  # newest day first
             elif mode == "sug":
                 q["sug"] = True
             elif mode == "new":
                 q["sug"] = {"$ne": True}
                 q["added"] = {"$gte": datetime.now(timezone.utc) - timedelta(days=NEW_DAYS)}
                 sort = [("added", -1), ("message_id", -1)]
-            elif mode != "all":
+            elif mode == "all":
+                sort = [("date", -1), ("message_id", 1)]  # newest day first, so recent photos come first
+            else:
                 return err(400, "Bad request")
             skip = req.get("skip", 0)
             if not isinstance(skip, int) or isinstance(skip, bool):
@@ -375,7 +402,7 @@ class WebApp:
         return err(404, "Not found")
 
     async def my_photo(self, mid, tid: int):
-        if not isinstance(mid, int) or isinstance(mid, bool):
+        if not isinstance(mid, int) or isinstance(mid, bool) or abs(mid) > 2**53:
             return None
         doc = await self.d.db().photos.find_one({"message_id": mid})
         return doc if doc and doc.get("thread_id") == tid else None
@@ -401,7 +428,7 @@ class WebApp:
         hit = self.cache.get((mid, size))
         good = True
         if hit is None:
-            made = await self.make_image(doc, size)
+            made = await self.made_once(doc, size)
             if made is None:
                 return err(404, "Couldn't load this photo")
             hit, good = made[:2], made[2]
@@ -418,21 +445,30 @@ class WebApp:
             log.warning("Couldn't fetch a file from Telegram: %s", e)
             return None
 
+    async def small_preview(self, doc: dict):
+        """Telegram's own small preview of the photo (tiny, fast, and works for files over 20 MB too)."""
+        tid = doc.get("thumb")
+        raw = await self.download(tid) if tid else None
+        if raw and sniff(raw) != "application/octet-stream":
+            return (sniff(raw), raw)
+        return None
+
     async def make_image(self, doc: dict, size: str):
         """-> (content type, bytes, is_sharp) or None. is_sharp is False for a blurry stand-in."""
         mid = doc["message_id"]
-        thumb_id = doc.get("thumb")
-        small = None
-        if thumb_id:  # Telegram's own small preview: tiny, fast, and works for files over 20 MB too
-            raw = await self.download(thumb_id)
-            if raw and sniff(raw) != "application/octet-stream":
-                small = (sniff(raw), raw)
-                if size == "thumb":
-                    self.cache.put((mid, "thumb"), small)
-                    return (*small, True)
+        if size == "thumb":
+            small = await self.small_preview(doc)
+            if small:
+                self.cache.put((mid, "thumb"), small)
+                return (*small, True)
+
+        async def stand_in():  # only for the big view: a blurry picture beats an empty screen
+            small = await self.small_preview(doc) if size == "full" else None
+            return (*small, False) if small else None
+
         raw = await self.download(doc["file_id"])
         if raw is None:
-            return (*small, size == "thumb") if small else None  # (for "full" this is the small preview: blurry, but better than nothing)
+            return await stand_in()
         if size == "full" and doc.get("kind") == "photo" and sniff(raw) == "image/jpeg":
             res = ("image/jpeg", raw)  # a normal Telegram photo is already screen-sized
             self.cache.put((mid, size), res)
@@ -445,13 +481,23 @@ class WebApp:
         except ImportError:
             ct = sniff(raw)
             if ct == "application/octet-stream" or (size == "thumb" and len(raw) > 3_000_000):
-                return (*small, size == "thumb") if small else None
+                return await stand_in()
             res = (ct, raw)
         except Exception as e:  # e.g. HEIC, which this server can't decode
             log.warning("Couldn't decode photo %s: %s", mid, e)
-            return (*small, size == "thumb") if small else None
+            return await stand_in()
         self.cache.put((mid, size), res)
         return (*res, True)
+
+    async def made_once(self, doc: dict, size: str):
+        """Many people (or one fast swipe) asking for the same picture share ONE download and resize."""
+        key = (doc["message_id"], size)
+        fut = self.inflight.get(key)
+        if fut is None:
+            fut = asyncio.ensure_future(self.make_image(doc, size))
+            self.inflight[key] = fut
+            fut.add_done_callback(lambda _f, k=key: self.inflight.pop(k, None))
+        return await asyncio.shield(fut)
 
     # ---------- the socket layer ----------
 
