@@ -1,0 +1,316 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="referrer" content="no-referrer">
+<title>Photos</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+:root{
+  --bg:var(--tg-theme-bg-color,#fff);
+  --text:var(--tg-theme-text-color,#111);
+  --hint:var(--tg-theme-hint-color,#6b7280);
+  --btn:var(--tg-theme-button-color,#2481cc);
+  --btntext:var(--tg-theme-button-text-color,#fff);
+  --sec:var(--tg-theme-secondary-bg-color,#f1f3f5);
+  --fs:18px;
+  --tabh:64px;
+}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;background:var(--bg);color:var(--text);font:var(--fs)/1.35 -apple-system,system-ui,"Segoe UI",Roboto,sans-serif}
+#main{padding:10px 14px calc(var(--tabh) + 28px + env(safe-area-inset-bottom))}
+h1{font-size:1.4em;margin:6px 0 4px}
+h2{font-size:1.15em;margin:18px 0 2px}
+.hint{color:var(--hint);font-size:.85em}
+.topbar{display:flex;align-items:center;gap:8px;margin-bottom:4px}
+.topbar .sp{flex:1}
+.topbar button{border:0;background:var(--sec);color:var(--text);border-radius:12px;min-width:44px;min-height:40px;padding:6px 12px;font:inherit;font-size:.8em}
+.row{display:flex;align-items:center;gap:14px;width:100%;margin:0 0 10px;padding:10px;border:0;border-radius:16px;background:var(--sec);color:var(--text);font:inherit;text-align:left}
+.row img,.row .ph{width:72px;height:72px;border-radius:12px;object-fit:cover;background:#8884;flex:none}
+.row b{display:block}
+.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:4px;margin-top:10px}
+.grid button{padding:0;border:0;background:#8883;aspect-ratio:1;overflow:hidden;border-radius:6px;position:relative}
+.grid img{width:100%;height:100%;object-fit:cover;display:block}
+.grid .star{position:absolute;right:4px;top:2px;font-size:14px}
+.cta{display:block;width:100%;min-height:56px;margin:16px 0 0;border:0;border-radius:16px;background:var(--btn);color:var(--btntext);font:inherit;font-weight:700}
+.cta.alt{background:var(--sec);color:var(--text)}
+.cta[disabled]{opacity:.5}
+.msg{padding:14px 16px;border-radius:14px;background:var(--sec);margin:12px 0;white-space:pre-wrap}
+.err{background:#e5393522}
+.msg .cta.alt{background:var(--bg)}
+.foot{margin-top:26px;text-align:center;color:var(--hint);font-size:.7em}
+.back{border:0;background:none;color:var(--btn);font:inherit;padding:8px 0;font-weight:600}
+.hero{border-radius:18px;background:var(--sec);padding:14px 12px 16px;margin-top:12px}
+.hero h2{margin:0}
+.spin{text-align:center;padding:40px;color:var(--hint)}
+nav{position:fixed;left:0;right:0;bottom:0;display:flex;background:var(--bg);border-top:1px solid #8883;padding-bottom:env(safe-area-inset-bottom);z-index:5}
+nav button{flex:1;min-width:0;height:var(--tabh);border:0;background:none;color:var(--hint);font:inherit;font-size:11px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;padding:0 2px}
+nav button .ic{font-size:22px;line-height:1}
+nav button.on{color:var(--btn);font-weight:700}
+#viewer{position:fixed;inset:0;background:#000;color:#fff;z-index:10;display:none;touch-action:none;overflow:hidden}
+#viewer .stage{position:absolute;inset:0;display:flex;align-items:center;justify-content:center}
+#viewer img{max-width:100%;max-height:100%;transform-origin:center;will-change:transform;-webkit-user-drag:none;user-select:none}
+#viewer .cap{position:absolute;left:0;right:0;top:0;padding:calc(10px + env(safe-area-inset-top)) 14px 24px;background:linear-gradient(#000a,#0000);font-size:.8em;text-align:center}
+#viewer .bot{position:absolute;left:0;right:0;bottom:0;padding:26px 14px calc(12px + env(safe-area-inset-bottom));background:linear-gradient(#0000,#000c)}
+#viewer .btns{display:flex;gap:10px}
+#viewer .btns button{flex:1;min-height:54px;border:0;border-radius:14px;background:#ffffff28;color:#fff;font:inherit;font-size:.85em;font-weight:600}
+#viewer .copy{margin-top:8px;text-align:center;font-size:.6em;opacity:.7}
+#viewer .nav{position:absolute;top:45%;width:52px;height:90px;border:0;background:#0006;color:#fff;font-size:32px;border-radius:14px}
+#viewer .prev{left:6px}#viewer .next{right:6px}
+</style>
+</head>
+<body>
+<div id="main"></div>
+<nav id="tabs"></nav>
+<div id="viewer">
+  <div class="stage"><img id="vimg" alt=""></div>
+  <div class="cap" id="vcap"></div>
+  <button class="nav prev" id="vprev" aria-label="Previous">‹</button>
+  <button class="nav next" id="vnext" aria-label="Next">›</button>
+  <div class="bot">
+    <div class="btns"><button id="vorig">📥 Send me the photo in chat</button><button id="vclose">✖ Close</button></div>
+    <div class="copy" id="vcopy"></div>
+  </div>
+</div>
+<script>
+"use strict";
+const tg = window.Telegram && Telegram.WebApp;
+if (tg) { try { tg.ready(); tg.expand(); } catch (e) {} }
+const initData = (tg && tg.initData) || "";
+const $main = document.getElementById("main"), $tabs = document.getElementById("tabs");
+let HOME = null, tab = "home", stack = [];
+
+// ---------- helpers ----------
+function h(tag, attrs, ...kids) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (k === "on") for (const [ev, fn] of Object.entries(v)) el.addEventListener(ev, fn);
+    else if (k === "class") el.className = v;
+    else if (k === "text") el.textContent = v;
+    else el.setAttribute(k, v);
+  }
+  for (const kid of kids.flat()) if (kid != null) el.append(kid.nodeType ? kid : document.createTextNode(kid));
+  return el;
+}
+async function api(path, body) {
+  let res;
+  try {
+    res = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json", "X-Init-Data": initData }, body: JSON.stringify(body || {}) });
+  } catch (e) { throw new Error("No connection. Please check your internet and try again."); }
+  let data = {};
+  try { data = await res.json(); } catch (e) {}
+  if (!res.ok) throw new Error(data.error || "Something went wrong. Please try again.");
+  return data;
+}
+function haptic() { try { tg.HapticFeedback.impactOccurred("light"); } catch (e) {} }
+function show(nodes) {
+  $main.replaceChildren(...[].concat(nodes).flat().filter(Boolean));
+  window.scrollTo(0, 0);
+  syncBack();
+}
+function syncBack() { try { if (stack.length > 1 || viewerOpen()) tg.BackButton.show(); else tg.BackButton.hide(); } catch (e) {} }
+let navId = 0;  // bumped on every navigation, so a slow answer for an old screen is ignored
+function loading(t) { navId++; show(h("div", { class: "spin", text: t || "Loading…" })); }
+function footer() { return h("div", { class: "foot", text: HOME ? HOME.copyright : "" }); }
+function errorScreen(e, retry) {
+  show([h("h1", { text: "Oops" }), h("div", { class: "msg err", text: e.message || String(e) }),
+    retry ? h("button", { class: "cta", on: { click: retry }, text: "Try again" }) : null]);
+}
+
+// navigation: every tab has its own stack of screens
+function setTab(name) { navId++; tab = name; stack = [ROOTS[name]]; drawTabs(); ROOTS[name](); }
+function push(render) { navId++; stack.push(render); render(); }
+function back() {
+  if (viewerOpen()) { closeViewer(); return; }
+  if (stack.length > 1) { navId++; stack.pop(); stack[stack.length - 1](); }
+}
+try { tg.BackButton.onClick(back); } catch (e) {}
+function backBtn() { return stack.length > 1 ? h("button", { class: "back", on: { click: back }, text: "‹ Back" }) : null; }
+
+// text size (for people who need it bigger)
+let size = 18;
+try { size = parseInt(localStorage.getItem("fs") || "18", 10) || 18; } catch (e) {}
+function applySize() { document.documentElement.style.setProperty("--fs", size + "px"); try { localStorage.setItem("fs", String(size)); } catch (e) {} }
+applySize();
+
+function drawTabs() {
+  const defs = [["home", "🏠", "Home"], ["dates", "📅", "Dates"], ["places", "📍", "Places"], ["all", "🖼", "All"]];
+  if (HOME && HOME.best) defs.push(["best", "⭐", "Best"]);
+  defs.push(["sug", "💡", "Suggested"]);
+  $tabs.replaceChildren(...defs.map(([k, ic, label]) =>
+    h("button", { class: k === tab ? "on" : "", on: { click: () => { haptic(); setTab(k); } } }, h("span", { class: "ic", text: ic }), label)));
+}
+
+// ---------- home / welcome ----------
+let photos = [], viewList = [], homeAt = 0;
+async function homeScreen() {
+  if (!HOME) {  // (asked once per visit, so the welcome can't change while the app is open)
+    if (!initData) { show([h("h1", { text: "Open from Telegram" }), h("div", { class: "msg", text: "Please open this app from the bot in Telegram, using the “📱 Open the photo app” button." })]); return; }
+    loading(); const my = navId;
+    try { HOME = await api("/api/home"); } catch (e) { if (my === navId) errorScreen(e, homeScreen); return; }
+    homeAt = Date.now();
+    drawTabs();
+    if (my !== navId) return;
+  }
+  const w = HOME.welcome;
+  const nodes = [
+    h("div", { class: "topbar" }, h("div", { class: "sp" }),
+      h("button", { on: { click: () => { size = Math.max(14, size - 2); applySize(); } }, "aria-label": "Smaller text", text: "A−" }),
+      h("button", { on: { click: () => { size = Math.min(30, size + 2); applySize(); } }, "aria-label": "Bigger text", text: "A+" }),
+      h("button", { on: { click: () => push(helpScreen) }, "aria-label": "Help", text: "❓" })),
+    h("h1", { text: HOME.first ? "Hi " + HOME.first + "! 👋" : "Hi! 👋" }),
+    h("div", { class: "hint", text: HOME.family ? "The " + HOME.family + " family's photos" : "" }),
+  ];
+  if (!w.items.length) {
+    nodes.push(h("div", { class: "msg", text: "No photos here yet. " + (HOME.owner || "The photographer") + " will add them soon!" }));
+  } else {
+    nodes.push(h("div", { class: "hero" },
+      h("h2", { text: w.title }), w.sub ? h("div", { class: "hint", text: w.sub }) : null,
+      photoGrid(w.items),
+      h("button", { class: "cta", on: { click: () => seeAll(w.mode) }, text: w.mode === "new" ? "See all new photos" : "See all photos" })));
+  }
+  nodes.push(footer());
+  show(nodes);
+}
+function seeAll(mode) {
+  if (mode === "new") push(() => gridScreen("✨ New photos", { mode: "new" }));
+  else if (mode === "best") setTab("best");
+  else setTab("all");
+}
+function helpScreen() {
+  show([backBtn(), h("h1", { text: "Help" }),
+    h("div", { class: "msg", text: HOME.help }),
+    h("div", { class: "msg", text: "In this app: use the buttons at the bottom to pick Dates, Places or All photos. Tap a photo to see it full screen. Swipe left or right for the next one, pinch (or double tap) to zoom. “Send me the photo in chat” puts the full-quality photo in your chat with me." }),
+    footer()]);
+}
+
+// ---------- lists ----------
+async function listScreen(title, path, kind) {
+  loading(); const my = navId;
+  let data;
+  try { data = await api(path); } catch (e) { if (my === navId) errorScreen(e, () => listScreen(title, path, kind)); return; }
+  if (my !== navId) return;
+  const rows = data.rows.map(r => h("button", { class: "row", on: { click: () => push(() => gridScreen(r.label, { mode: kind, value: r.v })) } },
+    h("img", { src: r.cover, alt: "", loading: "lazy", on: { error: e => { e.target.style.visibility = "hidden"; } } }),
+    h("span", {}, h("b", { text: r.label }), h("span", { class: "hint", text: r.n + (r.n === 1 ? " photo" : " photos") }))));
+  show([h("h1", { text: title }), rows.length ? rows : h("div", { class: "msg", text: "No photos yet. Check back soon!" }), footer()]);
+}
+const datesScreen = () => listScreen("📅 Pick a date", "/api/dates", "date");
+const placesScreen = () => listScreen("📍 Pick a place", "/api/places", "loc");
+
+// ---------- grids ----------
+function photoGrid(items) {
+  return h("div", { class: "grid" }, items.map((p, i) =>
+    h("button", { on: { click: () => { viewList = items; openViewer(i); } }, "aria-label": "Photo " + (i + 1) },
+      h("img", { src: p.t, alt: "", loading: "lazy", on: { error: e => { e.target.replaceWith(h("div", { class: "hint", style: "padding:8px", text: "Tap to open" })); } } }),
+      p.best ? h("span", { class: "star", text: "⭐" }) : null)));
+}
+async function gridScreen(title, query, extra) {
+  loading(); const my = navId;
+  const all = [];
+  try { await loadMore(title, query, all, extra); } catch (e) { if (my === navId) errorScreen(e, () => gridScreen(title, query, extra)); }
+}
+async function loadMore(title, query, all, extra) {
+  const my = navId;
+  const data = await api("/api/photos", Object.assign({}, query, { skip: all.skip || 0 }));
+  if (my !== navId) return;
+  const have = new Set(all.map(p => p.id));  // (a photo added meanwhile can shift the pages, so skip repeats)
+  all.skip = (all.skip || 0) + data.items.length;
+  all.push(...data.items.filter(p => !have.has(p.id)));
+  const nodes = [backBtn(), h("h1", { text: title }), extra || null,
+    all.length ? photoGrid(all) : h("div", { class: "msg", text: "No photos here yet." })];
+  if (data.more) nodes.push(h("button", { class: "cta alt", on: { click: async (ev) => {
+    ev.target.disabled = true; ev.target.textContent = "Loading…";
+    const y = window.scrollY;
+    try { await loadMore(title, query, all, extra); window.scrollTo(0, y); } catch (e) { ev.target.disabled = false; ev.target.textContent = "Couldn't load. Tap to try again"; }
+  } }, text: "Show more photos" }));
+  nodes.push(footer());
+  show(nodes);
+}
+function suggestedScreen() {
+  const note = h("div", { class: "msg" }, "Photos your family shared and " + ((HOME && HOME.owner) || "the photographer") + " approved. To share your own, open the chat and tap “➕ Suggest photos”.",
+    h("button", { class: "cta alt", on: { click: () => { try { tg.close(); } catch (e) {} } }, text: "Open the chat" }));
+  gridScreen("💡 Suggested by your family", { mode: "sug" }, note);
+}
+const ROOTS = {
+  home: homeScreen, dates: datesScreen, places: placesScreen,
+  all: () => gridScreen("🖼 All photos", { mode: "all" }),
+  best: () => gridScreen("⭐ Best shots", { mode: "best" }),
+  sug: suggestedScreen,
+};
+
+// ---------- full-screen viewer (swipe, pinch, double-tap) ----------
+const V = document.getElementById("viewer"), vimg = document.getElementById("vimg");
+let cur = 0, scale = 1, tx = 0, ty = 0;
+function viewerOpen() { return V.style.display === "block"; }
+function paint() { vimg.style.transform = `translate(${tx}px,${ty}px) scale(${scale})`; }
+function resetZoom() { scale = 1; tx = ty = 0; paint(); }
+function openViewer(i) {
+  cur = i; V.style.display = "block"; document.body.style.overflow = "hidden";
+  document.getElementById("vcopy").textContent = HOME ? HOME.copyright : "";
+  try { tg.disableVerticalSwipes(); } catch (e) {}
+  syncBack(); showPhoto();
+}
+function closeViewer() {
+  V.style.display = "none"; document.body.style.overflow = ""; vimg.removeAttribute("src");
+  try { tg.enableVerticalSwipes(); } catch (e) {}
+  syncBack();
+}
+function showPhoto() {
+  const p = viewList[cur]; if (!p) return;
+  resetZoom();
+  vimg.style.opacity = ".4";
+  vimg.onload = () => { vimg.style.opacity = "1"; };
+  vimg.onerror = () => { vimg.style.opacity = "1"; document.getElementById("vcap").textContent = "Couldn\u2019t load this photo. Close it and open it again."; };
+  vimg.src = p.f;
+  document.getElementById("vcap").textContent = [p.dt, p.loc, p.by ? "Added by " + p.by : ""].filter(Boolean).join(" · ") + "   (" + (cur + 1) + " of " + viewList.length + ")";
+  document.getElementById("vprev").style.visibility = cur > 0 ? "visible" : "hidden";
+  document.getElementById("vnext").style.visibility = cur < viewList.length - 1 ? "visible" : "hidden";
+  for (const j of [cur + 1, cur - 1]) if (viewList[j]) { const pre = new Image(); pre.src = viewList[j].f; }  // warm the neighbours
+}
+function step(d) { const n = cur + d; if (n >= 0 && n < viewList.length) { cur = n; showPhoto(); haptic(); } }
+document.getElementById("vprev").onclick = () => step(-1);
+document.getElementById("vnext").onclick = () => step(1);
+document.getElementById("vclose").onclick = closeViewer;
+document.getElementById("vorig").onclick = async (ev) => {
+  const b = ev.currentTarget; b.disabled = true; const old = b.textContent; b.textContent = "Sending…";
+  try { await api("/api/send_original", { id: viewList[cur].id }); b.textContent = "✅ Sent to your chat"; }
+  catch (e) { b.textContent = "⚠️ " + e.message; }
+  setTimeout(() => { b.textContent = old; b.disabled = false; }, 3500);
+};
+// touch: one finger = swipe (or pan when zoomed), two fingers = pinch
+let t0 = null, pinch = null, lastTap = 0;
+const dist = (a, b) => Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+V.addEventListener("touchstart", e => {
+  if (e.target.closest("button")) return;
+  if (e.touches.length === 2) { pinch = { d: dist(e.touches[0], e.touches[1]), s: scale }; t0 = null; }
+  else if (e.touches.length === 1) { t0 = { x: e.touches[0].clientX, y: e.touches[0].clientY, tx, ty, moved: false }; }
+}, { passive: true });
+V.addEventListener("touchmove", e => {
+  if (pinch && e.touches.length === 2) { scale = Math.max(1, Math.min(5, pinch.s * dist(e.touches[0], e.touches[1]) / pinch.d)); if (scale === 1) tx = ty = 0; paint(); e.preventDefault(); return; }
+  if (!t0 || e.touches.length !== 1) return;
+  const dx = e.touches[0].clientX - t0.x, dy = e.touches[0].clientY - t0.y;
+  if (Math.abs(dx) + Math.abs(dy) > 8) t0.moved = true;
+  if (scale > 1) { tx = t0.tx + dx; ty = t0.ty + dy; paint(); e.preventDefault(); }
+}, { passive: false });
+V.addEventListener("touchend", e => {
+  if (pinch) { if (e.touches.length < 2) pinch = null; return; }
+  if (!t0) return;
+  const dx = e.changedTouches[0].clientX - t0.x, dy = e.changedTouches[0].clientY - t0.y, t = t0; t0 = null;
+  if (scale === 1 && Math.abs(dx) > 50 && Math.abs(dx) > Math.abs(dy) * 1.3) { step(dx < 0 ? 1 : -1); return; }
+  if (scale === 1 && dy > 110 && Math.abs(dy) > Math.abs(dx) * 1.5) { closeViewer(); return; }
+  if (!t.moved) {  // a tap; two quick taps zoom
+    const now = Date.now();
+    if (now - lastTap < 320) { if (scale > 1) resetZoom(); else { scale = 2.5; tx = ty = 0; paint(); } lastTap = 0; } else lastTap = now;
+  }
+});
+document.addEventListener("keydown", e => { if (!viewerOpen()) return; if (e.key === "ArrowRight") step(1); else if (e.key === "ArrowLeft") step(-1); else if (e.key === "Escape") closeViewer(); });
+
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible" && HOME && !viewerOpen() && Date.now() - homeAt > 3600 * 1000) { HOME = null; setTab("home"); }
+});
+setTab("home");
+</script>
+</body>
+</html>
