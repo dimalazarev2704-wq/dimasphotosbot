@@ -45,7 +45,7 @@ h2{font-size:1.15em;margin:18px 0 2px}
 .hero h2{margin:0}
 .spin{text-align:center;padding:40px;color:var(--hint)}
 nav{position:fixed;left:0;right:0;bottom:0;display:flex;background:var(--bg);border-top:1px solid #8883;padding-bottom:env(safe-area-inset-bottom);z-index:5}
-nav button{flex:1;min-width:0;height:var(--tabh);border:0;background:none;color:var(--hint);font:inherit;font-size:11px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;padding:0 2px}
+nav button{flex:1;min-width:0;height:var(--tabh);border:0;background:none;color:var(--hint);font:inherit;font-size:10px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;padding:0 2px}
 nav button .ic{font-size:22px;line-height:1}
 nav button.on{color:var(--btn);font-weight:700}
 #viewer{position:fixed;inset:0;background:#000;color:#fff;z-index:10;display:none;touch-action:none;overflow:hidden}
@@ -58,6 +58,35 @@ nav button.on{color:var(--btn);font-weight:700}
 #viewer .copy{margin-top:8px;text-align:center;font-size:.6em;opacity:.7}
 #viewer .nav{position:absolute;top:45%;width:52px;height:90px;border:0;background:#0006;color:#fff;font-size:32px;border-radius:14px}
 #viewer .prev{left:6px}#viewer .next{right:6px}
+label{display:block;margin:14px 0 6px;font-weight:600}
+input[type=text],input[type=date],input[type=datetime-local],textarea,select{width:100%;min-height:52px;padding:10px 12px;border-radius:12px;border:2px solid #8885;background:var(--bg);color:var(--text);font:inherit}
+textarea{min-height:140px}
+.chk{display:flex;gap:12px;align-items:center;margin-top:10px;font-weight:400}
+.chk input{width:26px;height:26px}
+.stats{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin:10px 0}
+.stat{padding:12px;border-radius:14px;background:var(--sec)}
+.stat b{display:block;font-size:1.5em}
+.badge{display:inline-block;min-width:22px;padding:1px 7px;border-radius:11px;background:#e53935;color:#fff;font-size:.7em;margin-left:8px;text-align:center}
+.banner{display:flex;align-items:center;gap:8px;background:var(--btn);color:var(--btntext);border-radius:12px;padding:8px 12px;margin-bottom:8px;font-size:.85em}
+.banner button{margin-left:auto;border:0;background:#fff3;color:inherit;border-radius:10px;padding:6px 12px;font:inherit}
+.cta.danger,.danger{background:#e53935;color:#fff}
+.card{padding:12px;border-radius:16px;background:var(--sec);margin:0 0 12px}
+.card .grid{margin-top:8px}
+.card .btns{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
+.card .btns button,.small{flex:1 1 40%;min-height:46px;border:0;border-radius:12px;background:var(--btn);color:var(--btntext);font:inherit;font-size:.85em;font-weight:600;padding:6px 10px}
+.card .btns button.alt{background:var(--bg);color:var(--text)}
+.card .btns button.danger{background:#e53935;color:#fff}
+.card .btns button[disabled]{opacity:.5}
+#viewer .tools{display:flex;gap:8px;margin-bottom:8px}
+#viewer .tools button{flex:1;min-height:46px;border:0;border-radius:12px;background:#ffffff28;color:#fff;font:inherit;font-size:.8em;font-weight:600}
+#vdlg{position:absolute;inset:0;background:#000d;display:none;align-items:center;justify-content:center;padding:16px;z-index:3;touch-action:auto;overflow:auto}
+#vdlg .box{width:100%;max-width:460px;background:var(--bg);color:var(--text);border-radius:18px;padding:16px}
+.file{display:flex;gap:10px;align-items:center;padding:8px 10px;border-radius:12px;background:var(--bg);margin:6px 0;font-size:.8em}
+.file .nm{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.file .st{flex:none;color:var(--hint);text-align:right;max-width:55%}
+.file.bad .st{color:#e53935}
+.bar{height:10px;border-radius:5px;background:#8883;margin-top:10px;overflow:hidden}
+.bar i{display:block;height:100%;width:0;background:var(--btn);transition:width .2s}
 </style>
 </head>
 <body>
@@ -68,7 +97,9 @@ nav button.on{color:var(--btn);font-weight:700}
   <div class="cap" id="vcap"></div>
   <button class="nav prev" id="vprev" aria-label="Previous">‹</button>
   <button class="nav next" id="vnext" aria-label="Next">›</button>
+  <div id="vdlg"></div>
   <div class="bot">
+    <div class="tools" id="vtools" style="display:none"></div>
     <div class="btns"><button id="vorig">📥 Send me the photo in chat</button><button id="vclose">✖ Close</button></div>
     <div class="copy" id="vcopy"></div>
   </div>
@@ -80,6 +111,7 @@ if (tg) { try { tg.ready(); tg.expand(); } catch (e) {} }
 const initData = (tg && tg.initData) || "";
 const $main = document.getElementById("main"), $tabs = document.getElementById("tabs");
 let HOME = null, tab = "home", stack = [];
+let IS_ADMIN = false, adminFam = null, adminFamName = "", dirty = false;  // (the owner's pick lives only in this open app)
 
 // ---------- helpers ----------
 function h(tag, attrs, ...kids) {
@@ -95,6 +127,7 @@ function h(tag, attrs, ...kids) {
 }
 async function api(path, body) {
   let res;
+  if (IS_ADMIN && !path.startsWith("/api/admin/")) body = Object.assign({}, body, { fam: adminFam });
   const ctl = new AbortController(), timer = setTimeout(() => ctl.abort(), 60000);  // (a sleeping server can take a while to wake)
   try {
     res = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json", "X-Init-Data": initData }, body: JSON.stringify(body || {}), signal: ctl.signal });
@@ -114,15 +147,38 @@ function show(nodes) {
 function syncBack() { try { if (stack.length > 1 || viewerOpen()) tg.BackButton.show(); else tg.BackButton.hide(); } catch (e) {} }
 let navId = 0;  // bumped on every navigation, so a slow answer for an old screen is ignored
 function loading(t) { navId++; show(h("div", { class: "spin", text: t || "Loading…" })); }
+function localToday() { const d = new Date(); return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0"); }
+let confirmOpen = false, busy = false, lastPush = 0;
+function confirmAsk(text) {
+  if (confirmOpen) return Promise.resolve(false);  // (a second tap can't open a second popup)
+  confirmOpen = true;
+  return new Promise(res => {
+    const done = ok => { confirmOpen = false; res(!!ok); };
+    try { tg.showConfirm(text, done); } catch (e) { done(window.confirm(text)); }
+  });
+}
+async function oneAtATime(fn) {  // ignores a second tap while the first action is still running
+  if (busy) return;
+  busy = true;
+  try { await fn(); } finally { busy = false; }
+}
+function banner() {
+  return IS_ADMIN && adminFam != null
+    ? h("div", { class: "banner" }, "👁 Viewing the " + adminFamName + " family", h("button", { on: { click: leaveFamily }, text: "🛠 Admin" })) : null;
+}
+function enterFamily(tid, name) { adminFam = tid; adminFamName = name; HOME = null; setTab("home"); }
+function leaveFamily() { adminFam = null; adminFamName = ""; HOME = null; setTab("admin"); }
+function redrawCurrent() { const f = stack[stack.length - 1]; if (f) f(); }
 function footer() { return h("div", { class: "foot", text: HOME ? HOME.copyright : "" }); }
 function errorScreen(e, retry) {
   show([h("h1", { text: "Oops" }), h("div", { class: "msg err", text: e.message || String(e) }),
-    retry ? h("button", { class: "cta", on: { click: retry }, text: "Try again" }) : null]);
+    retry ? h("button", { class: "cta", on: { click: retry }, text: "Try again" }) : null,
+    IS_ADMIN && adminFam != null ? h("button", { class: "cta alt", on: { click: leaveFamily }, text: "🛠 Back to Admin" }) : null]);
 }
 
 // navigation: every tab has its own stack of screens
 function setTab(name) { navId++; tab = name; stack = [ROOTS[name]]; drawTabs(); ROOTS[name](); }
-function push(render) { navId++; stack.push(render); render(); }
+function push(render) { const now = Date.now(); if (now - lastPush < 400) return; lastPush = now; navId++; stack.push(render); render(); }
 function back() {
   if (viewerOpen()) { closeViewer(); return; }
   if (stack.length > 1) { navId++; stack.pop(); stack[stack.length - 1](); }
@@ -137,9 +193,14 @@ function applySize() { document.documentElement.style.setProperty("--fs", size +
 applySize();
 
 function drawTabs() {
-  const defs = [["home", "🏠", "Home"], ["dates", "📅", "Dates"], ["places", "📍", "Places"], ["all", "🖼", "All"]];
-  if (HOME && HOME.best) defs.push(["best", "⭐", "Best"]);
-  defs.push(["sug", "💡", "Suggested"]);
+  if (!HOME && !IS_ADMIN) { $tabs.replaceChildren(); return; }  // (the owner's tabs differ, so wait to know who this is)
+  let defs = [];
+  if (IS_ADMIN) defs.push(["admin", "🛠", "Admin"]);
+  if (!IS_ADMIN || adminFam != null) {
+    defs.push(["home", "🏠", "Home"], ["dates", "📅", "Dates"], ["places", "📍", "Places"], ["all", "🖼", "All"]);
+    if (HOME && HOME.best) defs.push(["best", "⭐", "Best"]);
+    defs.push(["sug", "💡", "Suggested"]);
+  }
   $tabs.replaceChildren(...defs.map(([k, ic, label]) =>
     h("button", { class: k === tab ? "on" : "", on: { click: () => { haptic(); setTab(k); } } }, h("span", { class: "ic", text: ic }), label)));
 }
@@ -150,13 +211,18 @@ async function homeScreen() {
   if (!HOME) {  // (asked once per visit, so the welcome can't change while the app is open)
     if (!initData) { show([h("h1", { text: "Open from Telegram" }), h("div", { class: "msg", text: "Please open this app from the bot in Telegram, using the “📱 Open the photo app” button." })]); return; }
     loading(); const my = navId;
-    try { HOME = await api("/api/home"); } catch (e) { if (my === navId) errorScreen(e, homeScreen); return; }
+    let got;
+    try { got = await api("/api/home"); } catch (e) { if (my === navId) errorScreen(e, homeScreen); return; }
+    if (my !== navId) return;  // (they moved on while this was loading)
+    HOME = got;
     homeAt = Date.now();
+    IS_ADMIN = !!HOME.admin;
+    if (IS_ADMIN && adminFam == null) { setTab("admin"); return; }
     drawTabs();
-    if (my !== navId) return;
   }
   const w = HOME.welcome;
   const nodes = [
+    banner(),
     h("div", { class: "topbar" }, h("div", { class: "sp" }),
       h("button", { on: { click: () => { size = Math.max(14, size - 2); applySize(); } }, "aria-label": "Smaller text", text: "A−" }),
       h("button", { on: { click: () => { size = Math.min(30, size + 2); applySize(); } }, "aria-label": "Bigger text", text: "A+" }),
@@ -196,7 +262,7 @@ async function listScreen(title, path, kind) {
   const rows = data.rows.map(r => h("button", { class: "row", on: { click: () => push(() => gridScreen(r.label, { mode: kind, value: r.v })) } },
     h("img", { src: r.cover, alt: "", loading: "lazy", on: { error: e => { e.target.style.visibility = "hidden"; } } }),
     h("span", {}, h("b", { text: r.label }), h("span", { class: "hint", text: r.n + (r.n === 1 ? " photo" : " photos") }))));
-  show([h("h1", { text: title }), rows.length ? rows : h("div", { class: "msg", text: "No photos yet. Check back soon!" }), footer()]);
+  show([banner(), h("h1", { text: title }), rows.length ? rows : h("div", { class: "msg", text: "No photos yet. Check back soon!" }), footer()]);
 }
 const datesScreen = () => listScreen("📅 Pick a date", "/api/dates", "date");
 const placesScreen = () => listScreen("📍 Pick a place", "/api/places", "loc");
@@ -220,7 +286,7 @@ async function loadMore(title, query, all, extra) {
   const have = new Set(all.map(p => p.id));  // (a photo added meanwhile can shift the pages, so skip repeats)
   all.skip = (all.skip || 0) + data.items.length;
   all.push(...data.items.filter(p => !have.has(p.id)));
-  const nodes = [backBtn(), h("h1", { text: title }), extra || null,
+  const nodes = [banner(), backBtn(), h("h1", { text: title }), extra || null,
     all.length ? photoGrid(all) : h("div", { class: "msg", text: "No photos here yet." })];
   if (data.more) nodes.push(h("button", { class: "cta alt", on: { click: async (ev) => {
     ev.target.disabled = true; ev.target.textContent = "Loading…";
@@ -231,7 +297,7 @@ async function loadMore(title, query, all, extra) {
   show(nodes);
 }
 function suggestedScreen() {
-  const note = h("div", { class: "msg" }, "Photos your family shared and " + ((HOME && HOME.owner) || "the photographer") + " approved. To share your own, open the chat and tap “➕ Suggest photos”.",
+  const note = IS_ADMIN ? null : h("div", { class: "msg" }, "Photos your family shared and " + ((HOME && HOME.owner) || "the photographer") + " approved. To share your own, open the chat and tap “➕ Suggest photos”.",
     h("button", { class: "cta alt", on: { click: () => { try { tg.close(); } catch (e) {} } }, text: "Open the chat" }));
   gridScreen("💡 Suggested by your family", { mode: "sug" }, note);
 }
@@ -240,6 +306,7 @@ const ROOTS = {
   all: () => gridScreen("🖼 All photos", { mode: "all" }),
   best: () => gridScreen("⭐ Best shots", { mode: "best" }),
   sug: suggestedScreen,
+  admin: () => adminHome(),
 };
 
 // ---------- full-screen viewer (swipe, pinch, double-tap) ----------
@@ -249,15 +316,73 @@ function viewerOpen() { return V.style.display === "block"; }
 function paint() { vimg.style.transform = `translate(${tx}px,${ty}px) scale(${scale})`; }
 function resetZoom() { scale = 1; tx = ty = 0; paint(); }
 function openViewer(i) {
-  cur = i; V.style.display = "block"; document.body.style.overflow = "hidden";
+  cur = i; dirty = false; V.style.display = "block"; document.body.style.overflow = "hidden";
   document.getElementById("vcopy").textContent = HOME ? HOME.copyright : "";
   try { tg.disableVerticalSwipes(); } catch (e) {}
   syncBack(); showPhoto();
 }
 function closeViewer() {
   V.style.display = "none"; document.body.style.overflow = ""; vimg.removeAttribute("src");
+  document.getElementById("vdlg").style.display = "none";
   try { tg.enableVerticalSwipes(); } catch (e) {}
   syncBack();
+  if (dirty) { dirty = false; redrawCurrent(); }  // the owner changed something: show the fresh list
+}
+function drawTools() {
+  const box = document.getElementById("vtools"), p = viewList[cur];
+  const show_ = IS_ADMIN && p && !p.sug && p.id != null;
+  box.style.display = show_ ? "flex" : "none";
+  document.getElementById("vorig").style.display = p && p.sug ? "none" : "";
+  if (!show_) return;
+  box.replaceChildren(
+    h("button", { on: { click: toggleBest }, text: p.best ? "⭐ In Best shots" : "☆ Add to Best" }),
+    h("button", { on: { click: editPhoto }, text: "✏️ Edit" }),
+    h("button", { on: { click: removePhoto }, text: "🗑 Remove" }));
+}
+function toggleBest(ev) {
+  const p = viewList[cur], b = ev.currentTarget;
+  return oneAtATime(async () => {
+    b.disabled = true;
+    try { const r = await api("/api/admin/photo_best", { id: p.id, best: !p.best }); p.best = r.best; dirty = true; }
+    catch (e) { b.textContent = "⚠️ " + e.message; return; }
+    if (viewList[cur] === p) drawTools();
+  });
+}
+function removePhoto() {
+  const p = viewList[cur];
+  return oneAtATime(async () => {
+    if (!await confirmAsk("Delete this photo from the group and the family's list? This can't be undone.")) return;
+    try { await api("/api/admin/photo_remove", { id: p.id }); }
+    catch (e) { document.getElementById("vcap").textContent = "⚠️ " + e.message; return; }
+    dirty = true;
+    const i = viewList.indexOf(p);  // (they may have swiped while this was running)
+    const wasShown = viewList[cur] === p;
+    if (i >= 0) viewList.splice(i, 1);
+    if (!viewList.length) { closeViewer(); return; }
+    if (i >= 0 && i < cur) cur--;
+    if (cur >= viewList.length) cur = viewList.length - 1;
+    if (wasShown || i < 0) showPhoto(); else drawTools();
+  });
+}
+function editPhoto() {
+  const p = viewList[cur], dlg = document.getElementById("vdlg");
+  const place = h("input", { type: "text", maxlength: "80", value: p.loc || "", placeholder: "For example: Central Park" });
+  const unknown = p.d === "0000-00-00";
+  const day = h("input", { type: "date", value: unknown ? "" : p.d, max: localToday() });
+  const idk = h("input", { type: "checkbox" }); idk.checked = unknown;
+  const msg = h("div", { class: "hint", text: "" });
+  const save = h("button", { class: "cta", text: "Save", on: { click: async () => {
+    save.disabled = true; msg.textContent = "";
+    try {
+      const r = await api("/api/admin/photo_edit", { id: p.id, place: place.value, date: idk.checked ? "unknown" : day.value });
+      p.d = r.d; p.dt = r.dt; p.loc = r.loc; dirty = true; dlg.style.display = "none"; showPhoto();
+    } catch (e) { msg.textContent = "⚠️ " + e.message; save.disabled = false; }
+  } } });
+  dlg.replaceChildren(h("div", { class: "box" }, h("h2", { text: "Edit this photo" }),
+    h("label", { text: "📍 Place" }), place, h("label", { text: "📅 Date" }), day,
+    h("label", { class: "chk" }, idk, "I don't know the date"), msg, save,
+    h("button", { class: "cta alt", text: "Cancel", on: { click: () => { dlg.style.display = "none"; } } })));
+  dlg.style.display = "flex";
 }
 function showPhoto() {
   const p = viewList[cur]; if (!p) return;
@@ -269,6 +394,7 @@ function showPhoto() {
   document.getElementById("vcap").textContent = [p.dt, p.loc, p.by ? "Added by " + p.by : ""].filter(Boolean).join(" · ") + "   (" + (cur + 1) + " of " + viewList.length + ")";
   document.getElementById("vprev").style.visibility = cur > 0 ? "visible" : "hidden";
   document.getElementById("vnext").style.visibility = cur < viewList.length - 1 ? "visible" : "hidden";
+  drawTools();
   for (const j of [cur + 1, cur - 1]) if (viewList[j]) { const pre = new Image(); pre.src = viewList[j].f; }  // warm the neighbours
 }
 function step(d) { const n = cur + d; if (n >= 0 && n < viewList.length) { cur = n; showPhoto(); haptic(); } }
@@ -285,7 +411,7 @@ document.getElementById("vorig").onclick = async (ev) => {
 let t0 = null, pinch = null, lastTap = 0;
 const dist = (a, b) => Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
 V.addEventListener("touchstart", e => {
-  if (e.target.closest("button")) return;
+  if (e.target.closest("button") || e.target.closest("#vdlg")) return;
   if (e.touches.length === 2) { pinch = { d: dist(e.touches[0], e.touches[1]), s: scale }; t0 = null; }
   else if (e.touches.length === 1) { t0 = { x: e.touches[0].clientX, y: e.touches[0].clientY, tx, ty, moved: false }; }
 }, { passive: true });
@@ -308,6 +434,297 @@ V.addEventListener("touchend", e => {
   }
 });
 document.addEventListener("keydown", e => { if (!viewerOpen()) return; if (e.key === "ArrowRight") step(1); else if (e.key === "ArrowLeft") step(-1); else if (e.key === "Escape") closeViewer(); });
+
+// ---------- the owner's Admin tab ----------
+const stat = (n, label) => h("div", { class: "stat" }, h("b", { text: String(n) }), h("span", { class: "hint", text: label }));
+function bigRow(icon, title, badge, click) {
+  return h("button", { class: "row", on: { click } },
+    h("span", { style: "font-size:1.6em", text: icon }),
+    h("span", {}, h("b", { text: title }), badge ? h("span", { class: "badge", text: String(badge) }) : null));
+}
+async function adminLoad(path, body, retry) {
+  loading(); const my = navId;
+  try { const d = await api(path, body); return my === navId ? d : null; }
+  catch (e) { if (my === navId) errorScreen(e, retry); return null; }
+}
+async function adminHome() {
+  const d = await adminLoad("/api/admin/overview", {}, adminHome); if (!d) return;
+  const s = d.stats;
+  show([h("h1", { text: "🛠 Admin" }),
+    h("div", { class: "stats" }, stat(s.families, "Families"), stat(s.people, "People"), stat(s.photos, "Photos"), stat(s.new7, "New this week")),
+    bigRow("📤", "Add photos", "", () => push(() => uploadScreen(null))),
+    bigRow("💡", "Suggestions inbox", s.sugs, () => push(sugsScreen)),
+    bigRow("📣", "Announcements", s.scheduled ? s.scheduled + " scheduled" : "", () => push(() => annScreen(d.families))),
+    bigRow("🕵️", "Login attempts", s.tries, () => push(() => triesScreen())),
+    h("h2", { text: "Families" }),
+    d.families.length ? d.families.map(f => h("button", { class: "row", on: { click: () => push(() => familyScreen(f.tid)) } },
+      h("span", {}, h("b", { text: f.name + " family" }),
+        h("span", { class: "hint", text: "Code " + f.code + " · " + f.people + (f.people === 1 ? " person" : " people") + " · " + f.photos + (f.photos === 1 ? " photo" : " photos") + (f.best ? " · ⭐ " + f.best : "") }),
+        f.sugs ? h("span", { class: "badge", text: f.sugs + " suggested" }) : null)))
+      : h("div", { class: "msg", text: "No families yet. Add one from the bot's /admin panel." }),
+    footer()]);
+}
+async function familyScreen(tid) {
+  const d = await adminLoad("/api/admin/family", { tid }, () => familyScreen(tid)); if (!d) return;
+  show([backBtn(), h("h1", { text: d.name + " family" }),
+    h("div", { class: "hint", text: "Code " + d.code + " · " + d.photos + (d.photos === 1 ? " photo" : " photos") + " · ⭐ " + d.best + " best" }),
+    h("button", { class: "cta", on: { click: () => enterFamily(d.tid, d.name) }, text: "📸 Browse their photos" }),
+    h("button", { class: "cta alt", on: { click: () => push(() => uploadScreen(d.tid)) }, text: "📤 Add photos to this family" }),
+    h("h2", { text: "Members" }),
+    d.people.length ? d.people.map(p => h("div", { class: "msg" },
+      h("b", { text: p.first || "(no name)" }), p.username ? " @" + p.username : "",
+      p.by ? h("div", { class: "hint", text: "Added by " + p.by }) : null,
+      p.pending ? h("div", { class: "hint", text: "⏳ hasn't confirmed their name yet" }) : null))
+      : h("div", { class: "msg", text: "Nobody has linked yet." }),
+    h("div", { class: "hint", text: "To change the code, remove people or delete the family, use the bot's /admin panel." }),
+    footer()]);
+}
+
+// suggestions inbox
+async function sugsScreen() {
+  const d = await adminLoad("/api/admin/sugs", {}, sugsScreen); if (!d) return;
+  const my = navId;
+  const act = (row, action, btns, ask) => oneAtATime(async () => {
+    if (ask && !await confirmAsk(ask)) return;
+    btns.forEach(b => b.disabled = true);
+    try { const r = await api("/api/admin/sug_act", { id: row.id, action }); await alertMsg(r.message); }
+    catch (e) { await alertMsg("⚠️ " + e.message); }
+    if (my === navId) sugsScreen();  // (not if they already went somewhere else)
+  });
+  show([backBtn(), h("h1", { text: "💡 Suggestions" }),
+    d.rows.length ? d.rows.map(r => {
+      const btns = [];
+      const mk = (text, cls, fn) => { const b = h("button", { class: cls, text, on: { click: fn } }); btns.push(b); return b; };
+      return h("div", { class: "card" },
+        h("b", { text: r.from + " · " + r.family + " family" }),
+        h("div", { class: "hint", text: r.dt + (r.place ? " · " + r.place : "") + " · " + r.n + (r.n === 1 ? " photo" : " photos") + " · " + r.at }),
+        r.others.length ? h("div", { class: "hint", text: "Other families in the photos: " + r.others.join(", ") }) : null,
+        photoGrid(r.cards),
+        h("div", { class: "btns" },
+          r.others.length ? mk("✅ Approve for all listed", "", () => act(r, "y", btns)) : mk("✅ Approve", "", () => act(r, "y", btns)),
+          r.others.length ? mk("✅ Their family only", "alt", () => act(r, "o", btns)) : null,
+          mk("❌ Reject", "danger", () => act(r, "n", btns, "Reject these photos? They won't be added."))));
+    }) : h("div", { class: "msg", text: "Nothing is waiting. 🎉" }),
+    footer()]);
+}
+function alertMsg(text) {
+  text = String(text).slice(0, 250);  // (Telegram's popup refuses long text)
+  return new Promise(res => { try { tg.showAlert(text, () => res()); } catch (e) { window.alert(text); res(); } });
+}
+
+// announcements
+let annDraft = { aud: "all", text: "" };
+function annScreen(families) {
+  navId++;
+  const sel = h("select", {}, h("option", { value: "all", text: "📣 Everyone (all families)" }),
+    (families || []).map(f => h("option", { value: String(f.tid), text: f.name + " family" })));
+  sel.value = annDraft.aud;
+  if (sel.value !== annDraft.aud) sel.value = "all";
+  const text = h("textarea", { maxlength: "3500", placeholder: "Write your announcement…", on: { input: () => { annDraft.text = text.value; } } }); text.value = annDraft.text;
+  sel.addEventListener("change", () => { annDraft.aud = sel.value; });
+  const msg = h("div", { class: "hint", text: "" });
+  const my = navId;
+  const review = h("button", { class: "cta", text: "Review", on: { click: async () => {
+    annDraft = { aud: sel.value, text: text.value };
+    review.disabled = true; msg.textContent = "";
+    try {
+      const r = await api("/api/admin/ann_preview", { aud: aud_(), text: annDraft.text });
+      if (my === navId) annReview(families, r);
+    } catch (e) { msg.textContent = "⚠️ " + e.message; review.disabled = false; }
+  } } });
+  const aud_ = () => sel.value === "all" ? "all" : parseInt(sel.value, 10);
+  show([backBtn(), h("h1", { text: "📣 Announcement" }), h("label", { text: "Who gets it?" }), sel,
+    h("label", { text: "Message" }), text, msg, review,
+    h("button", { class: "cta alt", text: "🕒 Scheduled announcements", on: { click: () => push(scheduledScreen) } }), footer()]);
+}
+function annReview(families, pv) {
+  navId++;
+  const msg = h("div", { class: "hint", text: "" });
+  const aud = annDraft.aud === "all" ? "all" : parseInt(annDraft.aud, 10);
+  const send = h("button", { class: "cta", text: "✅ Send now to " + pv.count + (pv.count === 1 ? " person" : " people"), on: { click: () => oneAtATime(async () => {
+    if (!pv.count) { msg.textContent = "Nobody is in that audience yet."; return; }
+    send.disabled = true; msg.textContent = "Starting…";
+    try {
+      const r = await api("/api/admin/ann_send", { aud, text: annDraft.text });
+      annDraft.text = "";
+      await alertMsg("📣 Sending to " + r.count + (r.count === 1 ? " person" : " people") + ". The bot will message you when it's done.");
+      back();
+    } catch (e) { msg.textContent = "⚠️ " + e.message; send.disabled = false; }
+  }) } });
+  const when = h("input", { type: "datetime-local" });
+  const sched = h("button", { class: "cta alt", text: "🕒 Schedule it", on: { click: () => oneAtATime(async () => {
+    if (!when.value) { msg.textContent = "Please pick a date and time first."; return; }
+    sched.disabled = true; msg.textContent = "";
+    try {
+      const r = await api("/api/admin/ann_schedule", { aud, text: annDraft.text, when: when.value.slice(0, 16).replace("T", " ") });
+      annDraft.text = "";
+      await alertMsg("✅ Scheduled for " + r.label + " to " + r.who + ".");
+      back();
+    } catch (e) { msg.textContent = "⚠️ " + e.message; sched.disabled = false; }
+  }) } });
+  show([backBtn(), h("h1", { text: "📣 Preview" }),
+    h("div", { class: "hint", text: "Goes to " + pv.count + (pv.count === 1 ? " person" : " people") + " in " + pv.who + ":" }),
+    h("div", { class: "msg", text: "📣 Announcement\n\n" + annDraft.text }),
+    send, h("label", { text: "…or send it later (" + (pv.tz || "bot") + " time)" }), when, sched, msg,
+    h("button", { class: "cta alt", text: "✏️ Edit the message", on: { click: () => annScreen(families) } }), footer()]);
+}
+async function scheduledScreen() {
+  const d = await adminLoad("/api/admin/scheduled", {}, scheduledScreen); if (!d) return;
+  const my = navId;
+  show([backBtn(), h("h1", { text: "🕒 Scheduled" }),
+    d.rows.length ? d.rows.map(r => h("div", { class: "card" },
+      h("b", { text: r.label }), h("div", { class: "hint", text: "To " + r.who }),
+      h("div", { style: "white-space:pre-wrap;margin-top:6px", text: r.text }),
+      h("div", { class: "btns" }, h("button", { class: "danger", text: "🗑 Cancel this one", on: { click: () => oneAtATime(async () => {
+        if (!await confirmAsk("Cancel this scheduled announcement?")) return;
+        try { await api("/api/admin/sched_cancel", { id: r.id }); } catch (e) { await alertMsg("⚠️ " + e.message); }
+        if (my === navId) scheduledScreen();
+      }) } }))))
+      : h("div", { class: "msg", text: "Nothing is scheduled." }),
+    footer()]);
+}
+
+// login attempts
+async function triesScreen() {
+  const d = await adminLoad("/api/admin/tries", {}, triesScreen);
+  if (!d) return;
+  const my = navId;
+  const fam = await api("/api/admin/overview", {}).catch(() => ({ families: [] }));
+  if (my !== navId) return;  // (they went back while the family list was loading)
+  const reload = () => { if (my === navId) triesScreen(); };
+  show([backBtn(), h("h1", { text: "🕵️ Login attempts" }),
+    d.rows.length ? d.rows.map(t => {
+      const sel = h("select", {}, h("option", { value: "", text: "Pick a family…" }),
+        fam.families.map(f => h("option", { value: String(f.tid), text: f.name + " family" })));
+      if (t.guess) sel.value = String(t.guess.tid);
+      const run = (path, body, ask) => oneAtATime(async () => {
+        if (ask && !await confirmAsk(ask)) return;
+        try { const r = await api(path, body); if (r.message) await alertMsg("✅ " + r.message); }
+        catch (e) { await alertMsg("⚠️ " + e.message); }
+        reload();
+      });
+      return h("div", { class: "card" },
+        h("b", { text: t.tg || t.label }), t.username ? " @" + t.username : "",
+        h("div", { class: "hint", text: "Typed: “" + (t.first || "-") + " " + (t.last || "-") + "” · " + t.reason + " · " + t.count + "× · last " + t.at }),
+        t.lock ? h("div", { class: "hint", text: "🔒 Locked out for about " + t.lock + " more minute(s)" }) : null,
+        h("label", { text: t.guess ? "Looks like the " + t.guess.name + " family" : "Add to which family?" }), sel,
+        h("div", { class: "btns" },
+          h("button", { text: "✅ Add them", on: { click: () => {
+            if (!sel.value) { alertMsg("Please pick a family first."); return; }
+            run("/api/admin/try_add", { uid: t.uid, tid: parseInt(sel.value, 10) },
+              "Add " + (t.first || t.tg || "this person") + " to the " + sel.selectedOptions[0].text + "?");
+          } } }),
+          t.lock ? h("button", { class: "alt", text: "🔓 Clear lockout", on: { click: () => run("/api/admin/try_unlock", { uid: t.uid }) } }) : null,
+          h("button", { class: "alt", text: "🗑 Dismiss", on: { click: () => run("/api/admin/try_dismiss", { uid: t.uid }) } })));
+    }) : h("div", { class: "msg", text: "Nobody has tried to log in recently." }),
+    d.rows.length ? h("button", { class: "cta alt", text: "Clear the whole list", on: { click: () => oneAtATime(async () => {
+      if (!await confirmAsk("Clear the list? Nobody is unlinked or unlocked, it just empties the list.")) return;
+      try { await api("/api/admin/tries_clear", {}); } catch (e) {}
+      reload();
+    }) } }) : null,
+    footer()]);
+}
+
+// adding photos (one at a time, as files so the quality is kept)
+const UPLOAD_MAX = 30 * 1024 * 1024;
+const IMG_NAME = /\.(heic|heif|jpe?g|png|webp|gif)$/i;
+const fmtSize = n => n >= 1048576 ? (n / 1048576).toFixed(1) + " MB" : Math.max(1, Math.round(n / 1024)) + " KB";
+function newKey() { let k = ""; for (let i = 0; i < 24; i++) k += Math.floor(Math.random() * 36).toString(36); return k; }
+async function uploadOne(file, meta, key, signal) {
+  const q = new URLSearchParams({ fam: String(meta.fam), place: meta.place, date: meta.date, name: file.name || "photo" });
+  let res;
+  try {
+    res = await fetch("/api/admin/upload?" + q, { method: "POST", signal, body: file,
+      headers: { "X-Init-Data": initData, "X-Upload-Key": key, "Content-Type": file.type || "application/octet-stream" } });
+  } catch (e) { throw new Error(signal.aborted ? "Stopped" : "No connection. Check your internet, then tap Retry."); }
+  let data = {};
+  try { data = await res.json(); } catch (e) {}
+  if (!res.ok) { const er = new Error(data.error || "Upload failed."); er.maybe = !!data.maybe; throw er; }
+  return data;
+}
+function uploadScreen(pre) {
+  adminLoad("/api/admin/overview", {}, () => uploadScreen(pre)).then(d => { if (d) drawUpload(pre, d.families); });
+}
+function drawUpload(pre, families) {
+  const my = navId;
+  let items = [], running = false, ctl = null, stopFlag = false, doneFam = null;
+  const sel = h("select", {}, h("option", { value: "", text: "Pick a family…" }),
+    families.map(f => h("option", { value: String(f.tid), text: f.name + " family" })));
+  if (pre != null) sel.value = String(pre);
+  const place = h("input", { type: "text", maxlength: "80", placeholder: "Leave empty if you don't know" });
+  const day = h("input", { type: "date", max: localToday() });
+  const idk = h("input", { type: "checkbox" });
+  idk.addEventListener("change", () => { day.disabled = idk.checked; });
+  const pick = h("input", { type: "file", accept: "image/*,.heic,.heif", multiple: "multiple", style: "display:none" });
+  const list = h("div", {}), msg = h("div", { class: "hint", text: "" }), bar = h("i"), summary = h("div", {});
+  const start = h("button", { class: "cta", text: "⬆️ Upload", on: { click: () => run(false) } });
+  const stop = h("button", { class: "cta alt", text: "Stop", style: "display:none", on: { click: () => { stopFlag = true; if (ctl) ctl.abort(); } } });
+  const choose = h("button", { class: "cta alt", text: "📷 Choose photos", on: { click: () => pick.click() } });
+  const wait = items_ => items_.filter(i => i.state === "ready" || i.state === "fail");
+  function paint() {
+    list.replaceChildren(...items.map(it => h("div", { class: "file" + (it.state === "fail" || it.state === "skip" ? " bad" : "") },
+      h("span", { class: "nm", text: it.file.name || "photo" }),
+      h("span", { class: "st", text: it.state === "done" ? "✅" : it.state === "up" ? "⏳ uploading…" : it.state === "ready" ? fmtSize(it.file.size)
+        : "⚠️ " + it.msg }))));
+    const todo = wait(items).length, failed = items.filter(i => i.state === "fail").length;
+    start.textContent = running ? "Uploading…" : failed && todo === failed ? "🔁 Retry the " + failed + " that didn't go through"
+      : "⬆️ Upload " + todo + (todo === 1 ? " photo" : " photos");
+    start.disabled = running || !todo;
+    stop.style.display = running ? "" : "none";
+    choose.disabled = running;
+    const done = items.filter(i => i.state === "done").length;
+    const total = items.filter(i => i.state !== "skip").length;
+    bar.style.width = total ? Math.round(100 * done / total) + "%" : "0";
+  }
+  pick.addEventListener("change", () => {
+    const have = new Set(items.map(i => i.file.name + "|" + i.file.size + "|" + i.file.lastModified));
+    for (const f of pick.files) {
+      const k = f.name + "|" + f.size + "|" + f.lastModified;
+      if (have.has(k)) continue;
+      have.add(k);
+      const it = { file: f, key: newKey(), state: "ready", msg: "" };
+      if (!(f.type || "").startsWith("image/") && !IMG_NAME.test(f.name || "")) { it.state = "skip"; it.msg = "not a photo"; }
+      else if (f.size > UPLOAD_MAX) { it.state = "skip"; it.msg = "over 30 MB: send it through the chat"; }
+      else if (!f.size) { it.state = "skip"; it.msg = "empty file"; }
+      items.push(it);
+    }
+    pick.value = "";
+    paint();
+  });
+  async function run() {
+    msg.textContent = "";
+    if (!sel.value) { msg.textContent = "⚠️ Please pick the family first."; return; }
+    if (!idk.checked && !day.value) { msg.textContent = "⚠️ Please pick the date, or tick “I don't know the date”."; return; }
+    const meta = { fam: parseInt(sel.value, 10), place: place.value, date: idk.checked ? "unknown" : day.value };
+    const famName = sel.selectedOptions[0].text;
+    running = true; stopFlag = false; paint();
+    for (const it of items.filter(i => i.state === "ready" || i.state === "fail")) {
+      if (stopFlag) break;
+      it.state = "up"; paint();
+      ctl = new AbortController();
+      const timer = setTimeout(() => ctl.abort(), 600000);
+      try { await uploadOne(it.file, meta, it.key, ctl.signal); it.state = "done"; doneFam = meta.fam; }
+      catch (e) {
+        it.state = "fail"; it.msg = e.message;
+        if (e.maybe) it.key = newKey();  // (it may already be in the group: a retry is the owner's call)
+      }
+      clearTimeout(timer);
+      paint();
+    }
+    running = false; ctl = null; paint();
+    const done = items.filter(i => i.state === "done").length, failed = items.filter(i => i.state === "fail").length;
+    summary.replaceChildren(...(done ? [
+      h("div", { class: "msg", text: "✅ " + done + (done === 1 ? " photo" : " photos") + " added to the " + famName + "." + (failed ? " " + failed + " didn't go through." : "") + (stopFlag ? " (Stopped.)" : "") }),
+      h("button", { class: "cta alt", text: "📸 Browse their photos", on: { click: () => enterFamily(meta.fam, famName.replace(/ family$/, "")) } })] : []));
+  }
+  show([backBtn(), h("h1", { text: "📤 Add photos" }),
+    h("label", { text: "Family" }), sel,
+    h("label", { text: "📍 Place" }), place,
+    h("label", { text: "📅 Date" }), day, h("label", { class: "chk" }, idk, "I don't know the date"),
+    h("div", { class: "hint", style: "margin-top:12px", text: "Photos go up as files, so the full quality is kept. Up to 30 MB each. For bigger files, send them through the chat." }),
+    choose, pick, list, h("div", { class: "bar" }, bar), msg, start, stop, summary, footer()]);
+  paint();
+}
 
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "visible" && HOME && !viewerOpen() && Date.now() - homeAt > 3600 * 1000) { HOME = null; setTab("home"); }
