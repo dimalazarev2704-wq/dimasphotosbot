@@ -2472,17 +2472,19 @@ def invite_text(code: str) -> str:
     )
 
 
-async def send_invite_to_owner(bot, code: str) -> None:
+async def send_invite_to_owner(bot, code: str) -> bool:
     """After a family is made: sends the owner the ready-to-forward welcome message in a private chat."""
     if not OWNER_ID:
-        return
+        return False
     try:
         await bot.send_message(OWNER_ID, invite_text(code), disable_web_page_preview=True)
+        return True
     except TelegramError:
         log.warning("Couldn't send the welcome message to the owner (they need to have started the bot)")
+        return False
 
 
-async def make_family(bot, name: str) -> tuple[int, str, bool]:
+async def make_family(bot, name: str, invited: list | None = None) -> tuple[int, str, bool]:
     """Makes the family's topic in the group, saves the family and posts its code there.
     Returns (topic id, code, whether the code was posted in the topic). Raises TelegramError."""
     topic = await bot.create_forum_topic(GROUP_ID, name)
@@ -2495,7 +2497,9 @@ async def make_family(bot, name: str) -> tuple[int, str, bool]:
         upsert=True,
     )
     log.info("Made family %s", name)
-    await send_invite_to_owner(bot, code)
+    got = await send_invite_to_owner(bot, code)
+    if invited is not None:
+        invited.append(got)
     try:
         await bot.send_message(GROUP_ID, f"🏠 {name} family\nCode: {code}", message_thread_id=tid)
         return tid, code, True
@@ -2871,7 +2875,7 @@ async def family_page(tid: int):
         [
             [_btn("📤 Add photos", f"a:phf:{tid}"), _btn("🗑 Remove photos", f"a:rmf:{tid}:0")],
             [_btn("👥 Members", f"a:mem:{tid}"), _btn("🔄 New code", f"a:nc:{tid}")],
-            [_btn("➕ Add person by ID", f"a:ap:{tid}")],
+            [_btn("➕ Add person by ID", f"a:ap:{tid}"), _btn("💬 Welcome message", f"a:inv:{tid}")],
             [_btn("👁 Browse as this family", f"a:cnf:{tid}"), _btn("❌ Delete family", f"a:df:{tid}")],
             *([[_btn(f"⭐ Clear best shots ({best})", f"a:bsx:{tid}")]] if best else []),
             [_btn("⬅️ Families", "a:fl:0")],
@@ -3129,6 +3133,16 @@ async def on_admin_button(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                else "I couldn't message them yet; they'll see the welcome the first time they open the bot."),
             InlineKeyboardMarkup([[_btn("➕ Add another", "a:np")], [_btn("⬅️ Admin panel", "a:home")]]),
         )
+
+    elif action == "inv":  # the welcome message for an existing family, to forward
+        tid = int(parts[2])
+        fam = await need_family(tid)
+        if not fam:
+            return
+        try:
+            await context.bot.send_message(q.message.chat_id, invite_text(fam.get("code") or ""), disable_web_page_preview=True)
+        except TelegramError:
+            await show("I couldn't send that just now. Please tap the button again.", one_button("⬅️ Back", f"a:f:{tid}"))
 
     elif action == "ap":  # add a person by Telegram ID
         tid = int(parts[2])
@@ -3449,7 +3463,7 @@ ADMIN_ACTIONS = {
     "overview", "family", "photo_best", "photo_remove", "photo_edit", "sugs", "sug_act",
     "ann_preview", "ann_send", "ann_schedule", "scheduled", "sched_cancel",
     "tries", "try_add", "try_dismiss", "try_unlock", "tries_clear",
-    "fam_add", "fam_code", "fam_delete", "member_unlink", "person_add", "best_clear",
+    "fam_add", "fam_code", "invite", "invite_send", "fam_delete", "member_unlink", "person_add", "best_clear",
 }
 
 
@@ -3749,11 +3763,28 @@ async def _admin_api(bot, action: str, req: dict) -> tuple[int, dict]:
         if await db.families.find_one({"key": normalize(name)}) and req.get("again") is not True:
             return 409, {"error": f"There is already a {name} family. Add it anyway?", "exists": True}
         try:
-            tid, code, posted = await make_family(bot, name)
+            invited: list = []
+            tid, code, posted = await make_family(bot, name, invited)
         except TelegramError as e:
             return 502, {"error": f"I couldn't make the topic ({e.message}). Check that Topics are on in the group "
                                   "and that I'm an admin with the \u201cManage topics\u201d right."}
-        return 200, {"ok": True, "tid": tid, "code": code, "name": name, "posted": posted}
+        return 200, {"ok": True, "tid": tid, "code": code, "name": name, "posted": posted,
+                     "invited": bool(invited and invited[0])}
+
+    if action in ("invite", "invite_send"):
+        tid = _int(req.get("tid"))
+        fam = await db.families.find_one({"thread_id": tid}) if tid is not None else None
+        if not fam:
+            return gone
+        if action == "invite":
+            return 200, {"text": invite_text(fam.get("code") or "")}
+        if not OWNER_ID:
+            return 400, {"error": "OWNER_ID isn't set."}
+        try:
+            await bot.send_message(OWNER_ID, invite_text(fam.get("code") or ""), disable_web_page_preview=True)
+        except TelegramError:
+            return 502, {"error": "I couldn't message you. Open the bot's chat and press Start first."}
+        return 200, {"ok": True}
 
     if action in ("fam_code", "fam_delete", "member_unlink", "person_add", "best_clear"):
         tid = _int(req.get("tid"))
