@@ -30,6 +30,8 @@ NEW_DAYS = 14  # how long photos count as "new"
 NEW_MIN = 2  # how many new photos it takes to show the "New photos" welcome
 THUMB_SIDE, FULL_SIDE = 360, 1600
 MAX_JSON = 16 * 1024
+MAX_UPLOAD = 30 * 1024 * 1024  # one photo from the Admin tab (bots can send up to 50 MB; this keeps Render's memory safe)
+UPLOAD_PATH = "/api/admin/upload"
 CACHE_BYTES = 80 * 1024 * 1024
 MAX_CONNECTIONS = 300
 
@@ -91,13 +93,35 @@ def sniff(data: bytes) -> str:
         return "image/png"
     if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
         return "image/webp"
-    if data[:3] == b"GIF":
+    if data[:6] in (b"GIF87a", b"GIF89a"):
         return "image/gif"
     return "application/octet-stream"
 
 
 MAX_PIXELS = 30_000_000  # for PNG and the like, which must be decoded at full size
 MAX_JPEG_PIXELS = 150_000_000  # JPEGs are decoded at a reduced size, so even a big camera original is cheap
+
+
+HEIC_BRANDS = (b"heic", b"heix", b"hevc", b"hevx", b"heim", b"heis", b"mif1", b"msf1", b"avif")
+EXT = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp", "image/gif": ".gif", "image/heic": ".heic"}
+
+
+def sniff_image(data: bytes) -> str | None:
+    """What kind of picture this is, judged by the bytes themselves (never by the name the phone gave it)."""
+    if len(data) < 16:
+        return None  # too small to be a real picture
+    ct = sniff(data)
+    if ct != "application/octet-stream":
+        return ct
+    if data[4:8] == b"ftyp" and data[8:12] in HEIC_BRANDS:
+        return "image/heic"
+    return None
+
+
+def safe_name(name: str, ct: str) -> str:
+    base = re.sub(r"[^\w.\- ]", "_", (name or "").replace("\\", "/").split("/")[-1]).strip(" .")[:80]
+    stem = base.rsplit(".", 1)[0] if "." in base else base
+    return (stem or f"photo_{int(time.time())}") + EXT.get(ct, ".jpg")
 
 
 def resize(data: bytes, side: int, quality: int) -> bytes:
@@ -179,6 +203,8 @@ class WebApp:
         self.dl_gate = asyncio.Semaphore(4)
         self.cpu_gate = asyncio.Semaphore(1)  # (one CPU: more at once only slows the bot down)
         self.inflight: dict = {}
+        self.uploads: dict = {}  # upload key -> the running/finished upload, so a repeated tap can't post a photo twice
+        self.upload_gate = asyncio.Semaphore(1)  # one big file in memory at a time
         self.last_orig: dict[int, float] = {}
         self.conns = 0
 
@@ -206,18 +232,14 @@ class WebApp:
             return None
         return doc.get("thread_id")
 
-    async def auth(self, headers: dict):
-        """-> (user, thread_id, None) or (None, None, error Resp)."""
-        user = validate_init_data(headers.get("x-init-data", ""), self.d.token)
-        if not user:
-            return None, None, err(401, "Please close this and open the app again from Telegram.")
-        tid = await self.family_of(user["id"])
-        if self.d.is_owner(user["id"]) and not tid:
-            return None, None, err(403, "This app shows a family's photos. In the chat, send /connect and pick a family, "
-                                        "then open the app again. (Your own admin view isn't in the app yet.)")
-        if not tid:
-            return None, None, err(403, "Please send /start to the bot and link your account first.")
-        return user, tid, None
+    async def owner_family(self, uid: int, req: dict):
+        """The family the owner picked in the Admin tab (sent as `fam`). Nothing is stored about the owner:
+        the pick lives only in the open app. No pick (or a bad one) means no family."""
+        fam = req.get("fam")
+        if isinstance(fam, int) and not isinstance(fam, bool) and abs(fam) <= 2 ** 53 \
+                and await self.d.db().families.find_one({"thread_id": fam}):
+            return fam
+        return None
 
     # ---------- routing ----------
 
@@ -234,6 +256,10 @@ class WebApp:
                 return self.page()
             if path.startswith("/img/") and method == "GET":
                 return await self.image(path[5:], query)
+            if path.startswith("/simg/") and method == "GET":
+                return await self.suggestion_image(path[6:], query)
+            if path == UPLOAD_PATH and method == "POST":
+                return await self.upload(query, headers, body)
             if path.startswith("/api/") and method == "POST":
                 return await self.api(path, headers, body)
             return err(404, "Not found")
@@ -248,6 +274,68 @@ class WebApp:
         except OSError:
             return Resp(500, b"The app page is missing on the server.", "text/plain")
         return Resp(200, html, "text/html; charset=utf-8", {"Cache-Control": "no-store"})
+
+    # ---------- uploads (owner only) ----------
+
+    def upload_denied(self, headers: dict):
+        """None if the caller is the owner, else the error to send. Checked BEFORE the body is read."""
+        user = validate_init_data(headers.get("x-init-data", ""), self.d.token)
+        if not user:
+            return err(401, "Please close this and open the app again from Telegram.")
+        if not self.d.is_owner(user["id"]):
+            return err(403, "Not available.")
+        return None
+
+    async def upload(self, query: dict, headers: dict, body: bytes) -> Resp:
+        denied = self.upload_denied(headers)
+        if denied:
+            return denied
+        try:
+            tid = int(query.get("fam", ""))
+        except ValueError:
+            return err(400, "Please pick a family.")
+        if abs(tid) > 2 ** 53 or not await self.d.db().families.find_one({"thread_id": tid}):
+            return err(404, "That family no longer exists.")
+        day = self.d.parse_date(query.get("date", ""))
+        if day is None:
+            return err(400, "Please give a date like 2026-07-04 (not in the future), or choose that you don't know it.")
+        place = " ".join(query.get("place", "").split())[:80] or None
+        place = place.lstrip("⭐ ").strip()[:80] or None if place else None  # a leading ⭐ would mark it as a best shot
+        if place and place.casefold() in self.d.unknown_words:
+            place = None
+        if not body:
+            return err(400, "That file is empty.")
+        ct = sniff_image(body)
+        if not ct:
+            return err(400, "That doesn't look like a photo (JPG, PNG, HEIC, WEBP or GIF), so I skipped it.")
+        name = safe_name(query.get("name", ""), ct)
+        key = headers.get("x-upload-key", "")
+        if not re.fullmatch(r"[0-9a-zA-Z_-]{8,40}", key):
+            return err(400, "Bad request")
+        sig = (tid, day, place, len(body))
+        cur = self.uploads.get(key)
+        if cur is not None and cur[0] != sig:
+            return err(409, "That upload changed. Please start it again.")
+        if cur is None:
+            fut = asyncio.ensure_future(self.do_upload(key, tid, place, day, name, body))
+            self.uploads[key] = (sig, fut)
+        else:
+            fut = cur[1]
+        status, data = await asyncio.shield(fut)  # (a repeat of the same upload waits for, and gets, the same answer)
+        return jresp(data, status)
+
+    async def do_upload(self, key: str, tid: int, place, day: str, name: str, body: bytes):
+        try:
+            async with self.upload_gate:
+                status, data = await self.d.upload_photo(tid, place, day, name, body)
+        except Exception:
+            log.exception("Upload failed")
+            status, data = 500, {"error": "Something went wrong. Please try again."}
+        if status != 200 and not (isinstance(data, dict) and data.get("maybe")):
+            self.uploads.pop(key, None)  # a failed one can be tried again with the same key
+        else:  # done, or "maybe posted": remembered so a repeat can't post it twice
+            asyncio.get_running_loop().call_later(3600, self.uploads.pop, key, None)
+        return status, data
 
     # ---------- api ----------
 
@@ -308,10 +396,11 @@ class WebApp:
                 "items": [self.card(x, uid) for x in docs]}
 
     async def api(self, path: str, headers: dict, body: bytes) -> Resp:
-        user, tid, bad = await self.auth(headers)
-        if bad:
-            return bad
+        user = validate_init_data(headers.get("x-init-data", ""), self.d.token)
+        if not user:
+            return err(401, "Please close this and open the app again from Telegram.")
         uid = user["id"]
+        owner = self.d.is_owner(uid)
         db = self.d.db()
         try:
             req = json.loads(body.decode() or "{}")
@@ -320,11 +409,37 @@ class WebApp:
         except (ValueError, RecursionError):
             return err(400, "Bad request")
 
+        if path.startswith("/api/admin/"):  # the owner's tools
+            name = path[len("/api/admin/"):]
+            if not owner:
+                return err(403, "Not available.")
+            if name not in self.d.admin_actions:
+                return err(404, "Not found")
+            status, data = await self.d.admin(name, req)
+            if name == "sugs" and status == 200:
+                for row in data["rows"]:
+                    row["cards"] = [self.sug_card(row, row["id"], i, uid) for i in range(min(row["n"], 10))]
+            return jresp(data, status)
+
+        if owner:
+            tid = await self.owner_family(uid, req)
+        else:
+            tid = await self.family_of(uid)
+            if not tid:
+                return err(403, "Please send /start to the bot and link your account first.")
+        if not tid:  # the owner, with no family picked yet
+            if path == "/api/home":
+                return jresp({"admin": True, "family": "", "first": user.get("first_name") or "", "best": False,
+                              "help": self.d.help_text(), "copyright": self.d.copyright, "owner": self.d.owner_name,
+                              "welcome": None})
+            return err(403, "Pick a family in the Admin tab first.")
+
         if path == "/api/home":
             return jresp({
                 "family": await self.d.family_name(tid) or "",
                 "first": user.get("first_name") or "",
                 "best": await self.d.has_best(tid),
+                "admin": owner,
                 "help": self.d.help_text(),
                 "copyright": self.d.copyright,
                 "owner": self.d.owner_name,
@@ -407,6 +522,45 @@ class WebApp:
         doc = await self.d.db().photos.find_one({"message_id": mid})
         return doc if doc and doc.get("thread_id") == tid else None
 
+    def sug_card(self, row: dict, sid: str, i: int, uid: int) -> dict:
+        return {"id": None, "sug": True, "k": "photo", "d": "", "dt": row["dt"], "loc": row["place"], "by": row["from"],
+                "best": False, "t": self.sug_url(sid, i, "thumb", uid), "f": self.sug_url(sid, i, "full", uid)}
+
+    def sug_sign(self, sid: str, i: int, size: str, uid: int, exp: int) -> str:
+        return hmac.new(self.url_secret, f"s.{sid}.{i}.{size}.{uid}.{exp}".encode(), hashlib.sha256).hexdigest()[:32]
+
+    def sug_url(self, sid: str, i: int, size: str, uid: int) -> str:
+        exp = (int(time.time()) // URL_LIFETIME + 2) * URL_LIFETIME
+        return f"/simg/{sid}/{i}?s={size}&u={uid}&e={exp}&sig={self.sug_sign(sid, i, size, uid, exp)}"
+
+    async def suggestion_image(self, rest: str, q: dict) -> Resp:
+        """A photo that a family suggested and is waiting for the owner. Owner only."""
+        try:
+            sid, i_s = rest.split("/")
+            i, uid, exp = int(i_s), int(q.get("u", "")), int(q.get("e", ""))
+        except ValueError:
+            return err(404, "Not found")
+        size, sig = q.get("s"), q.get("sig", "")
+        if size not in ("thumb", "full") or not re.fullmatch(r"[0-9a-f]{4,20}", sid) or not re.fullmatch(r"[0-9a-f]{32}", sig):
+            return err(404, "Not found")
+        if not hmac.compare_digest(self.sug_sign(sid, i, size, uid, exp), sig) or exp < time.time():
+            return err(403, "This link expired. Close and reopen the app.")
+        if not self.d.is_owner(uid):
+            return err(404, "Not found")
+        item = await self.d.suggestion_item(sid, i)
+        if not item or not isinstance(item.get("file_id"), str):
+            return err(404, "Not found")
+        doc = {"message_id": f"sug{sid}{i}", "file_id": item["file_id"], "kind": item.get("kind", "photo"),
+               "thumb": item.get("thumb")}
+        hit = self.cache.get((doc["message_id"], size))
+        good = True
+        if hit is None:
+            made = await self.made_once(doc, size)
+            if made is None:
+                return err(404, "Couldn't load this photo")
+            hit, good = made[:2], made[2]
+        return Resp(200, hit[1], hit[0], {"Cache-Control": "private, max-age=3600" if good else "no-store"})
+
     # ---------- images ----------
 
     async def image(self, mid_s: str, q: dict) -> Resp:
@@ -421,8 +575,13 @@ class WebApp:
         if not re.fullmatch(r"[0-9a-f]{32}", sig) or not hmac.compare_digest(self.sign(mid, size, uid, exp), sig) \
                 or exp < time.time():
             return err(403, "This link expired. Close and reopen the app.")
-        tid = await self.family_of(uid)  # (checked every time, so removing someone cuts them off)
-        doc = await self.my_photo(mid, tid) if tid else None
+        if self.d.is_owner(uid):  # the owner may see every family's photos (but a deleted family's are gone)
+            doc = await self.d.db().photos.find_one({"message_id": mid})
+            if doc and not await self.d.db().families.find_one({"thread_id": doc.get("thread_id")}):
+                doc = None
+        else:
+            tid = await self.family_of(uid)  # (checked every time, so removing someone cuts them off)
+            doc = await self.my_photo(mid, tid) if tid else None
         if not doc:
             return err(404, "Not found")
         hit = self.cache.get((mid, size))
@@ -544,17 +703,32 @@ class WebApp:
                 n = int(headers.get("content-length", "0"))
             except ValueError:
                 n = -1
-            if n < 0 or n > MAX_JSON:
-                await self.write(writer, Resp(413, b'{"error":"Too big"}'), False)
+            is_upload = urlsplit(target).path == UPLOAD_PATH
+            if is_upload:
+                denied = self.upload_denied(headers)  # (only the owner may make us read a big body)
+                if denied:
+                    await self.write(writer, denied, False)
+                    return
+            if n < 0 or n > (MAX_UPLOAD if is_upload else MAX_JSON):
+                await self.write(writer, Resp(413, b'{"error":"Too big. Photos can be up to 30 MB here; send bigger files through the chat."}'), False)
                 return
-            if n:
+            if n and is_upload:
+                buf, left, deadline = bytearray(), n, time.time() + 600
+                while left:
+                    part = await asyncio.wait_for(reader.read(min(left, 262144)), 30)
+                    if not part or time.time() > deadline:
+                        raise asyncio.IncompleteReadError(bytes(buf), n)
+                    buf += part
+                    left -= len(part)
+                body = bytes(buf)
+            elif n:
                 body = await asyncio.wait_for(reader.readexactly(n), 30)
         resp = await self.handle(method, target, headers, body)
         await self.write(writer, resp, method == "HEAD")
 
     async def write(self, writer, r: Resp, head: bool) -> None:
         reason = {200: "OK", 400: "Bad Request", 401: "Unauthorized", 403: "Forbidden", 404: "Not Found",
-                  413: "Payload Too Large", 503: "Service Unavailable", 429: "Too Many Requests",
+                  409: "Conflict", 413: "Payload Too Large", 504: "Gateway Timeout", 503: "Service Unavailable", 429: "Too Many Requests",
                   500: "Internal Server Error", 502: "Bad Gateway"}.get(r.status, "OK")
         hdr = {"Content-Type": r.ctype, "Content-Length": str(len(r.body)), "Connection": "close", **SECURITY, **r.headers}
         out = f"HTTP/1.1 {r.status} {reason}\r\n" + "".join(f"{k}: {v}\r\n" for k, v in hdr.items()) + "\r\n"
