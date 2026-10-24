@@ -571,6 +571,19 @@ async def on_remove_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     await q.edit_message_text("🗑 That photo was deleted.")
 
 
+async def delete_photo_everywhere(bot, message_id: int) -> str | None:
+    """Deletes a photo from the group and from the index (what /remove does). Returns a problem text, or None."""
+    try:
+        await bot.delete_message(GROUP_ID, message_id)
+    except TelegramError as e:
+        if "message to delete not found" not in (getattr(e, "message", "") or str(e)).lower():
+            return (f"I couldn't delete it ({getattr(e, 'message', e)}). Make sure I'm an admin with the "
+                    "“Delete messages” right.")
+        # (already gone from the group: just clean up the list)
+    await db.photos.delete_one({"message_id": message_id})
+    return None
+
+
 async def on_group_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     msg = update.effective_message
     if not msg.is_topic_message:  # ignore the General topic
@@ -1661,7 +1674,7 @@ async def handle_sug_media(update: Update, context: ContextTypes.DEFAULT_TYPE, s
                 reply_markup=sug_files_markup(),
             )
         return
-    sug["items"].append({"file_id": file_id, "kind": kind})
+    sug["items"].append({"file_id": file_id, "kind": kind, **({"thumb": thumb_of(msg)} if thumb_of(msg) else {})})
     if once(context, f"sugok:{key}"):
         await msg.reply_text("📥 Got it. Send more, or tap Send for approval.", reply_markup=sug_files_markup())
 
@@ -1789,8 +1802,6 @@ async def on_suggestion_button(update: Update, context: ContextTypes.DEFAULT_TYP
         return
     await q.answer()
     _, action, sid = q.data.split(":")
-    bot = context.bot
-    doc = await db.suggestions.find_one({"_id": sid})
 
     async def edit(text: str, markup=None) -> None:
         try:
@@ -1798,6 +1809,28 @@ async def on_suggestion_button(update: Update, context: ContextTypes.DEFAULT_TYP
         except TelegramError:
             pass
 
+    await process_suggestion(context.bot, sid, action, edit)
+
+
+BG_TASKS: set = set()  # keeps background jobs (like an announcement being sent) from being forgotten
+SUG_BUSY: set = set()  # suggestions being handled right now (so a double tap can't add the photos twice)
+
+
+async def process_suggestion(bot, sid: str, action: str, edit) -> None:
+    """Approve (y = all the families in the photos, o = only the sender's family) or reject (n) a suggestion.
+    `edit(text, markup)` shows the result: in the group's message, or (from the app) the same message."""
+    if sid in SUG_BUSY:
+        await edit("I'm already working on this one. Please wait a moment.")
+        return
+    SUG_BUSY.add(sid)
+    try:
+        await _process_suggestion(bot, sid, action, edit)
+    finally:
+        SUG_BUSY.discard(sid)
+
+
+async def _process_suggestion(bot, sid: str, action: str, edit) -> None:
+    doc = await db.suggestions.find_one({"_id": sid})
     if not doc or doc.get("status") != "pending":
         await edit("This suggestion was already handled.")
         return
@@ -3377,6 +3410,312 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     log.error("Unhandled error", exc_info=context.error)
 
 
+# ---------- Mini App: the owner's Admin tab ----------
+# webapp.py has already checked that the caller is the owner (Telegram-signed login) before anything here runs.
+# Each action reuses the same logic as the chat's /admin buttons.
+
+ANN_LOCK = asyncio.Lock()  # one announcement at a time, so a double tap can't send it twice
+ADMIN_ACTIONS = {
+    "overview", "family", "photo_best", "photo_remove", "photo_edit", "sugs", "sug_act",
+    "ann_preview", "ann_send", "ann_schedule", "scheduled", "sched_cancel",
+    "tries", "try_add", "try_dismiss", "try_unlock", "tries_clear",
+}
+
+
+def _int(v, lo: int = -(2 ** 53), hi: int = 2 ** 53) -> int | None:
+    return v if isinstance(v, int) and not isinstance(v, bool) and lo <= v <= hi else None
+
+
+def _safe_date(day) -> str:
+    try:
+        return pretty_date(day)
+    except Exception:
+        return str(day or "")
+
+
+async def _ann_input(req: dict):
+    """-> (audience, text, error). The audience is "all" or the topic id of one existing family."""
+    aud, text = req.get("aud"), req.get("text")
+    if aud != "all":
+        tid = _int(aud)
+        if tid is None or not await db.families.find_one({"thread_id": tid}):
+            return None, None, "Please pick who should get it."
+        aud = str(tid)
+    if not isinstance(text, str) or not text.strip():
+        return None, None, "Please type the announcement."
+    text = text.strip()
+    if len(text) > ANN_MAX:
+        return None, None, f"That's too long ({len(text)} characters). Please keep it under {ANN_MAX}."
+    return aud, text, None
+
+
+async def _send_announcement(bot, aud: str, text: str, who: str) -> None:
+    """Sends the announcement in the background (a slow phone connection can't cause a second send), then
+    tells the owner how it went. The caller has already taken ANN_LOCK."""
+    try:
+        sent, failed, total = await broadcast(bot, aud, text)
+        log.info("Owner sent an announcement from the app to %s of %s", sent, total)
+        if OWNER_ID:
+            try:
+                await bot.send_message(
+                    OWNER_ID,
+                    f"✅ Your announcement went out to {who}: {sent} of {total} received it."
+                    + (f" {failed} couldn't be reached (they may have blocked the bot)." if failed else ""),
+                )
+            except TelegramError:
+                pass
+    except Exception:
+        log.exception("Announcement from the app failed")
+    finally:
+        ANN_LOCK.release()
+
+
+async def admin_upload(bot, tid: int, place: str | None, day: str, name: str, data: bytes) -> tuple[int, dict]:
+    """Posts one uploaded photo into a family's topic (as a File, so the quality is kept) and adds it to the index.
+    The caption is built exactly like the chat upload's, so the date and place are read the same way."""
+    fam = await db.families.find_one({"thread_id": tid})
+    if not fam:
+        return 404, {"error": "That family no longer exists."}
+    if not GROUP_ID:
+        return 400, {"error": "GROUP_ID isn't set yet, so I can't add photos to the group."}
+    when = "No date" if day == UNKNOWN_DATE else day
+    caption = f"{when} | {place}" if place else when
+    try:
+        sent = await send_with_retry(
+            lambda: bot.send_document(GROUP_ID, document=data, filename=name, message_thread_id=tid,
+                                      caption=caption, disable_content_type_detection=True)
+        )
+    except (TimedOut, NetworkError):
+        log.warning("Timed out adding an uploaded photo")
+        return 504, {"error": "Telegram was too slow. That photo may or may not have been added: look in the "
+                              "family's topic before sending it again.", "maybe": True}
+    except (TelegramError, RuntimeError):
+        log.exception("Couldn't add an uploaded photo")
+        return 502, {"error": "I couldn't add that photo to the group. Check that I'm still an admin there "
+                              "and that the family's topic still exists."}
+    for attempt in range(3):  # the photo is already in the group: never report a failure (a retry would post it twice)
+        try:
+            await index_file(tid, sent.message_id, sent.document.file_id, caption, None, sent.date, "document", thumb_of(sent))
+            break
+        except Exception:
+            log.exception("Couldn't index an uploaded photo (try %s)", attempt + 1)
+            await asyncio.sleep(1)
+    return 200, {"ok": True, "id": sent.message_id}
+
+
+async def admin_api(bot, action: str, req: dict) -> tuple[int, dict]:
+    try:
+        return await _admin_api(bot, action, req)
+    except Exception:
+        log.exception("Admin action failed: %s", action)
+        return 500, {"error": "Something went wrong. Please try again."}
+
+
+async def _admin_api(bot, action: str, req: dict) -> tuple[int, dict]:
+    bad = (400, {"error": "Bad request"})
+    gone = (404, {"error": "That no longer exists."})
+    now = datetime.now(timezone.utc)
+
+    if action == "overview":
+        fams = await db.families.find().sort("name", 1).to_list()
+
+        async def per_family(coll, match=None):
+            pipe = ([{"$match": match}] if match else []) + [{"$group": {"_id": "$thread_id", "n": {"$sum": 1}}}]
+            return {d["_id"]: d["n"] for d in await (await coll.aggregate(pipe)).to_list()}
+
+        photos = await per_family(db.photos)
+        best = await per_family(db.photos, {"best": True})
+        people = await per_family(db.users)
+        sugs = await db.suggestions.find({"status": "pending"}).to_list()
+        waiting: dict = {}
+        for d in sugs:
+            waiting[d.get("thread_id")] = waiting.get(d.get("thread_id"), 0) + 1
+        return 200, {
+            "stats": {
+                "families": len(fams), "people": sum(people.values()), "photos": sum(photos.values()),
+                "new7": await db.photos.count_documents({"sug": {"$ne": True}, "added": {"$gte": now - timedelta(days=7)}}),
+                "sugs": len(sugs), "scheduled": await db.scheduled.count_documents({}),
+                "tries": await db.tries.count_documents({}),
+            },
+            "families": [
+                {"tid": f["thread_id"], "name": f.get("name", "?"), "code": f.get("code", ""), "photos": photos.get(f["thread_id"], 0),
+                 "people": people.get(f["thread_id"], 0), "best": best.get(f["thread_id"], 0),
+                 "sugs": waiting.get(f["thread_id"], 0)}
+                for f in fams[:300]
+            ],
+        }
+
+    if action == "family":
+        tid = _int(req.get("tid"))
+        fam = await db.families.find_one({"thread_id": tid}) if tid is not None else None
+        if not fam:
+            return gone
+        people = await db.users.find({"thread_id": tid}).sort("first_name", 1).to_list()
+        return 200, {
+            "tid": tid, "name": fam["name"], "code": fam["code"],
+            "photos": await db.photos.count_documents({"thread_id": tid}),
+            "best": await db.photos.count_documents({"thread_id": tid, "best": True}),
+            "people": [{"id": p["_id"], "first": p.get("first_name") or "", "username": p.get("username") or "",
+                        "by": p.get("added_by") or "", "pending": bool(p.get("pending"))} for p in people[:60]],
+        }
+
+    if action in ("photo_best", "photo_remove", "photo_edit"):
+        mid = _int(req.get("id"))
+        doc = await db.photos.find_one({"message_id": mid}) if mid is not None else None
+        if not doc:
+            return gone
+        if action == "photo_best":
+            want = req.get("best")
+            now_best = want if isinstance(want, bool) else not doc.get("best", False)
+            await db.photos.update_one({"message_id": mid}, {"$set": {"best": now_best}})
+            return 200, {"best": now_best}
+        if action == "photo_remove":
+            if not GROUP_ID:
+                return 400, {"error": "GROUP_ID isn't set yet, so I can't delete from the group."}
+            problem = await delete_photo_everywhere(bot, mid)
+            return (502, {"error": problem}) if problem else (200, {"ok": True})
+        day = parse_date_answer(req["date"]) if isinstance(req.get("date"), str) else None
+        place = req.get("place")
+        if day is None or not (place is None or isinstance(place, str)):
+            return 400, {"error": "Please give a date like 2026-07-04 (not in the future), or unknown."}
+        place = " ".join((place or "").split())[:80] or None
+        if place and place.casefold() in UNKNOWN_WORDS:
+            place = None
+        await db.photos.update_one(
+            {"message_id": mid},
+            {"$set": {"date": day, "location": place, "loc_id": loc_id(place), "has_caption": True}},
+        )
+        return 200, {"d": day, "dt": _safe_date(day), "loc": place or ""}
+
+    if action == "sugs":
+        fams = {f["thread_id"]: f["name"] for f in await db.families.find().to_list()}
+        docs = await db.suggestions.find({"status": "pending"}).sort("created", 1).to_list()
+        return 200, {"rows": [
+            {"id": d["_id"], "from": d.get("from_name") or "?", "family": fams.get(d["thread_id"], "?"),
+             "dt": _safe_date(d.get("date")), "place": d.get("place") or "", "n": len(d.get("items", [])),
+             "others": [fams[t] for t in d.get("others", []) if t in fams], "at": fmt_when(d.get("created"))}
+            for d in docs[:50]]}
+
+    if action == "sug_act":
+        sid, act = req.get("id"), req.get("action")
+        if not isinstance(sid, str) or not re.fullmatch(r"[0-9a-f]{4,20}", sid) or act not in ("y", "o", "n"):
+            return bad
+        said: list[str] = []
+        sdoc = await db.suggestions.find_one({"_id": sid})
+        prompt_id = (sdoc or {}).get("prompt_id")
+
+        async def edit(text: str, markup=None) -> None:
+            said.append(text)
+            if prompt_id and GROUP_ID:  # keep the group's message in step, exactly like the chat buttons do
+                try:
+                    await bot.edit_message_text(text, chat_id=GROUP_ID, message_id=prompt_id, reply_markup=markup)
+                except TelegramError:
+                    pass
+
+        await process_suggestion(bot, sid, act, edit)
+        return 200, {"message": (said[-1] if said else "Done.")[:240]}
+
+    if action in ("ann_preview", "ann_send", "ann_schedule"):
+        aud, text, problem = await _ann_input(req)
+        if problem:
+            return 400, {"error": problem}
+        people = await ann_recipients(aud)
+        who = await ann_audience_name(aud)
+        if action == "ann_preview":
+            return 200, {"count": len(people), "who": who, "tz": str(TZ)}
+        if not people:
+            return 400, {"error": "Nobody is in that audience yet."}
+        if action == "ann_send":
+            if ANN_LOCK.locked():
+                return 409, {"error": "An announcement is already being sent. Please wait a moment."}
+            await ANN_LOCK.acquire()  # (taken right here, so a second tap can't slip in before the job starts)
+            task = asyncio.create_task(_send_announcement(bot, aud, text, who))
+            BG_TASKS.add(task)
+            task.add_done_callback(BG_TASKS.discard)
+            return 200, {"started": True, "count": len(people), "who": who}
+        when_s = req.get("when")
+        m = re.fullmatch(r"(\d{4}-\d{2}-\d{2}) (\d{1,2}:\d{2})(?::\d{2})?", when_s.strip()) if isinstance(when_s, str) else None
+        if not m:
+            return 400, {"error": "Please pick a date and time."}
+        when = parse_when(f"{m.group(1)} {m.group(2)}")
+        if not when:
+            return 400, {"error": "That time has already passed (or is too far away). Please pick a later time."}
+        if await db.scheduled.count_documents({}) >= 50:
+            return 400, {"error": "You already have 50 scheduled. Cancel one first."}
+        await db.scheduled.insert_one(
+            {"_id": secrets.token_hex(4), "aud": aud, "text": text, "at": when.astimezone(timezone.utc),
+             "claimed": datetime(1970, 1, 1, tzinfo=timezone.utc)}
+        )
+        return 200, {"label": when_label(when), "who": who}
+
+    if action == "scheduled":
+        docs = await db.scheduled.find().sort("at", 1).to_list()
+        rows = []
+        for d in docs[:60]:
+            at = d["at"].replace(tzinfo=timezone.utc) if d["at"].tzinfo is None else d["at"]
+            rows.append({"id": d["_id"], "label": when_label(at), "who": await ann_audience_name(d["aud"]),
+                         "text": d["text"]})
+        return 200, {"rows": rows}
+
+    if action == "sched_cancel":
+        sid = req.get("id")
+        if not isinstance(sid, str) or not re.fullmatch(r"[0-9a-f]{4,20}", sid):
+            return bad
+        await db.scheduled.delete_one({"_id": sid})
+        return 200, {"ok": True}
+
+    if action == "tries":
+        rows = await db.tries.find().sort("at", -1).to_list()
+        out = []
+        for t in rows[:100]:
+            lock = await locked_for(f"link:{t['_id']}")
+            guess = None
+            if t.get("last"):
+                found = await db.families.find({"key": normalize(t["last"])}).to_list()
+                if len(found) == 1:
+                    guess = {"tid": found[0]["thread_id"], "name": found[0]["name"]}
+            out.append({
+                "uid": t["_id"], "label": try_label(t), "tg": t.get("tg_name") or "", "username": t.get("username") or "",
+                "first": t.get("first") or "", "last": t.get("last") or "", "reason": t.get("reason", "?"),
+                "count": t.get("count", 1), "at": fmt_when(t.get("at")), "lock": max(1, -(-lock // 60)) if lock else 0,
+                "guess": guess,
+            })
+        return 200, {"rows": out}
+
+    if action in ("try_add", "try_dismiss", "try_unlock"):
+        uid = _int(req.get("uid"), 1)
+        if uid is None:
+            return bad
+        if action == "try_dismiss":
+            await db.tries.delete_one({"_id": uid})
+            return 200, {"ok": True}
+        if action == "try_unlock":
+            await clear_fails(f"link:{uid}")
+            return 200, {"ok": True}
+        tid = _int(req.get("tid"))
+        fam = await db.families.find_one({"thread_id": tid}) if tid is not None else None
+        if not fam:
+            return gone
+        t = await db.tries.find_one({"_id": uid})
+        if not t:
+            return gone  # only people on the login-attempts list can be added from here
+        if is_owner(uid):
+            return 400, {"error": "That's your own account."}
+        name = t.get("first") or t.get("tg_name") or "Friend"
+        problem, messaged = await add_person(bot, uid, tid, name)
+        if problem:
+            return 400, {"error": problem}
+        return 200, {"ok": True, "message": f"Added {name} to the {fam['name']} family. "
+                     + ("They were told in the bot." if messaged else
+                        "I couldn't message them yet; they'll see the welcome when they open the bot.")}
+
+    if action == "tries_clear":
+        await db.tries.delete_many({})
+        return 200, {"ok": True}
+
+    return 404, {"error": "Not found"}
+
+
 class WebDeps:
     """What the Mini App's web server needs from the bot (see webapp.WebApp)."""
 
@@ -3395,6 +3734,32 @@ class WebDeps:
 
     def is_owner(self, uid: int) -> bool:
         return is_owner(uid)
+
+    async def admin(self, action: str, req: dict) -> tuple[int, dict]:
+        return await admin_api(self.app.bot, action, req)
+
+    admin_actions = ADMIN_ACTIONS
+
+    async def upload_photo(self, tid: int, place, day: str, name: str, data: bytes) -> tuple[int, dict]:
+        return await admin_upload(self.app.bot, tid, place, day, name, data)
+
+    def parse_date(self, text: str):
+        d = parse_date_answer(text)
+        if d is None and re.fullmatch(r"\d{4}-\d{2}-\d{2}", text.strip()):
+            try:  # the owner's own day can be a day ahead of the bot's time zone
+                if date.fromisoformat(text.strip()) <= datetime.now(TZ).date() + timedelta(days=1):
+                    return text.strip()
+            except ValueError:
+                pass
+        return d
+
+    unknown_words = UNKNOWN_WORDS
+
+    async def suggestion_item(self, sid: str, i: int):
+        """One photo of a suggestion that is still waiting for the owner's answer (for the Admin inbox)."""
+        doc = await db.suggestions.find_one({"_id": sid, "status": "pending"})
+        items = (doc or {}).get("items") or []
+        return items[i] if isinstance(i, int) and 0 <= i < len(items) else None
 
     def preview_family(self, uid: int) -> int | None:
         """The family the owner picked with /connect (in memory only)."""
