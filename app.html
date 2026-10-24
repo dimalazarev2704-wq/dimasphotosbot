@@ -511,7 +511,7 @@ function addFamilyScreen() {
     msg.textContent = "Making their topic…";
     try {
       const r = await api("/api/admin/fam_add", { name: n, again: !!again });
-      await alertMsg("✅ " + r.name + " family made. Code: " + r.code + (r.posted ? "" : " (I couldn't post the code inside their topic, but the family is saved.)"));
+      await alertMsg("✅ " + r.name + " family made. Code: " + r.code + (r.posted ? "" : " (I couldn't post the code inside their topic, but the family is saved.)") + " I sent you the welcome message in the bot chat, ready to forward.");
       if (my === navId) replaceTop(() => familyScreen(r.tid));
     } catch (e) {
       if (e.exists) { msg.textContent = ""; return "exists"; }
