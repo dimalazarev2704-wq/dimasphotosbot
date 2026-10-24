@@ -221,9 +221,33 @@ so the bot token never reaches the phone. When a photo is added, the bot also sa
 small preview, which makes the grids fast (and works for files over 20 MB). Older photos don't have that, so
 their first view is a bit slower while a small copy is made.
 
-**Setup.** Nothing to do in BotFather: the bot sets the Open button itself when it starts. It needs the
+**Setup.** Nothing to do in BotFather by default: the bot sets the Open button itself when it starts.
+Want to control that button yourself? Set `AUTO_MENU_BUTTON=no` in Render. The bot then leaves it alone; in
+BotFather choose your bot → Bot Settings → Menu Button → Configure menu button, send `https://your-address/app`
+and a title (for example "Photos"). The 📱 button inside the bot's menu works either way. It needs the
 service's public https address. On Render that is `RENDER_EXTERNAL_URL`, which Render fills in; elsewhere set
 `WEBAPP_URL=https://your-address`. If neither is set the app is simply off.
+
+**The owner's Admin tab.** When *you* open the app you get a 🛠 Admin tab (nobody else does; every request is
+checked against your Telegram login). Nothing about you is ever saved.
+- **Stats and Families:** totals, and every family with its code, people and photo counts. Tap a family to see its
+  members, to **browse its photos exactly as it sees them** (a banner reminds you which family you're viewing), or
+  to add photos.
+- **Photo tools** (inside the full-screen viewer, only for you): ⭐ add or remove from Best shots, ✏️ change the place
+  or date, 🗑 remove (asks first, deletes from the group and the list).
+- **📤 Add photos:** pick the family, the place and the date (you must choose a date or tick "I don't know the date":
+  the app never guesses), choose photos, and they upload one at a time. They are posted into the family's topic **as
+  Files, so the full quality is kept**, and added to the list like any chat upload. Up to 30 MB each (bots can send
+  at most 50 MB, and the free Render plan has little memory); bigger files still go through the chat. A repeated tap
+  can't post a photo twice. Note: as with the chat upload, files keep their original data (including GPS, if the
+  photo has it); Telegram only strips that from normal photos, not from files.
+- **💡 Suggestions inbox:** each suggestion with its photos, and Approve / Reject (same logic as the buttons in the
+  group, and the group's message is updated too).
+- **📣 Announcements:** pick who, write it, review, then **send now** (it goes out in the background and the bot
+  messages you when it's done) or **schedule** it (in the bot's time zone, shown on screen). Scheduled ones can be
+  cancelled.
+- **🕵️ Login attempts:** who tried and failed, with a family picker and an Add button, plus clear-lockout and dismiss.
+- Your chat `/connect` pick is not used by the app; you choose the family inside the Admin tab.
 
 **Limits**
 - On the free Render plan the first open after a sleep takes a few seconds.
@@ -237,3 +261,10 @@ service's public https address. On Render that is `RENDER_EXTERNAL_URL`, which R
 - Deleting a file by hand in the group doesn't update the list; use `/remove` instead.
 - Telegram only lets a bot delete messages older than 48 hours if the bot is an admin.
 - `PROTECT_CONTENT=true` blocks forwarding and saving from the chat, but not screenshots.
+
+## Admin tab (owner only)
+
+Open the Mini App as the owner and you get an **Admin** tab: families list, browse/remove/hide any family's photos, suggestions inbox, stats, announcements (now or scheduled), and login attempts.
+
+### 📤 Add photos from the app
+Admin → **Add photos** (also on each family's page). Pick the family, a place (optional), and a date (or tick "I don't know the date"), then choose photos. They upload one at a time as files, so full quality is kept (max 30 MB each; bigger ones go through the chat). They are posted into the family's topic and indexed. Failed ones can be retried without creating duplicates.
