@@ -135,7 +135,7 @@ async function api(path, body) {
   finally { clearTimeout(timer); }
   let data = {};
   try { data = await res.json(); } catch (e) {}
-  if (!res.ok) throw new Error(data.error || "Something went wrong. Please try again.");
+  if (!res.ok) { const er = new Error(data.error || "Something went wrong. Please try again."); er.exists = !!data.exists; throw er; }
   return data;
 }
 function haptic() { try { tg.HapticFeedback.impactOccurred("light"); } catch (e) {} }
@@ -183,6 +183,8 @@ function back() {
   if (viewerOpen()) { closeViewer(); return; }
   if (stack.length > 1) { navId++; stack.pop(); stack[stack.length - 1](); }
 }
+function replaceTop(render) { navId++; stack[stack.length - 1] = render; render(); }  // (swap the current screen, so Back skips it)
+function goHome() { setTab("admin"); }
 try { tg.BackButton.onClick(back); } catch (e) {}
 function backBtn() { return stack.length > 1 ? h("button", { class: "back", on: { click: back }, text: "‹ Back" }) : null; }
 
@@ -452,6 +454,7 @@ async function adminHome() {
   const s = d.stats;
   show([h("h1", { text: "🛠 Admin" }),
     h("div", { class: "stats" }, stat(s.families, "Families"), stat(s.people, "People"), stat(s.photos, "Photos"), stat(s.new7, "New this week")),
+    bigRow("➕", "Add a family", "", () => push(addFamilyScreen)),
     bigRow("📤", "Add photos", "", () => push(() => uploadScreen(null))),
     bigRow("💡", "Suggestions inbox", s.sugs, () => push(sugsScreen)),
     bigRow("📣", "Announcements", s.scheduled ? s.scheduled + " scheduled" : "", () => push(() => annScreen(d.families))),
@@ -461,7 +464,7 @@ async function adminHome() {
       h("span", {}, h("b", { text: f.name + " family" }),
         h("span", { class: "hint", text: "Code " + f.code + " · " + f.people + (f.people === 1 ? " person" : " people") + " · " + f.photos + (f.photos === 1 ? " photo" : " photos") + (f.best ? " · ⭐ " + f.best : "") }),
         f.sugs ? h("span", { class: "badge", text: f.sugs + " suggested" }) : null)))
-      : h("div", { class: "msg", text: "No families yet. Add one from the bot's /admin panel." }),
+      : h("div", { class: "msg", text: "No families yet. Tap “Add a family” above." }),
     footer()]);
 }
 async function familyScreen(tid) {
@@ -471,12 +474,84 @@ async function familyScreen(tid) {
     h("button", { class: "cta", on: { click: () => enterFamily(d.tid, d.name) }, text: "📸 Browse their photos" }),
     h("button", { class: "cta alt", on: { click: () => push(() => uploadScreen(d.tid)) }, text: "📤 Add photos to this family" }),
     h("h2", { text: "Members" }),
-    d.people.length ? d.people.map(p => h("div", { class: "msg" },
+    d.people.length ? d.people.map(p => h("div", { class: "card" },
       h("b", { text: p.first || "(no name)" }), p.username ? " @" + p.username : "",
+      h("div", { class: "hint", text: "ID " + p.id }),
       p.by ? h("div", { class: "hint", text: "Added by " + p.by }) : null,
-      p.pending ? h("div", { class: "hint", text: "⏳ hasn't confirmed their name yet" }) : null))
+      p.pending ? h("div", { class: "hint", text: "⏳ hasn't confirmed their name yet" }) : null,
+      h("div", { class: "btns" }, h("button", { class: "danger", text: "Unlink",
+        on: { click: () => famAct(d.tid, "member_unlink", { uid: p.id }, "Unlink " + (p.first || "this person") + " from the " + d.name + " family?") } }))))
       : h("div", { class: "msg", text: "Nobody has linked yet." }),
-    h("div", { class: "hint", text: "To change the code, remove people or delete the family, use the bot's /admin panel." }),
+    h("button", { class: "cta alt", text: "➕ Add a person by Telegram ID", on: { click: () => push(() => addPersonScreen(d.tid, d.name)) } }),
+    h("h2", { text: "Family settings" }),
+    h("button", { class: "cta alt", text: "🔄 Make a new code",
+      on: { click: () => famAct(d.tid, "fam_code", {}, "Make a new code for the " + d.name + " family? The old code (" + d.code + ") stops working for new sign-ups. People who already linked stay linked.", r => "New code: " + r.code) } }),
+    d.best ? h("button", { class: "cta alt", text: "⭐ Clear best shots (" + d.best + ")",
+      on: { click: () => famAct(d.tid, "best_clear", {}, "Take every photo out of the " + d.name + " family's Best shots?") } }) : null,
+    h("button", { class: "cta danger", text: "❌ Delete this family", on: { click: () => push(() => deleteFamilyScreen(d.tid, d.name)) } }),
+    footer()]);
+}
+
+// family tools (the same ones the chat's /admin panel has)
+function famAct(tid, action, extra, ask, msgFn) {
+  return oneAtATime(async () => {
+    if (ask && !await confirmAsk(ask)) return;
+    const my = navId;
+    try { const r = await api("/api/admin/" + action, Object.assign({ tid }, extra)); if (msgFn) await alertMsg(msgFn(r)); }
+    catch (e) { await alertMsg("⚠️ " + e.message); }
+    if (my === navId) familyScreen(tid);
+  });
+}
+function addFamilyScreen() {
+  const name = h("input", { type: "text", maxlength: "60", placeholder: "Last name, for example Garcia", autocapitalize: "words" });
+  const msg = h("div", { class: "hint" });
+  const go = async (again) => {  // returns "exists" when a family with that name is already there
+    const n = name.value.trim(), my = navId;
+    if (!n) { msg.textContent = "⚠️ Please type the family's last name."; return; }
+    msg.textContent = "Making their topic…";
+    try {
+      const r = await api("/api/admin/fam_add", { name: n, again: !!again });
+      await alertMsg("✅ " + r.name + " family made. Code: " + r.code + (r.posted ? "" : " (I couldn't post the code inside their topic, but the family is saved.)"));
+      if (my === navId) replaceTop(() => familyScreen(r.tid));
+    } catch (e) {
+      if (e.exists) { msg.textContent = ""; return "exists"; }
+      if (my === navId) msg.textContent = "⚠️ " + e.message;
+    }
+  };
+  const tap = () => oneAtATime(async () => {
+    if (await go(false) === "exists" && await confirmAsk("There is already a " + name.value.trim() + " family. Add another one with the same name?")) await go(true);
+  });
+  show([backBtn(), h("h1", { text: "➕ Add a family" }),
+    h("div", { class: "hint", text: "I'll make their topic in the group and give them a 6-digit code. Tell them their last name and the code, and they link themselves in the bot." }),
+    h("label", { text: "Family last name" }), name, msg,
+    h("button", { class: "cta", text: "Make the family", on: { click: tap } }), footer()]);
+}
+function addPersonScreen(tid, famName) {
+  const id = h("input", { type: "text", inputmode: "numeric", placeholder: "Telegram ID, like 123456789" });
+  const nm = h("input", { type: "text", maxlength: "40", placeholder: "First name (optional)" });
+  const msg = h("div", { class: "hint" });
+  show([backBtn(), h("h1", { text: "➕ Add to the " + famName + " family" }),
+    h("div", { class: "hint", text: "They can get their ID by sending /id to this bot in a private chat. When they open the bot they'll be told you added them." }),
+    h("label", { text: "Telegram ID" }), id, h("label", { text: "First name" }), nm, msg,
+    h("button", { class: "cta", text: "Add them", on: { click: () => oneAtATime(async () => {
+      const v = id.value.trim();
+      if (!/^\d{5,15}$/.test(v)) { msg.textContent = "⚠️ Please type their Telegram ID (a number)."; return; }
+      const my = navId;
+      try { const r = await api("/api/admin/person_add", { tid, uid: Number(v), name: nm.value.trim() }); await alertMsg("✅ " + r.message); if (my === navId) back(); }
+      catch (e) { if (my === navId) msg.textContent = "⚠️ " + e.message; }
+    }) } }), footer()]);
+}
+function deleteFamilyScreen(tid, famName) {
+  const del = (mode, ask) => oneAtATime(async () => {
+    if (!await confirmAsk(ask)) return;
+    const my = navId;
+    try { const r = await api("/api/admin/fam_delete", { tid, mode }); await alertMsg("✅ " + r.message); if (my === navId) goHome(); }
+    catch (e) { await alertMsg("⚠️ " + e.message); }
+  });
+  show([backBtn(), h("h1", { text: "❌ Delete the " + famName + " family?" }),
+    h("div", { class: "msg", text: "This removes the family, its code, its linked people and its photo list from the bot. What should happen to their topic in the group?" }),
+    h("button", { class: "cta alt", text: "Delete family, keep the topic and files in the group", on: { click: () => del("keep", "Delete the " + famName + " family? The topic and files stay in the group.") } }),
+    h("button", { class: "cta danger", text: "⚠️ Delete the family AND the topic with ALL its files", on: { click: () => del("all", "This permanently deletes the " + famName + " topic and every photo in it. This can't be undone. Continue?") } }),
     footer()]);
 }
 
