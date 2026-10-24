@@ -426,6 +426,8 @@ async def register(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         upsert=True,
     )
     verb = "Family updated" if existing else "Family made"
+    if not existing:
+        await send_invite_to_owner(context.bot, code)
     await msg.reply_text(
         f"✅ {verb}: {name}\nCode: {code}\n\n"
         "Give the family their last name and this code. "
@@ -2454,6 +2456,32 @@ async def pending_newfam(uid: int):
     return r
 
 
+def invite_text(code: str) -> str:
+    """The welcome message the owner can forward to a new family (their code filled in)."""
+    return (
+        "Hi! 👋 It's Dima. Your photos are ready, and you can see them in Telegram now! 📸\n\n"
+        "1. Open the bot: https://t.me/dimaspicsbot\n"
+        "2. Press Start\n"
+        "3. If I already added you, you're all set. If not, the bot will ask for your first name, "
+        "your family's last name, and your family's 6-digit code: "
+        f"{code}\n\n"
+        "Then tap the \"📷 Photos\" button to open your gallery. "
+        "Only your family's photos show up, and you can save any photo you like. 💛\n\n"
+        "If anything doesn't work, just message me at @supercooldima. "
+        "Is the bot down? Check here: https://stats.uptimerobot.com/HeZj7AXDrI"
+    )
+
+
+async def send_invite_to_owner(bot, code: str) -> None:
+    """After a family is made: sends the owner the ready-to-forward welcome message in a private chat."""
+    if not OWNER_ID:
+        return
+    try:
+        await bot.send_message(OWNER_ID, invite_text(code), disable_web_page_preview=True)
+    except TelegramError:
+        log.warning("Couldn't send the welcome message to the owner (they need to have started the bot)")
+
+
 async def make_family(bot, name: str) -> tuple[int, str, bool]:
     """Makes the family's topic in the group, saves the family and posts its code there.
     Returns (topic id, code, whether the code was posted in the topic). Raises TelegramError."""
@@ -2467,6 +2495,7 @@ async def make_family(bot, name: str) -> tuple[int, str, bool]:
         upsert=True,
     )
     log.info("Made family %s", name)
+    await send_invite_to_owner(bot, code)
     try:
         await bot.send_message(GROUP_ID, f"🏠 {name} family\nCode: {code}", message_thread_id=tid)
         return tid, code, True
@@ -2971,6 +3000,7 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     )
     context.user_data.pop("adm", None)
     log.info("Owner made family %s", name)
+    await send_invite_to_owner(context.bot, code)
     # Also post the name and code inside the new topic, so it's there for reference.
     posted = True
     try:
