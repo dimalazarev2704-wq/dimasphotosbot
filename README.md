@@ -268,3 +268,6 @@ Open the Mini App as the owner and you get an **Admin** tab: families list, brow
 
 ### 📤 Add photos from the app
 Admin → **Add photos** (also on each family's page). Pick the family, a place (optional), and a date (or tick "I don't know the date"), then choose photos. They upload one at a time as files, so full quality is kept (max 30 MB each; bigger ones go through the chat). They are posted into the family's topic and indexed. Failed ones can be retried without creating duplicates.
+
+### Family tools in the app
+Admin → **Add a family** (makes the topic and code), and on each family's page: members with **Unlink**, **Add a person by Telegram ID**, **Make a new code**, **Clear best shots**, and **Delete this family** (keep the topic and files, or delete the topic with all its files). These do the same as the chat's /admin panel.
