@@ -3419,6 +3419,7 @@ ADMIN_ACTIONS = {
     "overview", "family", "photo_best", "photo_remove", "photo_edit", "sugs", "sug_act",
     "ann_preview", "ann_send", "ann_schedule", "scheduled", "sched_cancel",
     "tries", "try_add", "try_dismiss", "try_unlock", "tries_clear",
+    "fam_add", "fam_code", "fam_delete", "member_unlink", "person_add", "best_clear",
 }
 
 
@@ -3709,6 +3710,83 @@ async def _admin_api(bot, action: str, req: dict) -> tuple[int, dict]:
                      + ("They were told in the bot." if messaged else
                         "I couldn't message them yet; they'll see the welcome when they open the bot.")}
 
+    if action == "fam_add":
+        name = " ".join(str(req.get("name") or "").split())[:60]
+        if not normalize(name):
+            return 400, {"error": "Please type the family's last name, for example: Garcia"}
+        if not GROUP_ID:
+            return 400, {"error": "GROUP_ID isn't set yet, so I can't make a topic. Add it in the settings first."}
+        if await db.families.find_one({"key": normalize(name)}) and req.get("again") is not True:
+            return 409, {"error": f"There is already a {name} family. Add it anyway?", "exists": True}
+        try:
+            tid, code, posted = await make_family(bot, name)
+        except TelegramError as e:
+            return 502, {"error": f"I couldn't make the topic ({e.message}). Check that Topics are on in the group "
+                                  "and that I'm an admin with the \u201cManage topics\u201d right."}
+        return 200, {"ok": True, "tid": tid, "code": code, "name": name, "posted": posted}
+
+    if action in ("fam_code", "fam_delete", "member_unlink", "person_add", "best_clear"):
+        tid = _int(req.get("tid"))
+        fam = await db.families.find_one({"thread_id": tid}) if tid is not None else None
+        if not fam:
+            return gone
+        if action == "fam_code":
+            code = await new_code()
+            await db.families.update_one({"thread_id": tid}, {"$set": {"code": code}})
+            return 200, {"ok": True, "code": code}
+        if action == "best_clear":
+            await db.photos.update_many({"thread_id": tid, "best": True}, {"$set": {"best": False}})
+            return 200, {"ok": True}
+        if action == "member_unlink":
+            uid = _int(req.get("uid"), 1)
+            if uid is None:
+                return bad
+            await db.users.delete_one({"_id": uid, "thread_id": tid})
+            return 200, {"ok": True}
+        if action == "person_add":
+            uid = _int(req.get("uid"), 10 ** 4, 10 ** 15)
+            if uid is None:
+                return 400, {"error": "Please send a Telegram ID (a number like 123456789)."}
+            if is_owner(uid):
+                return 400, {"error": "That's your own account."}
+            name = " ".join(str(req.get("name") or "").split())[:40]
+            if not name:
+                t = await db.tries.find_one({"_id": uid})
+                name = (t or {}).get("first") or (t or {}).get("tg_name") or "Friend"
+            problem, messaged = await add_person(bot, uid, tid, name)
+            if problem:
+                return 400, {"error": problem}
+            return 200, {"ok": True, "message": f"Added {name} to the {fam['name']} family. "
+                         + ("They were told in the bot." if messaged else
+                            "I couldn't message them yet; they'll see the welcome when they open the bot.")}
+        # fam_delete: "keep" leaves the topic and files in the group, "all" deletes the topic too
+        mode = req.get("mode")
+        if mode not in ("keep", "all"):
+            return bad
+        if mode == "all":
+            if not GROUP_ID:
+                return 400, {"error": "GROUP_ID isn't set yet."}
+            try:
+                await bot.delete_forum_topic(GROUP_ID, tid)
+            except TelegramError as e:
+                if "not found" not in str(e.message).lower():
+                    return 502, {"error": f"I couldn't delete the topic ({e.message}), so nothing was changed. "
+                                          "Check that I'm an admin with the \u201cDelete messages\u201d and "
+                                          "\u201cManage topics\u201d rights."}
+            if fam.get("sug_thread_id"):
+                try:
+                    await bot.delete_forum_topic(GROUP_ID, fam["sug_thread_id"])
+                except TelegramError:
+                    log.warning("Couldn't delete the suggestions topic of %s", fam["name"])
+        await db.users.delete_many({"thread_id": tid})
+        await db.photos.delete_many({"thread_id": tid})
+        await db.suggestions.delete_many({"thread_id": tid})
+        await db.families.delete_one({"thread_id": tid})
+        await db.scheduled.delete_many({"aud": str(tid)})  # (announcements meant only for this family)
+        log.info("Owner deleted family %s from the app (topic deleted: %s)", fam["name"], mode == "all")
+        return 200, {"ok": True, "message": f"The {fam['name']} family was deleted"
+                     + (" together with its topic." if mode == "all" else ". The topic and files are still in the group.")}
+
     if action == "tries_clear":
         await db.tries.delete_many({})
         return 200, {"ok": True}
@@ -3736,7 +3814,13 @@ class WebDeps:
         return is_owner(uid)
 
     async def admin(self, action: str, req: dict) -> tuple[int, dict]:
-        return await admin_api(self.app.bot, action, req)
+        status, data = await admin_api(self.app.bot, action, req)
+        if action == "fam_delete" and status == 200:  # (nobody keeps browsing a family that's gone)
+            pv = self.app.bot_data.get("preview", {})
+            for _u, _t in list(pv.items()):
+                if _t == req.get("tid"):
+                    pv.pop(_u, None)
+        return status, data
 
     admin_actions = ADMIN_ACTIONS
 
