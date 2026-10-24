@@ -484,6 +484,7 @@ async function familyScreen(tid) {
       : h("div", { class: "msg", text: "Nobody has linked yet." }),
     h("button", { class: "cta alt", text: "➕ Add a person by Telegram ID", on: { click: () => push(() => addPersonScreen(d.tid, d.name)) } }),
     h("h2", { text: "Family settings" }),
+    h("button", { class: "cta alt", text: "💬 Welcome message (to send them)", on: { click: () => push(() => inviteScreen(d.tid, d.name)) } }),
     h("button", { class: "cta alt", text: "🔄 Make a new code",
       on: { click: () => famAct(d.tid, "fam_code", {}, "Make a new code for the " + d.name + " family? The old code (" + d.code + ") stops working for new sign-ups. People who already linked stay linked.", r => "New code: " + r.code) } }),
     d.best ? h("button", { class: "cta alt", text: "⭐ Clear best shots (" + d.best + ")",
@@ -511,7 +512,7 @@ function addFamilyScreen() {
     msg.textContent = "Making their topic…";
     try {
       const r = await api("/api/admin/fam_add", { name: n, again: !!again });
-      await alertMsg("✅ " + r.name + " family made. Code: " + r.code + (r.posted ? "" : " (I couldn't post the code inside their topic, but the family is saved.)") + " I sent you the welcome message in the bot chat, ready to forward.");
+      await alertMsg("✅ " + r.name + " family made. Code: " + r.code + (r.posted ? "" : " (I couldn't post the code inside their topic, but the family is saved.)") + (r.invited ? " I sent you the welcome message in the bot chat, ready to forward." : " I couldn't message you the welcome message (press Start in the bot chat). You can get it from the family page."));
       if (my === navId) replaceTop(() => familyScreen(r.tid));
     } catch (e) {
       if (e.exists) { msg.textContent = ""; return "exists"; }
@@ -525,6 +526,26 @@ function addFamilyScreen() {
     h("div", { class: "hint", text: "I'll make their topic in the group and give them a 6-digit code. Tell them their last name and the code, and they link themselves in the bot." }),
     h("label", { text: "Family last name" }), name, msg,
     h("button", { class: "cta", text: "Make the family", on: { click: tap } }), footer()]);
+}
+async function inviteScreen(tid, famName) {
+  const d = await adminLoad("/api/admin/invite", { tid }, () => inviteScreen(tid, famName)); if (!d) return;
+  const box = h("textarea", { readonly: "", rows: "14", style: "width:100%;box-sizing:border-box;font:inherit;padding:10px;border-radius:12px;border:1px solid #8884" });
+  box.value = d.text;
+  const msg = h("div", { class: "hint" });
+  show([backBtn(), h("h1", { text: "💬 Welcome message" }),
+    h("div", { class: "hint", text: "For the " + famName + " family, with their code filled in. Copy it, or have the bot send it to you in the bot chat so you can forward it." }),
+    box, msg,
+    h("button", { class: "cta", text: "📋 Copy", on: { click: async () => {
+      try { await navigator.clipboard.writeText(d.text); msg.textContent = "✅ Copied!"; return; } catch (e) {}
+      let done = false;
+      try { box.focus(); box.select(); box.setSelectionRange(0, 99999); done = document.execCommand("copy"); } catch (e2) {}
+      msg.textContent = done ? "✅ Copied!" : "Couldn't copy automatically. Press and hold the text to copy it, or use “Send it to me”.";
+    } } }),
+    h("button", { class: "cta alt", text: "📨 Send it to me in the bot chat", on: { click: () => oneAtATime(async () => {
+      try { await api("/api/admin/invite_send", { tid }); msg.textContent = "✅ Sent. Check your chat with the bot."; }
+      catch (e) { msg.textContent = "⚠️ " + e.message; }
+    }) } }),
+    footer()]);
 }
 function addPersonScreen(tid, famName) {
   const id = h("input", { type: "text", inputmode: "numeric", placeholder: "Telegram ID, like 123456789" });
