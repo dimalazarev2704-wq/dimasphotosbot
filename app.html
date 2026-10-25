@@ -69,6 +69,10 @@ textarea{min-height:140px}
 .badge{display:inline-block;min-width:22px;padding:1px 7px;border-radius:11px;background:#e53935;color:#fff;font-size:.7em;margin-left:8px;text-align:center}
 .banner{display:flex;align-items:center;gap:8px;background:var(--btn);color:var(--btntext);border-radius:12px;padding:8px 12px;margin-bottom:8px;font-size:.85em}
 .banner button{margin-left:auto;border:0;background:#fff3;color:inherit;border-radius:10px;padding:6px 12px;font:inherit}
+.chat{display:flex;flex-direction:column;gap:8px;margin:10px 0}
+.bubble{max-width:85%;padding:10px 14px;border-radius:16px;background:#f1f2f4;color:#111}
+.bubble.me{align-self:flex-end;background:#2481cc;color:#fff}
+.bubble.me .hint{color:#dbeafe}
 .cta.danger,.danger{background:#e53935;color:#fff}
 .card{padding:12px;border-radius:16px;background:var(--sec);margin:0 0 12px}
 .card .grid{margin-top:8px}
@@ -240,8 +244,32 @@ async function homeScreen() {
       photoGrid(w.items),
       h("button", { class: "cta", on: { click: () => seeAll(w.mode) }, text: w.mode === "new" ? "See all new photos" : "See all photos" })));
   }
+  if (!IS_ADMIN) nodes.push(h("button", { class: "cta alt", text: "💬 Chat with " + (HOME.owner || "the photographer"), on: { click: () => push(commentScreen) } }));
   nodes.push(footer());
   show(nodes);
+}
+function bubbles(list, mine) {  // mine = the direction that is "me" (shown on the right)
+  return list.length ? list.map(m => h("div", { class: "bubble " + (m.dir === mine ? "me" : "them") },
+    h("div", { style: "white-space:pre-wrap", text: m.text }), h("div", { class: "hint", text: m.at })))
+    : h("div", { class: "msg", text: "No messages yet." });
+}
+async function commentScreen() {
+  const d = await adminLoad("/api/chat", {}, commentScreen); if (!d) return;
+  const my = navId, who = HOME.owner || "the photographer";
+  const ta = h("textarea", { maxlength: "1000", rows: "4", placeholder: "Write a message…" });
+  const msg = h("div", { class: "hint" });
+  const btn = h("button", { class: "cta", text: "Send", on: { click: () => oneAtATime(async () => {
+    const t = ta.value.trim();
+    if (!t) { msg.textContent = "⚠️ Please type your message."; return; }
+    btn.disabled = true; msg.textContent = "Sending…";
+    try { await api("/api/comment", { text: t }); if (my === navId) commentScreen(); }
+    catch (e) { if (my === navId) { msg.textContent = "⚠️ " + e.message; btn.disabled = false; } }
+  }) } });
+  show([backBtn(), h("h1", { text: "💬 Chat with " + who }),
+    h("div", { class: "hint", text: "Write a comment, a question or a request. " + who + " will answer here and in the bot chat." }),
+    h("div", { class: "chat" }, bubbles(d.messages, "in")), ta, msg, btn,
+    h("button", { class: "cta alt", text: "🔄 Check for new messages", on: { click: () => commentScreen() } }), footer()]);
+  window.scrollTo(0, document.body.scrollHeight);
 }
 function seeAll(mode) {
   if (mode === "new") push(() => gridScreen("✨ New photos", { mode: "new" }));
@@ -456,8 +484,9 @@ async function adminHome() {
     h("div", { class: "stats" }, stat(s.families, "Families"), stat(s.people, "People"), stat(s.photos, "Photos"), stat(s.new7, "New this week")),
     bigRow("➕", "Add a family", "", () => push(addFamilyScreen)),
     bigRow("📤", "Add photos", "", () => push(() => uploadScreen(null))),
+    bigRow("💬", "Messages", s.comments, () => push(commentsScreen)),
     bigRow("💡", "Suggestions inbox", s.sugs, () => push(sugsScreen)),
-    bigRow("📣", "Announcements", s.scheduled ? s.scheduled + " scheduled" : "", () => push(() => annScreen(d.families))),
+    bigRow("📣", "Announcements & messages", s.scheduled ? s.scheduled + " scheduled" : "", () => { if (annDraft.aud === "person") annDraft = { aud: "all", person: "", text: "" }; push(() => annScreen(d.families)); }),
     bigRow("🕵️", "Login attempts", s.tries, () => push(() => triesScreen())),
     h("h2", { text: "Families" }),
     d.families.length ? d.families.map(f => h("button", { class: "row", on: { click: () => push(() => familyScreen(f.tid)) } },
@@ -479,7 +508,7 @@ async function familyScreen(tid) {
       h("div", { class: "hint", text: "ID " + p.id }),
       p.by ? h("div", { class: "hint", text: "Added by " + p.by }) : null,
       p.pending ? h("div", { class: "hint", text: "⏳ hasn't confirmed their name yet" }) : null,
-      h("div", { class: "btns" }, h("button", { class: "danger", text: "Unlink",
+      h("div", { class: "btns" }, p.pending ? null : h("button", { text: "✉️ Message", on: { click: () => { annDraft = { aud: "person", person: String(p.id), text: annDraft.aud === "person" && annDraft.person === String(p.id) ? annDraft.text : "" }; push(() => annScreen()); } } }), h("button", { class: "danger", text: "Unlink",
         on: { click: () => famAct(d.tid, "member_unlink", { uid: p.id }, "Unlink " + (p.first || "this person") + " from the " + d.name + " family?") } }))))
       : h("div", { class: "msg", text: "Nobody has linked yet." }),
     h("button", { class: "cta alt", text: "➕ Add a person by Telegram ID", on: { click: () => push(() => addPersonScreen(d.tid, d.name)) } }),
@@ -566,7 +595,11 @@ function deleteFamilyScreen(tid, famName) {
   const del = (mode, ask) => oneAtATime(async () => {
     if (!await confirmAsk(ask)) return;
     const my = navId;
-    try { const r = await api("/api/admin/fam_delete", { tid, mode }); await alertMsg("✅ " + r.message); if (my === navId) goHome(); }
+    try {
+      const r = await api("/api/admin/fam_delete", { tid, mode }); await alertMsg("✅ " + r.message);
+      if (adminFam === tid) { adminFam = null; adminFamName = ""; HOME = null; }
+      if (my === navId) goHome(); else drawTabs();
+    }
     catch (e) { await alertMsg("⚠️ " + e.message); }
   });
   show([backBtn(), h("h1", { text: "❌ Delete the " + famName + " family?" }),
@@ -574,6 +607,42 @@ function deleteFamilyScreen(tid, famName) {
     h("button", { class: "cta alt", text: "Delete family, keep the topic and files in the group", on: { click: () => del("keep", "Delete the " + famName + " family? The topic and files stay in the group.") } }),
     h("button", { class: "cta danger", text: "⚠️ Delete the family AND the topic with ALL its files", on: { click: () => del("all", "This permanently deletes the " + famName + " topic and every photo in it. This can't be undone. Continue?") } }),
     footer()]);
+}
+
+// conversations with clients
+async function commentsScreen() {
+  const d = await adminLoad("/api/admin/comments", {}, commentsScreen); if (!d) return;
+  show([backBtn(), h("h1", { text: "💬 Messages" }),
+    h("div", { class: "hint", text: "Clients write to you from the bot or the app. You can also reply to a message in the group's Comments topic." }),
+    d.rows.length ? d.rows.map(r => h("button", { class: "row", on: { click: () => push(() => threadScreen(r.uid)) } },
+      h("span", {}, h("b", { text: r.name + " · " + r.family + " family" }),
+        r.unread ? h("span", { class: "badge", text: r.unread + " new" }) : null,
+        h("span", { class: "hint", text: (r.dir === "out" ? "You: " : "") + r.last.slice(0, 80) + " · " + r.at }))))
+      : h("div", { class: "msg", text: "No messages yet." }),
+    h("button", { class: "cta alt", text: "✉️ Write to someone", on: { click: () => { annDraft = { aud: "person", person: "", text: "" }; push(() => annScreen()); } } }),
+    footer()]);
+}
+async function threadScreen(uid) {
+  const d = await adminLoad("/api/admin/thread", { uid }, () => threadScreen(uid)); if (!d) return;
+  const my = navId;
+  const ta = h("textarea", { maxlength: "3500", rows: "4", placeholder: d.linked ? "Write your reply…" : "This person isn't linked any more" });
+  const msg = h("div", { class: "hint" });
+  const btn = h("button", { class: "cta", text: "Send", on: { click: () => oneAtATime(async () => {
+    const t = ta.value.trim();
+    if (!t) { msg.textContent = "⚠️ Please type your message."; return; }
+    btn.disabled = true; msg.textContent = "Sending…";
+    try { await api("/api/admin/chat_send", { uid, text: t }); if (my === navId) threadScreen(uid); }
+    catch (e) { if (my === navId) { msg.textContent = "⚠️ " + e.message; btn.disabled = false; } }
+  }) } });
+  if (!d.linked) { ta.disabled = true; btn.disabled = true; }
+  show([backBtn(), h("h1", { text: d.name + " · " + d.family + " family" }),
+    h("div", { class: "chat" }, bubbles(d.messages, "out")), ta, msg, btn,
+    h("button", { class: "cta alt", text: "🔄 Refresh", on: { click: () => threadScreen(uid) } }),
+    h("button", { class: "cta danger", text: "🗑 Delete this conversation", on: { click: () => oneAtATime(async () => {
+      if (!await confirmAsk("Delete the whole conversation with " + d.name + "?")) return;
+      try { await api("/api/admin/chat_clear", { uid }); if (my === navId) back(); } catch (e) { await alertMsg("⚠️ " + e.message); }
+    }) } }), footer()]);
+  window.scrollTo(0, document.body.scrollHeight);
 }
 
 // suggestions inbox
@@ -609,40 +678,71 @@ function alertMsg(text) {
 }
 
 // announcements
-let annDraft = { aud: "all", text: "" };
+let annDraft = { aud: "all", person: "", text: "" };
+let peopleCache = null;
+function annAud(dr) { return dr.aud === "all" ? "all" : dr.aud === "person" ? "u:" + dr.person : parseInt(dr.aud, 10); }
 function annScreen(families) {
   navId++;
+  if (!families) {  // (opened from a person's card: fetch the family list first)
+    loading(); const my0 = navId;
+    api("/api/admin/overview", {}).then(d => { if (my0 === navId) annScreen(d.families); })
+      .catch(e => { if (my0 === navId) errorScreen(e, () => annScreen()); });
+    return;
+  }
   const sel = h("select", {}, h("option", { value: "all", text: "📣 Everyone (all families)" }),
-    (families || []).map(f => h("option", { value: String(f.tid), text: f.name + " family" })));
+    (families || []).map(f => h("option", { value: String(f.tid), text: f.name + " family" })),
+    h("option", { value: "person", text: "👤 One person…" }));
   sel.value = annDraft.aud;
   if (sel.value !== annDraft.aud) sel.value = "all";
-  const text = h("textarea", { maxlength: "3500", placeholder: "Write your announcement…", on: { input: () => { annDraft.text = text.value; } } }); text.value = annDraft.text;
-  sel.addEventListener("change", () => { annDraft.aud = sel.value; });
+  const psel = h("select", {});
+  const pwrap = h("div", {}, h("label", { text: "Which person?" }), psel);
   const msg = h("div", { class: "hint", text: "" });
   const my = navId;
+  const text = h("textarea", { maxlength: "3500", on: { input: () => { annDraft.text = text.value; } } }); text.value = annDraft.text;
+  const fillPeople = async () => {  // (always fresh: people come and go)
+    msg.textContent = "Loading people…";
+    try { peopleCache = (await api("/api/admin/people", {})).people; msg.textContent = ""; }
+    catch (e) { if (my === navId) msg.textContent = "⚠️ " + e.message; return; }
+    if (my !== navId) return;
+    psel.replaceChildren(...(peopleCache.length ? peopleCache.map(p => h("option", { value: String(p.id), text: p.name + " · " + p.family + " family" + (p.username ? " (@" + p.username + ")" : "") }))
+      : [h("option", { value: "", text: "Nobody has linked yet" })]));
+    psel.value = annDraft.person;
+    if (psel.value !== annDraft.person) {  // (the wanted person isn't linked any more: make the owner pick again)
+      if (annDraft.person) msg.textContent = "That person isn't in the list any more. Please pick someone.";
+      psel.insertBefore(h("option", { value: "", text: "Pick a person…" }), psel.firstChild); psel.value = ""; annDraft.person = "";
+    }
+  };
+  const sync = () => {
+    pwrap.style.display = sel.value === "person" ? "" : "none";
+    text.placeholder = sel.value === "person" ? "Write your message…" : "Write your announcement…";
+    if (sel.value === "person") fillPeople();
+  };
+  sel.addEventListener("change", () => { annDraft.aud = sel.value; sync(); });
+  psel.addEventListener("change", () => { annDraft.person = psel.value; });
   const review = h("button", { class: "cta", text: "Review", on: { click: async () => {
-    annDraft = { aud: sel.value, text: text.value };
+    annDraft = { aud: sel.value, person: psel.value || "", text: text.value };
+    if (sel.value === "person" && !annDraft.person) { msg.textContent = "⚠️ Please pick a person."; return; }
     review.disabled = true; msg.textContent = "";
     try {
-      const r = await api("/api/admin/ann_preview", { aud: aud_(), text: annDraft.text });
+      const r = await api("/api/admin/ann_preview", { aud: annAud(annDraft), text: annDraft.text });
       if (my === navId) annReview(families, r);
     } catch (e) { msg.textContent = "⚠️ " + e.message; review.disabled = false; }
   } } });
-  const aud_ = () => sel.value === "all" ? "all" : parseInt(sel.value, 10);
-  show([backBtn(), h("h1", { text: "📣 Announcement" }), h("label", { text: "Who gets it?" }), sel,
+  show([backBtn(), h("h1", { text: "📣 Announcement or message" }), h("label", { text: "Who gets it?" }), sel, pwrap,
     h("label", { text: "Message" }), text, msg, review,
-    h("button", { class: "cta alt", text: "🕒 Scheduled announcements", on: { click: () => push(scheduledScreen) } }), footer()]);
+    h("button", { class: "cta alt", text: "🕒 Scheduled messages", on: { click: () => push(scheduledScreen) } }), footer()]);
+  sync();
 }
 function annReview(families, pv) {
   navId++;
   const msg = h("div", { class: "hint", text: "" });
-  const aud = annDraft.aud === "all" ? "all" : parseInt(annDraft.aud, 10);
+  const aud = annAud(annDraft);
   const send = h("button", { class: "cta", text: "✅ Send now to " + pv.count + (pv.count === 1 ? " person" : " people"), on: { click: () => oneAtATime(async () => {
     if (!pv.count) { msg.textContent = "Nobody is in that audience yet."; return; }
     send.disabled = true; msg.textContent = "Starting…";
     try {
       const r = await api("/api/admin/ann_send", { aud, text: annDraft.text });
-      annDraft.text = "";
+      annDraft = { aud: "all", person: "", text: "" };
       await alertMsg("📣 Sending to " + r.count + (r.count === 1 ? " person" : " people") + ". The bot will message you when it's done.");
       back();
     } catch (e) { msg.textContent = "⚠️ " + e.message; send.disabled = false; }
@@ -653,14 +753,14 @@ function annReview(families, pv) {
     sched.disabled = true; msg.textContent = "";
     try {
       const r = await api("/api/admin/ann_schedule", { aud, text: annDraft.text, when: when.value.slice(0, 16).replace("T", " ") });
-      annDraft.text = "";
+      annDraft = { aud: "all", person: "", text: "" };
       await alertMsg("✅ Scheduled for " + r.label + " to " + r.who + ".");
       back();
     } catch (e) { msg.textContent = "⚠️ " + e.message; sched.disabled = false; }
   }) } });
   show([backBtn(), h("h1", { text: "📣 Preview" }),
-    h("div", { class: "hint", text: "Goes to " + pv.count + (pv.count === 1 ? " person" : " people") + " in " + pv.who + ":" }),
-    h("div", { class: "msg", text: "📣 Announcement\n\n" + annDraft.text }),
+    h("div", { class: "hint", text: "Goes to " + (annDraft.aud === "person" ? pv.who : pv.count + (pv.count === 1 ? " person" : " people") + " in " + pv.who) + ":" }),
+    h("div", { class: "msg", text: (pv.header || "📣 Announcement") + "\n\n" + annDraft.text }),
     send, h("label", { text: "…or send it later (" + (pv.tz || "bot") + " time)" }), when, sched, msg,
     h("button", { class: "cta alt", text: "✏️ Edit the message", on: { click: () => annScreen(families) } }), footer()]);
 }
@@ -760,7 +860,7 @@ function drawUpload(pre, families) {
   function paint() {
     list.replaceChildren(...items.map(it => h("div", { class: "file" + (it.state === "fail" || it.state === "skip" ? " bad" : "") },
       h("span", { class: "nm", text: it.file.name || "photo" }),
-      h("span", { class: "st", text: it.state === "done" ? "✅" : it.state === "up" ? "⏳ uploading…" : it.state === "ready" ? fmtSize(it.file.size)
+      h("span", { class: "st", text: it.state === "done" ? (it.msg ? "⚠️ not in the app yet" : "✅") : it.state === "up" ? "⏳ uploading…" : it.state === "ready" ? fmtSize(it.file.size)
         : "⚠️ " + it.msg }))));
     const todo = wait(items).length, failed = items.filter(i => i.state === "fail").length;
     start.textContent = running ? "Uploading…" : failed && todo === failed ? "🔁 Retry the " + failed + " that didn't go through"
@@ -799,7 +899,7 @@ function drawUpload(pre, families) {
       it.state = "up"; paint();
       ctl = new AbortController();
       const timer = setTimeout(() => ctl.abort(), 600000);
-      try { await uploadOne(it.file, meta, it.key, ctl.signal); it.state = "done"; doneFam = meta.fam; }
+      try { const r = await uploadOne(it.file, meta, it.key, ctl.signal); it.state = "done"; doneFam = meta.fam; if (r.indexed === false) it.msg = "⚠️ In the group, but not in the app yet"; }
       catch (e) {
         it.state = "fail"; it.msg = e.message;
         if (e.maybe) it.key = newKey();  // (it may already be in the group: a retry is the owner's call)
