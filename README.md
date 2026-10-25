@@ -271,3 +271,11 @@ Admin → **Add photos** (also on each family's page). Pick the family, a place 
 
 ### Family tools in the app
 Admin → **Add a family** (makes the topic and code), and on each family's page: members with **Unlink**, **Add a person by Telegram ID**, **Make a new code**, **Clear best shots**, and **Delete this family** (keep the topic and files, or delete the topic with all its files). These do the same as the chat's /admin panel.
+
+### Chatting with clients
+Clients tap **💬 Message or comment to Dima** (chat menu, **💬 Reply to Dima** under every announcement or message, or **💬 Chat with Dima** on the app's Home screen). Each message is saved and posted in a **💬 Comments** topic in the group (made automatically the first time). You can answer in three ways:
+- **In the group:** reply to their message in the Comments topic. Your answer goes straight to them.
+- **In the app:** Admin → **Messages** shows every conversation with an unread count. Open one, read it, and write back.
+- **To anyone, any time:** **✉️ Write to someone** in the Messages list, or **✉️ Message** on a member's card.
+
+For 3 days after you write to someone, whatever they type in the bot chat comes to you, so they can just answer you. Clients can send 10 messages an hour (up to 1000 characters each). Conversations older than 180 days are cleared automatically.
