@@ -300,7 +300,8 @@ class WebApp:
         if day is None:
             return err(400, "Please give a date like 2026-07-04 (not in the future), or choose that you don't know it.")
         place = " ".join(query.get("place", "").split())[:80] or None
-        place = place.lstrip("⭐ ").strip()[:80] or None if place else None  # a leading ⭐ would mark it as a best shot
+        if place:  # a ⭐ anywhere in the caption would mark the photo as a best shot
+            place = " ".join(place.replace("⭐", "").replace("\ufe0f", "").split())[:80] or None
         if place and place.casefold() in self.d.unknown_words:
             place = None
         if not body:
@@ -427,6 +428,19 @@ class WebApp:
             tid = await self.family_of(uid)
             if not tid:
                 return err(403, "Please send /start to the bot and link your account first.")
+        if path == "/api/chat":
+            if owner:
+                return err(403, "This is for clients.")
+            docs = (await db.comments.find({"uid": uid}).sort("at", -1).limit(50).to_list())[::-1]
+            return jresp({"messages": [{"dir": d.get("dir", "in"), "text": d.get("text", ""), "at": self.d.fmt_when(d.get("at"))}
+                                       for d in docs]})
+
+        if path == "/api/comment":
+            if owner:
+                return err(403, "This is for clients.")
+            status, data = await self.d.comment(uid, req.get("text"))
+            return jresp(data, status) if status == 200 else err(status, data["message"])
+
         if not tid:  # the owner, with no family picked yet
             if path == "/api/home":
                 return jresp({"admin": True, "family": "", "first": user.get("first_name") or "", "best": False,
@@ -721,6 +735,7 @@ class WebApp:
                     buf += part
                     left -= len(part)
                 body = bytes(buf)
+                del buf  # (don't hold two copies of a big upload)
             elif n:
                 body = await asyncio.wait_for(reader.readexactly(n), 30)
         resp = await self.handle(method, target, headers, body)
