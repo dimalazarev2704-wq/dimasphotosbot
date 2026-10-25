@@ -412,6 +412,9 @@ async def register(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if await db.families.find_one({"sug_thread_id": thread_id}):
         await msg.reply_text("This is a suggestions topic, so it can't be a family. Use the family's own topic.")
         return
+    if await db.meta.find_one({"_id": "comments", "thread_id": thread_id}):
+        await msg.reply_text("This is the 💬 Comments topic, so it can't be a family. Use the family's own topic.")
+        return
     if await db.meta.find_one({"_id": "addfam", "thread_id": thread_id}):
         await msg.reply_text("This is the ➕ Add families topic, so it can't be a family. Use the family's own topic.")
         return
@@ -506,6 +509,7 @@ async def unlink(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     person = matches[0]
     await db.users.delete_one({"_id": person["_id"]})
+    await drop_scheduled_for([person["_id"]])
     await msg.reply_text(
         f"Unlinked {person['first_name']} from the {fam['name']} family. "
         "They can link again with the code."
@@ -597,6 +601,8 @@ async def on_group_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return  # a family's suggestions topic: photos there are only waiting for approval
     if await db.meta.find_one({"_id": "addfam", "thread_id": msg.message_thread_id}):
         return  # the ➕ Add families topic is never a family
+    if await db.meta.find_one({"_id": "comments", "thread_id": msg.message_thread_id}):
+        return  # neither is the 💬 Comments topic
     await index_file(
         msg.message_thread_id, msg.message_id, file_id, msg.caption, msg.media_group_id, msg.date, kind,
         thumb_of(msg),
@@ -635,6 +641,7 @@ def menu_markup(extra: list | None = None) -> InlineKeyboardMarkup:
                 InlineKeyboardButton("💡 Family suggestions", callback_data="sg:gal"),
             ],
             [InlineKeyboardButton("👪 Add a family member", callback_data="fm:new")],
+            [InlineKeyboardButton(f"💬 Message or comment to {OWNER_NAME}", callback_data="cm:new")],
         ]
     )
 
@@ -1030,6 +1037,18 @@ async def on_private_text(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if fm:
         await handle_family_member_text(update, context, fm)
         return
+    cm = context.user_data.get("cm")
+    if cm:
+        if time.time() > cm["until"]:
+            context.user_data.pop("cm", None)
+            await msg.reply_text("That message timed out. Tap 💬 Message or comment to Dima to start again.")
+            return
+        status, out = await save_comment(context.bot, update.effective_user.id, msg.text or "")
+        if status not in (400, 429):  # (kept open only so they can shorten or retype it)
+            context.user_data.pop("cm", None)
+        tid = await my_thread(context, update.effective_user.id)
+        await msg.reply_text(out["message"], reply_markup=await family_menu(tid) if status == 200 and tid else None)
+        return
     adm = context.user_data.get("adm")
     if adm and is_owner(update.effective_user.id):
         await handle_admin_text(update, context, adm)
@@ -1039,6 +1058,10 @@ async def on_private_text(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await handle_link_step(update, context, link)
         return
     tid = await my_thread(context, update.effective_user.id)
+    if tid and not is_owner(update.effective_user.id) and msg.text and await has_open_chat(update.effective_user.id):
+        status, out = await save_comment(context.bot, update.effective_user.id, msg.text)  # (they're mid-conversation)
+        await msg.reply_text(out["message"] if status != 200 else f"✅ Sent to {OWNER_NAME}.")
+        return
     if tid:
         await msg.reply_text(
             "Hi! 👋 I can show you your family's photos. Tap what you'd like to see (or tap ❓ Help):",
@@ -1201,6 +1224,8 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     data = q.data
     chat_id = q.message.chat_id
+    if data != "cm:new":
+        context.user_data.pop("cm", None)  # (tapping anything else ends a half-written message to Dima)
 
     async def show(text: str, markup: InlineKeyboardMarkup) -> None:
         try:
@@ -1219,6 +1244,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     if data == "menu":
         context.user_data.pop("sug", None)
+        context.user_data.pop("cm", None)
         await show("What would you like to see?", await family_menu(thread_id))
 
     elif data == "bs":  # ⭐ Best shots
@@ -1226,6 +1252,17 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await show("No best shots have been picked for your family yet. Check back soon!", await family_menu(thread_id))
             return
         await start_send(context, chat_id, {"thread_id": thread_id, "best": True})
+
+    elif data == "cm:new":  # a message or comment to the photographer
+        if is_owner(q.from_user.id):
+            await show("This is for clients: it sends you a comment. You'll find them in the app's Admin tab → Comments.",
+                       await family_menu(thread_id))
+            return
+        clear_flows(context)
+        context.user_data["cm"] = {"until": time.time() + SESSION_SECONDS}
+        # (a new message, so the one they're answering stays in the chat)
+        await context.bot.send_message(chat_id, f"💬 Type your message or comment for {OWNER_NAME}. It goes straight to them.",
+                                       reply_markup=one_button("Cancel", "menu"))
 
     elif data in ("sg:new", "sg:send") and is_owner(q.from_user.id):
         await show(
@@ -1552,7 +1589,7 @@ def sug_name(user_doc, user) -> str:
     return (user_doc or {}).get("first_name") or getattr(user, "first_name", None) or "Guest"
 
 
-FLOW_KEYS = ("up", "link", "adm", "sug", "fm")
+FLOW_KEYS = ("up", "link", "adm", "sug", "fm", "cm")
 
 
 def clear_flows(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1937,7 +1974,9 @@ ANN_MAX = 3500
 
 async def ann_recipients(aud: str) -> list[int]:
     q = {"pending": {"$ne": True}}
-    if aud != "all":
+    if aud.startswith("u:"):  # one person
+        q["_id"] = int(aud[2:])
+    elif aud != "all":
         q["thread_id"] = int(aud)
     return [u["_id"] for u in await db.users.find(q).to_list()]
 
@@ -1945,6 +1984,12 @@ async def ann_recipients(aud: str) -> list[int]:
 async def ann_audience_name(aud: str) -> str:
     if aud == "all":
         return "everyone"
+    if aud.startswith("u:"):
+        u = await db.users.find_one({"_id": int(aud[2:])})
+        if not u:
+            return "that person"
+        fam = await db.families.find_one({"thread_id": u.get("thread_id")})
+        return f"{u.get('first_name') or 'that person'}" + (f" ({fam['name']} family)" if fam else "")
     fam = await db.families.find_one({"thread_id": int(aud)})
     return f"the {fam['name']} family" if fam else "that family"
 
@@ -1995,6 +2040,22 @@ def parse_when(text: str) -> datetime | None:
     return when
 
 
+async def drop_scheduled_for(uids=(), tid: int | None = None) -> None:
+    """Cancels scheduled messages meant for people who were unlinked (or for a family that was deleted)."""
+    for u in uids:
+        await db.scheduled.delete_many({"aud": f"u:{u}"})
+    if tid is not None:
+        await db.scheduled.delete_many({"aud": str(tid)})
+
+
+REPLY_MARKUP = InlineKeyboardMarkup([[InlineKeyboardButton(f"💬 Reply to {OWNER_NAME}", callback_data="cm:new")]])
+COMMENT_MAX = 1000
+
+
+def ann_header(aud: str) -> str:
+    return f"💬 Message from {OWNER_NAME}" if aud.startswith("u:") else "📣 Announcement"
+
+
 async def broadcast(bot, aud: str, text: str) -> tuple[int, int, int]:
     """Sends an announcement to everyone in the audience. Returns (sent, failed, total)."""
     people = await ann_recipients(aud)
@@ -2002,7 +2063,7 @@ async def broadcast(bot, aud: str, text: str) -> tuple[int, int, int]:
     for uid in people:
         try:
             await send_with_retry(
-                lambda: bot.send_message(uid, "📣 Announcement\n\n" + text),
+                lambda: bot.send_message(uid, ann_header(aud) + "\n\n" + text, reply_markup=REPLY_MARKUP),
                 retry_timeouts=True,
             )
             sent += 1
@@ -2162,6 +2223,8 @@ async def add_person(bot, uid: int, tid: int, first_name: str, by: str | None = 
     """Links a Telegram account to a family, on the owner's say-so, or (when `by` is the first name of a
     family member) because a family member added a relative.
     Returns (problem or '', whether the person could be messaged right away)."""
+    if is_owner(uid):
+        return "That's your own account, so it can't be added as a family member.", False
     fam = await db.families.find_one({"thread_id": tid})
     if not fam:
         return "That family no longer exists.", False
@@ -2506,6 +2569,120 @@ async def make_family(bot, name: str, invited: list | None = None) -> tuple[int,
     except TelegramError:
         log.exception("Couldn't post the code in the new topic")
         return tid, code, False
+
+
+COMMENTS_LOCK = asyncio.Lock()  # (two comments at once must not each make a topic)
+
+
+async def post_in_comments_topic(bot, text: str):
+    """Posts in the one '💬 Comments' topic (made the first time, reused after that)."""
+    async with COMMENTS_LOCK:
+        meta = await db.meta.find_one({"_id": "comments"})
+        for attempt in (1, 2):
+            if not meta or attempt == 2:
+                topic = await bot.create_forum_topic(GROUP_ID, "💬 Comments")
+                await db.meta.update_one({"_id": "comments"}, {"$set": {"thread_id": topic.message_thread_id}}, upsert=True)
+                meta = {"_id": "comments", "thread_id": topic.message_thread_id}
+            try:
+                sent = await bot.send_message(GROUP_ID, text, message_thread_id=meta["thread_id"])
+                return sent.message_id
+            except TelegramError as e:
+                if attempt == 2 or "thread" not in str(e.message).lower():
+                    raise
+
+
+async def save_comment(bot, uid: int, text) -> tuple[int, dict]:
+    """A client's comment or message to the photographer: saved first (so it's never lost), then posted
+    in the group's Comments topic. Returns (status, {"message": ...})."""
+    u = await db.users.find_one({"_id": uid})
+    if not u or u.get("pending") or is_owner(uid):
+        return 403, {"message": "Please send /start to link your account first."}
+    text = text.strip() if isinstance(text, str) else ""
+    if not text:
+        return 400, {"message": "Please type your message."}
+    if len(text) > COMMENT_MAX:
+        return 400, {"message": f"That's too long ({len(text)} characters). Please keep it under {COMMENT_MAX}."}
+    now = datetime.now(timezone.utc)
+    if await db.comments.count_documents({"uid": uid, "dir": "in", "at": {"$gte": now - timedelta(hours=1)}}) >= 10:
+        return 429, {"message": "You've sent a lot of messages just now. Please try again in a little while."}
+    fam = await db.families.find_one({"thread_id": u.get("thread_id")})
+    name = " ".join(str(u.get("first_name") or "Someone").split())[:40]
+    cid = secrets.token_hex(6)
+    await db.comments.delete_many({"at": {"$lt": now - timedelta(days=180)}})  # (old conversations don't pile up)
+    await db.comments.insert_one({"_id": cid, "uid": uid, "name": name, "tid": u.get("thread_id"),
+                                  "family": (fam or {}).get("name", "?"), "text": text, "at": now, "read": False, "dir": "in"})
+    posted = False
+    if GROUP_ID:
+        try:
+            gm = await post_in_comments_topic(bot, f"💬 {name} ({(fam or {}).get('name', '?')} family):\n\n{text}\n\n"
+                                                    "↩️ Reply to this message to answer them.")
+            await db.comments.update_one({"_id": cid}, {"$set": {"gm": gm}})
+            posted = True
+        except Exception:
+            log.warning("Couldn't post a comment in the Comments topic (it's still saved in the app)")
+    if not posted and OWNER_ID:  # (so the message can't go unnoticed)
+        try:
+            await bot.send_message(OWNER_ID, f"💬 {name} ({(fam or {}).get('name', '?')} family):\n\n{text}\n\n"
+                                              "(I couldn't post this in the Comments topic. Answer it in the app: Admin → Messages.)")
+        except TelegramError:
+            pass
+    return 200, {"message": f"✅ Sent to {OWNER_NAME}. Thank you!", "id": cid}
+
+
+async def send_chat_message(bot, uid: int, text) -> tuple[int, dict]:
+    """The owner writes to one linked person (from the app, or by replying in the Comments topic)."""
+    u = await db.users.find_one({"_id": uid})
+    if not u or u.get("pending") or is_owner(uid):
+        return 404, {"error": "That person isn't linked (or hasn't confirmed their name yet)."}
+    text = text.strip() if isinstance(text, str) else ""
+    if not text:
+        return 400, {"error": "Please type your message."}
+    if len(text) > ANN_MAX:
+        return 400, {"error": f"That's too long ({len(text)} characters). Please keep it under {ANN_MAX}."}
+    try:
+        await send_with_retry(lambda: bot.send_message(uid, f"💬 {OWNER_NAME}:\n\n{text}", reply_markup=REPLY_MARKUP),
+                              retry_timeouts=True)
+    except (TelegramError, RuntimeError):
+        return 502, {"error": "I couldn't deliver that. They may have blocked the bot."}
+    fam = await db.families.find_one({"thread_id": u.get("thread_id")})
+    await db.comments.insert_one({"_id": secrets.token_hex(6), "uid": uid, "name": " ".join(str(u.get("first_name") or "").split())[:40],
+                                  "tid": u.get("thread_id"), "family": (fam or {}).get("name", "?"), "text": text,
+                                  "at": datetime.now(timezone.utc), "read": True, "dir": "out"})
+    return 200, {"ok": True}
+
+
+async def has_open_chat(uid: int) -> bool:
+    """True if the owner wrote to this person in the last 3 days, so their plain text goes to the owner."""
+    last = await db.comments.find({"uid": uid, "dir": "out"}).sort("at", -1).limit(1).to_list()
+    if not last:
+        return False
+    at = last[0]["at"].replace(tzinfo=timezone.utc) if last[0]["at"].tzinfo is None else last[0]["at"]
+    return datetime.now(timezone.utc) - at < timedelta(days=3)
+
+
+async def on_comments_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """The owner replies to a comment inside the 💬 Comments topic: the answer goes to that person."""
+    msg = update.effective_message
+    if not msg or not msg.is_topic_message or not msg.reply_to_message or not msg.from_user or not is_owner(msg.from_user.id):
+        return
+    meta = await db.meta.find_one({"_id": "comments"})
+    if not meta or meta.get("thread_id") != msg.message_thread_id:
+        return
+    if msg.reply_to_message.message_id == msg.message_thread_id:
+        return  # (in a topic, Telegram marks ordinary messages as replies to the topic's first message)
+    doc = await db.comments.find_one({"gm": msg.reply_to_message.message_id})
+    if not doc:
+        if getattr(msg.reply_to_message.from_user, "is_bot", False):
+            try:
+                await msg.reply_text("⚠️ I can't tell who that message was from any more. Answer it in the app: Admin → Messages.")
+            except TelegramError:
+                pass
+        return
+    status, out = await send_chat_message(context.bot, doc["uid"], msg.text or "")
+    try:
+        await msg.reply_text("✅ Sent." if status == 200 else "⚠️ " + out["error"])
+    except TelegramError:
+        pass
 
 
 async def post_in_addfam_topic(bot, text: str, markup: InlineKeyboardMarkup) -> int:
@@ -3381,7 +3558,9 @@ async def on_admin_button(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     elif action == "ul":
         tid, uid = int(parts[2]), int(parts[3])
-        await db.users.delete_one({"_id": uid, "thread_id": tid})
+        r = await db.users.delete_one({"_id": uid, "thread_id": tid})
+        if getattr(r, "deleted_count", 1):
+            await drop_scheduled_for([uid])
         view = await members_view(tid)
         if view:
             await show(*view)
@@ -3429,9 +3608,11 @@ async def on_admin_button(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 await context.bot.delete_forum_topic(GROUP_ID, fam["sug_thread_id"])
             except TelegramError:
                 log.warning("Couldn't delete the suggestions topic of %s", fam["name"])
+        await drop_scheduled_for([u["_id"] for u in await db.users.find({"thread_id": tid}).to_list()], tid)
         await db.users.delete_many({"thread_id": tid})
         await db.photos.delete_many({"thread_id": tid})
         await db.suggestions.delete_many({"thread_id": tid})
+        await db.comments.delete_many({"tid": tid})
         await db.families.delete_one({"thread_id": tid})
         for _uid, _t in list(context.bot_data.get("preview", {}).items()):
             if _t == tid:  # (nobody is left browsing a family that no longer exists)
@@ -3463,7 +3644,7 @@ ADMIN_ACTIONS = {
     "overview", "family", "photo_best", "photo_remove", "photo_edit", "sugs", "sug_act",
     "ann_preview", "ann_send", "ann_schedule", "scheduled", "sched_cancel",
     "tries", "try_add", "try_dismiss", "try_unlock", "tries_clear",
-    "fam_add", "fam_code", "invite", "invite_send", "fam_delete", "member_unlink", "person_add", "best_clear",
+    "fam_add", "fam_code", "people", "comments", "thread", "chat_send", "chat_clear", "invite", "invite_send", "fam_delete", "member_unlink", "person_add", "best_clear",
 }
 
 
@@ -3481,7 +3662,11 @@ def _safe_date(day) -> str:
 async def _ann_input(req: dict):
     """-> (audience, text, error). The audience is "all" or the topic id of one existing family."""
     aud, text = req.get("aud"), req.get("text")
-    if aud != "all":
+    if isinstance(aud, str) and re.fullmatch(r"u:[1-9][0-9]{0,15}", aud, re.ASCII):  # one person
+        u = await db.users.find_one({"_id": int(aud[2:])})
+        if not u or u.get("pending"):
+            return None, None, "That person isn't linked (or hasn't confirmed their name yet)."
+    elif aud != "all":
         tid = _int(aud)
         if tid is None or not await db.families.find_one({"thread_id": tid}):
             return None, None, "Please pick who should get it."
@@ -3538,14 +3723,18 @@ async def admin_upload(bot, tid: int, place: str | None, day: str, name: str, da
         log.exception("Couldn't add an uploaded photo")
         return 502, {"error": "I couldn't add that photo to the group. Check that I'm still an admin there "
                               "and that the family's topic still exists."}
+    indexed = False
     for attempt in range(3):  # the photo is already in the group: never report a failure (a retry would post it twice)
+        if not await db.families.find_one({"thread_id": tid}):
+            break  # the family was deleted while this was uploading: don't leave an orphan row
         try:
             await index_file(tid, sent.message_id, sent.document.file_id, caption, None, sent.date, "document", thumb_of(sent))
+            indexed = True
             break
         except Exception:
             log.exception("Couldn't index an uploaded photo (try %s)", attempt + 1)
             await asyncio.sleep(1)
-    return 200, {"ok": True, "id": sent.message_id}
+    return 200, {"ok": True, "id": sent.message_id, "indexed": indexed}
 
 
 async def admin_api(bot, action: str, req: dict) -> tuple[int, dict]:
@@ -3581,6 +3770,7 @@ async def _admin_api(bot, action: str, req: dict) -> tuple[int, dict]:
                 "new7": await db.photos.count_documents({"sug": {"$ne": True}, "added": {"$gte": now - timedelta(days=7)}}),
                 "sugs": len(sugs), "scheduled": await db.scheduled.count_documents({}),
                 "tries": await db.tries.count_documents({}),
+                "comments": await db.comments.count_documents({"read": {"$ne": True}, "dir": {"$ne": "out"}}),
             },
             "families": [
                 {"tid": f["thread_id"], "name": f.get("name", "?"), "code": f.get("code", ""), "photos": photos.get(f["thread_id"], 0),
@@ -3619,7 +3809,7 @@ async def _admin_api(bot, action: str, req: dict) -> tuple[int, dict]:
                 return 400, {"error": "GROUP_ID isn't set yet, so I can't delete from the group."}
             problem = await delete_photo_everywhere(bot, mid)
             return (502, {"error": problem}) if problem else (200, {"ok": True})
-        day = parse_date_answer(req["date"]) if isinstance(req.get("date"), str) else None
+        day = WebDeps.parse_date(None, req["date"]) if isinstance(req.get("date"), str) else None
         place = req.get("place")
         if day is None or not (place is None or isinstance(place, str)):
             return 400, {"error": "Please give a date like 2026-07-04 (not in the future), or unknown."}
@@ -3667,7 +3857,7 @@ async def _admin_api(bot, action: str, req: dict) -> tuple[int, dict]:
         people = await ann_recipients(aud)
         who = await ann_audience_name(aud)
         if action == "ann_preview":
-            return 200, {"count": len(people), "who": who, "tz": str(TZ)}
+            return 200, {"count": len(people), "who": who, "tz": str(TZ), "header": ann_header(aud)}
         if not people:
             return 400, {"error": "Nobody is in that audience yet."}
         if action == "ann_send":
@@ -3771,6 +3961,43 @@ async def _admin_api(bot, action: str, req: dict) -> tuple[int, dict]:
         return 200, {"ok": True, "tid": tid, "code": code, "name": name, "posted": posted,
                      "invited": bool(invited and invited[0])}
 
+    if action == "comments":  # one row per person who has written, newest first
+        docs = await db.comments.find().sort("at", -1).limit(2000).to_list()
+        seen: dict = {}
+        for r in docs:
+            c = seen.setdefault(r.get("uid"), {"uid": r.get("uid"), "name": r.get("name", ""), "family": r.get("family", "?"),
+                                               "last": r.get("text", ""), "dir": r.get("dir", "in"), "at": fmt_when(r.get("at")),
+                                               "unread": 0})
+            if r.get("dir", "in") == "in" and not r.get("read"):
+                c["unread"] += 1
+        rows = list(seen.values())[:100]
+        return 200, {"unread": sum(c["unread"] for c in rows), "rows": rows}
+
+    if action in ("thread", "chat_send", "chat_clear"):
+        uid = _int(req.get("uid"), 1)
+        if uid is None:
+            return bad
+        if action == "chat_send":
+            return await send_chat_message(bot, uid, req.get("text"))
+        if action == "chat_clear":
+            await db.comments.delete_many({"uid": uid})
+            return 200, {"ok": True}
+        docs = (await db.comments.find({"uid": uid}).sort("at", -1).limit(100).to_list())[::-1]
+        if docs:  # (only what was just fetched is marked read: a message that arrives right now stays unread)
+            await db.comments.update_many({"uid": uid, "dir": {"$ne": "out"}, "read": {"$ne": True}, "at": {"$lte": docs[-1]["at"]}}, {"$set": {"read": True}})
+        u = await db.users.find_one({"_id": uid})
+        fam = await db.families.find_one({"thread_id": (u or {}).get("thread_id")}) if u else None
+        return 200, {"name": (u or {}).get("first_name") or (docs[-1].get("name") if docs else "") or "Someone",
+                     "family": (fam or {}).get("name", "?"), "linked": bool(u and not u.get("pending")),
+                     "messages": [{"dir": d.get("dir", "in"), "text": d.get("text", ""), "at": fmt_when(d.get("at"))} for d in docs]}
+
+    if action == "people":
+        fams = {f["thread_id"]: f.get("name", "?") for f in await db.families.find().to_list()}
+        us = await db.users.find({"pending": {"$ne": True}}).sort("first_name", 1).to_list()
+        return 200, {"people": [{"id": u["_id"], "name": u.get("first_name") or "(no name)",
+                                 "family": fams.get(u.get("thread_id"), "?"), "username": u.get("username") or ""}
+                                for u in us[:500]]}
+
     if action in ("invite", "invite_send"):
         tid = _int(req.get("tid"))
         fam = await db.families.find_one({"thread_id": tid}) if tid is not None else None
@@ -3802,7 +4029,9 @@ async def _admin_api(bot, action: str, req: dict) -> tuple[int, dict]:
             uid = _int(req.get("uid"), 1)
             if uid is None:
                 return bad
-            await db.users.delete_one({"_id": uid, "thread_id": tid})
+            r = await db.users.delete_one({"_id": uid, "thread_id": tid})
+            if getattr(r, "deleted_count", 1):
+                await drop_scheduled_for([uid])
             return 200, {"ok": True}
         if action == "person_add":
             uid = _int(req.get("uid"), 10 ** 4, 10 ** 15)
@@ -3839,9 +4068,11 @@ async def _admin_api(bot, action: str, req: dict) -> tuple[int, dict]:
                     await bot.delete_forum_topic(GROUP_ID, fam["sug_thread_id"])
                 except TelegramError:
                     log.warning("Couldn't delete the suggestions topic of %s", fam["name"])
+        await drop_scheduled_for([u["_id"] for u in await db.users.find({"thread_id": tid}).to_list()])
         await db.users.delete_many({"thread_id": tid})
         await db.photos.delete_many({"thread_id": tid})
         await db.suggestions.delete_many({"thread_id": tid})
+        await db.comments.delete_many({"tid": tid})
         await db.families.delete_one({"thread_id": tid})
         await db.scheduled.delete_many({"aud": str(tid)})  # (announcements meant only for this family)
         log.info("Owner deleted family %s from the app (topic deleted: %s)", fam["name"], mode == "all")
@@ -3884,6 +4115,13 @@ class WebDeps:
         return status, data
 
     admin_actions = ADMIN_ACTIONS
+
+    @staticmethod
+    def fmt_when(dt):
+        return fmt_when(dt)
+
+    async def comment(self, uid: int, text) -> tuple[int, dict]:
+        return await save_comment(self.app.bot, uid, text)
 
     async def upload_photo(self, tid: int, place, day: str, name: str, data: bytes) -> tuple[int, dict]:
         return await admin_upload(self.app.bot, tid, place, day, name, data)
@@ -4050,6 +4288,7 @@ def main() -> None:
         app.add_handler(CommandHandler("remove", remove_cmd, filters=grp))
         app.add_handler(CommandHandler("best", best_cmd, filters=grp))
         app.add_handler(MessageHandler(grp & (filters.PHOTO | filters.Document.IMAGE), on_group_media))
+        app.add_handler(MessageHandler(grp & filters.TEXT & ~filters.COMMAND & filters.REPLY, on_comments_reply))
         app.add_handler(CallbackQueryHandler(on_remove_button, pattern=r"^rm:(y|n):\d+$"))
         app.add_handler(CallbackQueryHandler(on_suggestion_button, pattern=r"^sa:(y|o|n):[0-9a-f]{10}$"))
     else:
@@ -4077,7 +4316,7 @@ def main() -> None:
         ))
     app.add_handler(CallbackQueryHandler(on_admin_button, pattern=r"^a:"))
     app.add_handler(
-        CallbackQueryHandler(on_button, pattern=r"^(menu|all|d:\d+|l:\d+|D:\d{4}-\d{2}-\d{2}|L:[0-9a-f]{10}|L:none|x:\d+|bs|sg:(new|send|gal)|fm:(new|x|ok))$")
+        CallbackQueryHandler(on_button, pattern=r"^(menu|all|d:\d+|l:\d+|D:\d{4}-\d{2}-\d{2}|L:[0-9a-f]{10}|L:none|x:\d+|bs|sg:(new|send|gal)|fm:(new|x|ok)|cm:new)$")
     )
     app.add_error_handler(on_error)
 
