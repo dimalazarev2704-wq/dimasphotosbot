@@ -36,7 +36,7 @@ h2{font-size:1.15em;margin:18px 0 2px}
 .cta{display:block;width:100%;min-height:56px;margin:16px 0 0;border:0;border-radius:16px;background:var(--btn);color:var(--btntext);font:inherit;font-weight:700}
 .cta.alt{background:var(--sec);color:var(--text)}
 .cta[disabled]{opacity:.5}
-.msg{padding:14px 16px;border-radius:14px;background:var(--sec);margin:12px 0;white-space:pre-wrap}
+.msg{overflow-wrap:anywhere;padding:14px 16px;border-radius:14px;background:var(--sec);margin:12px 0;white-space:pre-wrap}
 .err{background:#e5393522}
 .msg .cta.alt{background:var(--bg)}
 .foot{margin-top:26px;text-align:center;color:var(--hint);font-size:.7em}
@@ -70,11 +70,12 @@ textarea{min-height:140px}
 .banner{display:flex;align-items:center;gap:8px;background:var(--btn);color:var(--btntext);border-radius:12px;padding:8px 12px;margin-bottom:8px;font-size:.85em}
 .banner button{margin-left:auto;border:0;background:#fff3;color:inherit;border-radius:10px;padding:6px 12px;font:inherit}
 .chat{display:flex;flex-direction:column;gap:8px;margin:10px 0}
-.bubble{max-width:85%;padding:10px 14px;border-radius:16px;background:#f1f2f4;color:#111}
+.bubble{overflow-wrap:anywhere;max-width:85%;padding:10px 14px;border-radius:16px;background:#f1f2f4;color:#111}
 .bubble.me{align-self:flex-end;background:#2481cc;color:#fff}
 .bubble.me .hint{color:#dbeafe}
+.tiny{background:none;border:0;padding:0 0 0 10px;font-size:1em;min-height:0;width:auto;color:inherit}
 .cta.danger,.danger{background:#e53935;color:#fff}
-.card{padding:12px;border-radius:16px;background:var(--sec);margin:0 0 12px}
+.card{overflow-wrap:anywhere;padding:12px;border-radius:16px;background:var(--sec);margin:0 0 12px}
 .card .grid{margin-top:8px}
 .card .btns{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
 .card .btns button,.small{flex:1 1 40%;min-height:46px;border:0;border-radius:12px;background:var(--btn);color:var(--btntext);font:inherit;font-size:.85em;font-weight:600;padding:6px 10px}
@@ -158,6 +159,7 @@ function confirmAsk(text) {
   confirmOpen = true;
   return new Promise(res => {
     const done = ok => { confirmOpen = false; res(!!ok); };
+    if (LANG === "ru" && !IS_ADMIN) text = ruT(text);
     try { tg.showConfirm(text, done); } catch (e) { done(window.confirm(text)); }
   });
 }
@@ -177,6 +179,7 @@ function footer() { return h("div", { class: "foot", text: HOME ? HOME.copyright
 function errorScreen(e, retry) {
   show([h("h1", { text: "Oops" }), h("div", { class: "msg err", text: e.message || String(e) }),
     retry ? h("button", { class: "cta", on: { click: retry }, text: "Try again" }) : null,
+    /reopen|expired|open the app again|open this app/i.test(e.message || "") ? h("button", { class: "cta alt", on: { click: () => { try { tg.close(); } catch (x) {} } }, text: "Close the app" }) : null,
     IS_ADMIN && adminFam != null ? h("button", { class: "cta alt", on: { click: leaveFamily }, text: "🛠 Back to Admin" }) : null]);
 }
 
@@ -196,6 +199,85 @@ function backBtn() { return stack.length > 1 ? h("button", { class: "back", on: 
 let size = 18;
 try { size = parseInt(localStorage.getItem("fs") || "18", 10) || 18; } catch (e) {}
 function applySize() { document.documentElement.style.setProperty("--fs", size + "px"); try { localStorage.setItem("fs", String(size)); } catch (e) {} }
+// ---------- Russian (clients only; the Admin tab stays English) ----------
+let LANG = "en";
+const RU_EXACT = {
+  "Home": "Главная", "Dates": "Даты", "Places": "Места", "All": "Все", "Best": "Лучшие", "Suggested": "Предложено",
+  "Loading…": "Загрузка…", "‹ Back": "‹ Назад", "Cancel": "Отмена", "Save": "Сохранить", "Send": "Отправить",
+  "Sending…": "Отправка…", "Help": "Помощь", "Oops": "Ой", "Try again": "Повторить", "Close": "Закрыть", "✖ Close": "✖ Закрыть",
+  "A+": "A+", "A−": "A−", "Bigger text": "Крупнее текст", "Smaller text": "Мельче текст",
+  "Hi! 👋": "Привет! 👋", "✨ New photos": "✨ Новые фото", "See all new photos": "Все новые фото", "See all photos": "Все фото",
+  "No photos yet. Check back soon!": "Фото пока нет. Загляните позже!", "No photos here yet.": "Здесь пока нет фото.",
+  "Show more photos": "Показать ещё фото", "No messages yet.": "Сообщений пока нет.",
+  "📝 Send feedback": "📝 Отправить отзыв", "Send feedback": "Отправить отзыв", "📝 Feedback": "📝 Отзыв", "Your feedback": "Ваш отзыв",
+  "🖼 All photos": "🖼 Все фото", "⭐ Best shots": "⭐ Лучшие кадры", "⭐ In Best shots": "⭐ В лучших кадрах",
+  "💡 Suggested by your family": "💡 Предложено вашей семьёй", "📅 Pick a date": "📅 Выберите дату", "📍 Pick a place": "📍 Выберите место",
+  "🔄 Check for new messages": "🔄 Проверить новые сообщения", "🗑 Delete this chat": "🗑 Удалить этот чат", "🗑 Delete": "🗑 Удалить",
+  "Delete this message": "Удалить это сообщение", "Delete this message?": "Удалить это сообщение?", "Delete this feedback?": "Удалить этот отзыв?",
+  "Write a message…": "Напишите сообщение…",
+  "What do you think of the photos or the app? Anything we can do better?": "Что вы думаете о фото и приложении? Что можно улучшить?", "Open the chat": "Открыть чат", "I don't know the date": "Я не знаю дату",
+  "Couldn't load. Tap to try again": "Не удалось загрузить. Нажмите, чтобы повторить",
+  "No connection, or the server is still waking up. Please wait a moment and try again.": "Нет соединения или сервер ещё просыпается. Подождите немного и повторите.",
+  "Something went wrong. Please try again.": "Что-то пошло не так. Попробуйте ещё раз.",
+  "Open from Telegram": "Откройте из Telegram",
+  "Please open this app from the bot in Telegram, using the “📱 Open the photo app” button.": "Откройте приложение из бота в Telegram кнопкой «📱 Открыть приложение с фото».",
+  "✅ Sent to your chat": "✅ Отправлено в ваш чат", "⚠️ Please type your message.": "⚠️ Пожалуйста, введите сообщение.",
+  "⚠️ Please type your feedback.": "⚠️ Пожалуйста, введите отзыв.",
+  "📥 Send me the photo in chat": "📥 Отправить фото мне в чат",
+  "Delete this photo from the group and the family's list? This can't be undone.": "Удалить это фото из группы и списка семьи? Это нельзя отменить.",
+  "🌐 Русский / English": "🌐 Русский / English",
+  "In this app: use the buttons at the bottom to pick Dates, Places or All photos. Tap a photo to see it full screen. Swipe left or right for the next one, pinch (or double tap) to zoom. “Send me the photo in chat” puts the full-quality photo in your chat with me.":
+    "В приложении: кнопки внизу — Даты, Места или Все фото. Нажмите на фото, чтобы открыть его на весь экран. Листайте влево и вправо, масштабируйте щипком (или двойным нажатием). «Отправить фото мне в чат» присылает фото в полном качестве.",
+  "✅ Thank you! Your feedback was sent.": "✅ Спасибо! Ваш отзыв отправлен.",
+};
+const RU_RULES = [
+  [/^Hi (.+)! 👋$/, "Привет, $1! 👋"],
+  [/^The (.+) family's photos$/, "Фото семьи $1"],
+  [/^(\d+) photos?$/, (m, n) => n + " " + ruPlural(+n, "фото", "фото", "фото")],
+  [/^No photos here yet\. (.+) will add them soon!$/, "Здесь пока нет фото. $1 скоро добавит их!"],
+  [/^💬 Chat with (.+)$/, "💬 Чат: $1"],
+  [/^Write a comment, a question or a request\. (.+) will answer here and in the bot chat\.$/, "Напишите комментарий, вопрос или просьбу. $1 ответит здесь и в чате с ботом."],
+  [/^Tell (.+) what you think\. It's read by (.+) directly\.$/, "Расскажите $1, что вы думаете. Отзыв читает $2 лично."],
+  [/^Delete your whole chat with (.+)\? Your messages and the answers are removed\.$/, "Удалить весь ваш чат с $1? Ваши сообщения и ответы будут удалены."],
+  [/^Photos your family shared and (.+) approved\. To share your own, open the chat and tap “➕ Suggest photos”\.$/, "Фото, которыми поделилась ваша семья и которые одобрил $1. Чтобы поделиться своими, откройте чат и нажмите «➕ Предложить фото»."],
+  [/^Added by (.+)$/, "Добавил(а): $1"],
+  [/^Photo (\d+)$/, "Фото $1"],
+  [/^\((\d+) of (\d+)\)$/, "($1 из $2)"],
+  [/^That's too long \((\d+) characters\)\. Please keep it under (\d+)\.$/, "Слишком длинно ($1 симв.). Пожалуйста, не больше $2."],
+  [/^✅ Sent to (.+)\. Thank you!$/, "✅ Отправлено: $1. Спасибо!"],
+  [/^✅ Thank you! Your feedback was sent to (.+)\.$/, "✅ Спасибо! Ваш отзыв отправлен: $1."],
+  [/^You've sent a lot of (messages|feedback) just now\. Please try again in a little while\.$/, "Вы отправили слишком много сообщений. Попробуйте чуть позже."],
+];
+function ruPlural(n, one, few, many) {  // (Russian plural forms; "фото" doesn't change, but kept general)
+  const a = n % 10, b = n % 100;
+  return a === 1 && b !== 11 ? one : (a >= 2 && a <= 4 && (b < 10 || b >= 20) ? few : many);
+}
+const ugc = n => !!(n && (n.nodeType === 3 ? n.parentElement : n) && (n.nodeType === 3 ? n.parentElement : n).closest("[data-ugc]"));  // (text people wrote is never translated)
+function ruT(s) {
+  if (typeof s !== "string" || !s.trim()) return s;
+  const cy = (s.match(/[А-Яа-яЁё]/g) || []).length, la = (s.match(/[A-Za-z]/g) || []).length;
+  if (cy && cy >= la) return s;  // (already Russian; a Russian name inside an English sentence still gets the sentence translated)
+  const lead = s.match(/^\s*/)[0], tail = s.match(/\s*$/)[0], core = s.trim();
+  let out = RU_EXACT[core];
+  if (out === undefined) for (const [rx, to] of RU_RULES) { if (rx.test(core)) { out = core.replace(rx, to); break; } }
+  return out === undefined ? s : lead + out + tail;
+}
+function ruWalk(root) {
+  if (!root || LANG !== "ru" || IS_ADMIN) return;
+  const w = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  let n; while ((n = w.nextNode())) { if (ugc(n)) continue; const t = ruT(n.nodeValue); if (t !== n.nodeValue) n.nodeValue = t; }
+  if (root.querySelectorAll) for (const el of [root, ...root.querySelectorAll("[placeholder],[aria-label],[title]")])
+    if (el.getAttribute)
+    for (const at of ["placeholder", "aria-label", "title"]) { const v = el.getAttribute(at); if (v) { const t = ruT(v); if (t !== v) el.setAttribute(at, t); } }
+}
+new MutationObserver(ms => {
+  if (LANG !== "ru" || IS_ADMIN) return;
+  for (const m of ms) {
+    if (m.type === "characterData") { if (ugc(m.target)) continue; const t = ruT(m.target.nodeValue); if (t !== m.target.nodeValue) m.target.nodeValue = t; }
+    else for (const nd of m.addedNodes) ruWalk(nd.nodeType === 3 ? nd.parentNode : nd);
+  }
+}).observe(document.body, { childList: true, subtree: true, characterData: true });
+const _confirmRu = s => ruT(s);
 applySize();
 
 function drawTabs() {
@@ -223,10 +305,13 @@ async function homeScreen() {
     HOME = got;
     homeAt = Date.now();
     IS_ADMIN = !!HOME.admin;
+    LANG = !IS_ADMIN && HOME.lang === "ru" ? "ru" : "en";
     if (IS_ADMIN && adminFam == null) { setTab("admin"); return; }
     drawTabs();
   }
   const w = HOME.welcome;
+  if (!w) { if (IS_ADMIN) { leaveFamily(); return; } show([h("div", { class: "msg", text: "Nothing to show yet." })]); return; }
+  if (LANG === "ru" && !IS_ADMIN) ruWalk(document.body);  // (the static viewer buttons too)
   const nodes = [
     banner(),
     h("div", { class: "topbar" }, h("div", { class: "sp" }),
@@ -244,13 +329,20 @@ async function homeScreen() {
       photoGrid(w.items),
       h("button", { class: "cta", on: { click: () => seeAll(w.mode) }, text: w.mode === "new" ? "See all new photos" : "See all photos" })));
   }
-  if (!IS_ADMIN) nodes.push(h("button", { class: "cta alt", text: "💬 Chat with " + (HOME.owner || "the photographer"), on: { click: () => push(commentScreen) } }));
+  if (!IS_ADMIN) nodes.push(h("button", { class: "cta alt", text: "💬 Chat with " + (HOME.owner || "the photographer"), on: { click: () => push(commentScreen) } }),
+    h("button", { class: "cta alt", text: "📝 Send feedback", on: { click: () => push(feedbackScreen) } }),
+    h("button", { class: "cta alt", text: "🌐 Русский / English", on: { click: () => oneAtATime(async () => {
+      try { const r = await api("/api/lang", { lang: LANG === "ru" ? "en" : "ru" }); LANG = r.lang; } catch (e) { return; }
+      HOME = null; setTab("home");
+    }) } }));
   nodes.push(footer());
   show(nodes);
 }
-function bubbles(list, mine) {  // mine = the direction that is "me" (shown on the right)
+function bubbles(list, mine, canDelete, onDelete) {  // mine = the direction that is "me" (shown on the right)
   return list.length ? list.map(m => h("div", { class: "bubble " + (m.dir === mine ? "me" : "them") },
-    h("div", { style: "white-space:pre-wrap", text: m.text }), h("div", { class: "hint", text: m.at })))
+    h("div", { style: "white-space:pre-wrap", "data-ugc": "1", text: m.text }),
+    m.orig ? h("div", { class: "hint", style: "white-space:pre-wrap", text: "🌐 " + m.orig }) : null,
+    h("div", { class: "hint" }, m.at, canDelete(m) ? h("button", { class: "tiny", "aria-label": "Delete this message", text: "🗑", on: { click: () => onDelete(m) } }) : null)))
     : h("div", { class: "msg", text: "No messages yet." });
 }
 async function commentScreen() {
@@ -267,9 +359,42 @@ async function commentScreen() {
   }) } });
   show([backBtn(), h("h1", { text: "💬 Chat with " + who }),
     h("div", { class: "hint", text: "Write a comment, a question or a request. " + who + " will answer here and in the bot chat." }),
-    h("div", { class: "chat" }, bubbles(d.messages, "in")), ta, msg, btn,
-    h("button", { class: "cta alt", text: "🔄 Check for new messages", on: { click: () => commentScreen() } }), footer()]);
+    h("div", { class: "chat" }, bubbles(d.messages, "in", m => m.dir === "in", m => oneAtATime(async () => {
+      if (!await confirmAsk("Delete this message?")) return;
+      try { await api("/api/chat_delete", { id: m.id }); } catch (e) { await alertMsg("⚠️ " + e.message); }
+      if (my === navId) commentScreen();
+    }))), ta, msg, btn,
+    h("button", { class: "cta alt", text: "🔄 Check for new messages", on: { click: () => commentScreen() } }),
+    d.messages.length ? h("button", { class: "cta danger", text: "🗑 Delete this chat", on: { click: () => oneAtATime(async () => {
+      if (!await confirmAsk("Delete your whole chat with " + who + "? Your messages and the answers are removed.")) return;
+      try { await api("/api/chat_clear", {}); } catch (e) { await alertMsg("⚠️ " + e.message); }
+      if (my === navId) commentScreen();
+    }) } }) : null, footer()]);
   window.scrollTo(0, document.body.scrollHeight);
+}
+async function feedbackScreen() {
+  const d = await adminLoad("/api/feedback_list", {}, feedbackScreen); if (!d) return;
+  const my = navId;
+  const ta = h("textarea", { maxlength: "1500", rows: "6", placeholder: "What do you think of the photos or the app? Anything we can do better?" });
+  const msg = h("div", { class: "hint" });
+  const btn = h("button", { class: "cta", text: "Send feedback", on: { click: () => oneAtATime(async () => {
+    const t = ta.value.trim();
+    if (!t) { msg.textContent = "⚠️ Please type your feedback."; return; }
+    btn.disabled = true; msg.textContent = "Sending…";
+    try { const r = await api("/api/feedback", { text: t }); await alertMsg(r.message); if (my === navId) feedbackScreen(); }
+    catch (e) { if (my === navId) { msg.textContent = "⚠️ " + e.message; btn.disabled = false; } }
+  }) } });
+  show([backBtn(), h("h1", { text: "📝 Feedback" }),
+    h("div", { class: "hint", text: "Tell " + (HOME.owner || "us") + " what you think. It's read by " + (HOME.owner || "the photographer") + " directly." }),
+    ta, msg, btn,
+    d.rows.length ? h("h2", { text: "Your feedback" }) : null,
+    d.rows.map(r => h("div", { class: "card" }, h("div", { style: "white-space:pre-wrap", "data-ugc": "1", text: r.text }), h("div", { class: "hint", text: r.at }),
+      h("div", { class: "btns" }, h("button", { class: "danger", text: "🗑 Delete", on: { click: () => oneAtATime(async () => {
+        if (!await confirmAsk("Delete this feedback?")) return;
+        try { await api("/api/feedback_delete", { id: r.id }); } catch (e) { await alertMsg("⚠️ " + e.message); }
+        if (my === navId) feedbackScreen();
+      }) } })))),
+    footer()]);
 }
 function seeAll(mode) {
   if (mode === "new") push(() => gridScreen("✨ New photos", { mode: "new" }));
@@ -291,7 +416,7 @@ async function listScreen(title, path, kind) {
   if (my !== navId) return;
   const rows = data.rows.map(r => h("button", { class: "row", on: { click: () => push(() => gridScreen(r.label, { mode: kind, value: r.v })) } },
     h("img", { src: r.cover, alt: "", loading: "lazy", on: { error: e => { e.target.style.visibility = "hidden"; } } }),
-    h("span", {}, h("b", { text: r.label }), h("span", { class: "hint", text: r.n + (r.n === 1 ? " photo" : " photos") }))));
+    h("span", {}, h("b", { "data-ugc": "1", text: r.label }), h("span", { class: "hint", text: r.n + (r.n === 1 ? " photo" : " photos") }))));
   show([banner(), h("h1", { text: title }), rows.length ? rows : h("div", { class: "msg", text: "No photos yet. Check back soon!" }), footer()]);
 }
 const datesScreen = () => listScreen("📅 Pick a date", "/api/dates", "date");
@@ -485,9 +610,11 @@ async function adminHome() {
     bigRow("➕", "Add a family", "", () => push(addFamilyScreen)),
     bigRow("📤", "Add photos", "", () => push(() => uploadScreen(null))),
     bigRow("💬", "Messages", s.comments, () => push(commentsScreen)),
+    bigRow("📝", "Feedback", s.feedback, () => push(feedbackAdminScreen)),
     bigRow("💡", "Suggestions inbox", s.sugs, () => push(sugsScreen)),
     bigRow("📣", "Announcements & messages", s.scheduled ? s.scheduled + " scheduled" : "", () => { if (annDraft.aud === "person") annDraft = { aud: "all", person: "", text: "" }; push(() => annScreen(d.families)); }),
     bigRow("🕵️", "Login attempts", s.tries, () => push(() => triesScreen())),
+    bigRow("👥", "Users", "", () => push(usersScreen)),
     h("h2", { text: "Families" }),
     d.families.length ? d.families.map(f => h("button", { class: "row", on: { click: () => push(() => familyScreen(f.tid)) } },
       h("span", {}, h("b", { text: f.name + " family" }),
@@ -613,13 +740,34 @@ function deleteFamilyScreen(tid, famName) {
 async function commentsScreen() {
   const d = await adminLoad("/api/admin/comments", {}, commentsScreen); if (!d) return;
   show([backBtn(), h("h1", { text: "💬 Messages" }),
-    h("div", { class: "hint", text: "Clients write to you from the bot or the app. You can also reply to a message in the group's Comments topic." }),
+    h("div", { class: "hint", text: "Clients write to you from the bot or the app. You can also reply to a message in the group's Messages topic." }),
     d.rows.length ? d.rows.map(r => h("button", { class: "row", on: { click: () => push(() => threadScreen(r.uid)) } },
       h("span", {}, h("b", { text: r.name + " · " + r.family + " family" }),
         r.unread ? h("span", { class: "badge", text: r.unread + " new" }) : null,
         h("span", { class: "hint", text: (r.dir === "out" ? "You: " : "") + r.last.slice(0, 80) + " · " + r.at }))))
       : h("div", { class: "msg", text: "No messages yet." }),
     h("button", { class: "cta alt", text: "✉️ Write to someone", on: { click: () => { annDraft = { aud: "person", person: "", text: "" }; push(() => annScreen()); } } }),
+    footer()]);
+}
+async function feedbackAdminScreen() {
+  const d = await adminLoad("/api/admin/feedback", {}, feedbackAdminScreen); if (!d) return;
+  const my = navId;
+  const act = (name, body, ask) => oneAtATime(async () => {
+    if (ask && !await confirmAsk(ask)) return;
+    try { await api("/api/admin/" + name, body); } catch (e) { await alertMsg("⚠️ " + e.message); }
+    if (my === navId) feedbackAdminScreen();
+  });
+  show([backBtn(), h("h1", { text: "📝 Feedback" }),
+    d.unread ? h("button", { class: "cta alt", text: "✅ Mark all as read (" + d.unread + ")", on: { click: () => act("feedback_read", { id: "all" }) } }) : null,
+    d.rows.length ? d.rows.map(r => h("div", { class: "card" },
+      h("b", { text: (r.read ? "" : "🔵 ") + r.name + " · " + r.family + " family" }),
+      h("div", { class: "hint", text: r.at }),
+      h("div", { style: "white-space:pre-wrap;margin-top:6px", text: r.text }), r.orig ? h("div", { class: "hint", style: "white-space:pre-wrap", text: "🌐 " + r.orig }) : null,
+      h("div", { class: "btns" },
+        h("button", { text: "💬 Reply", on: { click: () => { api("/api/admin/feedback_read", { id: r.id, read: true }).catch(() => {}); push(() => threadScreen(r.uid)); } } }),
+        h("button", { class: "alt", text: r.read ? "Mark unread" : "Mark read", on: { click: () => act("feedback_read", { id: r.id, read: !r.read }) } }),
+        h("button", { class: "danger", text: "🗑", on: { click: () => act("feedback_delete", { id: r.id }, "Delete this feedback?") } }))))
+      : h("div", { class: "msg", text: "No feedback yet." }),
     footer()]);
 }
 async function threadScreen(uid) {
@@ -636,7 +784,11 @@ async function threadScreen(uid) {
   }) } });
   if (!d.linked) { ta.disabled = true; btn.disabled = true; }
   show([backBtn(), h("h1", { text: d.name + " · " + d.family + " family" }),
-    h("div", { class: "chat" }, bubbles(d.messages, "out")), ta, msg, btn,
+    h("div", { class: "chat" }, bubbles(d.messages, "out", () => true, m => oneAtATime(async () => {
+      if (!await confirmAsk("Delete this message?")) return;
+      try { await api("/api/admin/chat_msg_delete", { uid, id: m.id }); } catch (e) { await alertMsg("⚠️ " + e.message); }
+      if (my === navId) threadScreen(uid);
+    }))), ta, msg, btn,
     h("button", { class: "cta alt", text: "🔄 Refresh", on: { click: () => threadScreen(uid) } }),
     h("button", { class: "cta danger", text: "🗑 Delete this conversation", on: { click: () => oneAtATime(async () => {
       if (!await confirmAsk("Delete the whole conversation with " + d.name + "?")) return;
@@ -674,6 +826,7 @@ async function sugsScreen() {
 }
 function alertMsg(text) {
   text = String(text).slice(0, 250);  // (Telegram's popup refuses long text)
+  if (LANG === "ru" && !IS_ADMIN) text = ruT(text);
   return new Promise(res => { try { tg.showAlert(text, () => res()); } catch (e) { window.alert(text); res(); } });
 }
 
@@ -769,8 +922,8 @@ async function scheduledScreen() {
   const my = navId;
   show([backBtn(), h("h1", { text: "🕒 Scheduled" }),
     d.rows.length ? d.rows.map(r => h("div", { class: "card" },
-      h("b", { text: r.label }), h("div", { class: "hint", text: "To " + r.who }),
-      h("div", { style: "white-space:pre-wrap;margin-top:6px", text: r.text }),
+      h("b", { "data-ugc": "1", text: r.label }), h("div", { class: "hint", text: "To " + r.who }),
+      h("div", { style: "white-space:pre-wrap;margin-top:6px", text: r.text }), r.orig ? h("div", { class: "hint", style: "white-space:pre-wrap", text: "🌐 " + r.orig }) : null,
       h("div", { class: "btns" }, h("button", { class: "danger", text: "🗑 Cancel this one", on: { click: () => oneAtATime(async () => {
         if (!await confirmAsk("Cancel this scheduled announcement?")) return;
         try { await api("/api/admin/sched_cancel", { id: r.id }); } catch (e) { await alertMsg("⚠️ " + e.message); }
@@ -781,6 +934,16 @@ async function scheduledScreen() {
 }
 
 // login attempts
+async function usersScreen() {
+  const d = await adminLoad("/api/admin/users", {}, usersScreen); if (!d) return;
+  show([backBtn(), h("h1", { text: "👥 Users" }),
+    h("div", { class: "hint", text: d.total + " in total" + (d.shown < d.total ? " (showing the newest " + d.shown + ")" : "") + " · " + d.inFamily + " in a family · " + (d.total - d.inFamily) + " not yet" }),
+    d.rows.length ? d.rows.map(p => h("div", { class: "card" },
+      h("b", { text: p.name || "(no name)" }), p.username ? " @" + p.username : "",
+      h("div", { class: "hint", text: p.status }),
+      h("div", { class: "hint", text: "ID " + p.id + (p.at ? " · started " + p.at : "") })))
+      : h("div", { class: "msg", text: "Nobody has started the bot yet." })]);
+}
 async function triesScreen() {
   const d = await adminLoad("/api/admin/tries", {}, triesScreen);
   if (!d) return;
@@ -923,7 +1086,8 @@ function drawUpload(pre, families) {
 }
 
 document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "visible" && HOME && !viewerOpen() && Date.now() - homeAt > 3600 * 1000) { HOME = null; setTab("home"); }
+  const typing = [...document.querySelectorAll("textarea,input")].some(x => x.value);  // (never wipe something half-written)
+  if (document.visibilityState === "visible" && HOME && !viewerOpen() && !typing && stack.length <= 1 && Date.now() - homeAt > 3600 * 1000) { HOME = null; setTab("home"); }
 });
 setTab("home");
 </script>
