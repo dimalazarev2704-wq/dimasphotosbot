@@ -201,6 +201,7 @@ class WebApp:
         self.url_secret = hmac.new(deps.token.encode(), b"photo-urls", hashlib.sha256).digest()
         self.cache = Cache(CACHE_BYTES)
         self.dl_gate = asyncio.Semaphore(4)
+        self.big_gate = asyncio.Semaphore(2)
         self.cpu_gate = asyncio.Semaphore(1)  # (one CPU: more at once only slows the bot down)
         self.inflight: dict = {}
         self.uploads: dict = {}  # upload key -> the running/finished upload, so a repeated tap can't post a photo twice
@@ -349,8 +350,8 @@ class WebApp:
 
     def card(self, doc: dict, uid: int) -> dict:
         return {
-            "id": doc["message_id"], "k": doc.get("kind", "document"), "d": doc["date"],
-            "dt": self.pd(doc["date"]), "loc": doc.get("location") or "",
+            "id": doc["message_id"], "k": doc.get("kind", "document"), "d": doc.get("date") or "",
+            "dt": self.pd(doc.get("date") or ""), "loc": doc.get("location") or "",
             "by": doc.get("by") or "", "best": bool(doc.get("best")),
             "t": self.photo_url(doc["message_id"], "thumb", uid),
             "f": self.photo_url(doc["message_id"], "full", uid),
@@ -432,8 +433,34 @@ class WebApp:
             if owner:
                 return err(403, "This is for clients.")
             docs = (await db.comments.find({"uid": uid}).sort("at", -1).limit(50).to_list())[::-1]
-            return jresp({"messages": [{"dir": d.get("dir", "in"), "text": d.get("text", ""), "at": self.d.fmt_when(d.get("at"))}
-                                       for d in docs]})
+            lang = await self.d.get_lang(uid)
+            msgs = []
+            for d in docs:
+                t, orig = d.get("text", ""), None
+                if d.get("dir") == "out":  # (the photographer's words, in the reader's language)
+                    t, orig = await self.d.for_reader(t, lang)
+                msgs.append({"id": d["_id"], "dir": d.get("dir", "in"), "text": t, "at": self.d.fmt_when(d.get("at")),
+                             **({"orig": orig} if orig else {})})
+            return jresp({"messages": msgs})
+
+        if path in ("/api/chat_delete", "/api/chat_clear", "/api/feedback", "/api/feedback_list", "/api/feedback_delete"):
+            if owner:
+                return err(403, "This is for clients.")
+            if path == "/api/chat_delete":
+                return jresp({"deleted": await self.d.chat_delete(uid, req.get("id"))})
+            if path == "/api/chat_clear":
+                return jresp({"deleted": await self.d.chat_clear(uid)})
+            if path == "/api/feedback_list":
+                return jresp({"rows": await self.d.feedback_list(uid)})
+            if path == "/api/feedback_delete":
+                return jresp({"deleted": await self.d.feedback_delete(uid, req.get("id"))})
+            status, data = await self.d.feedback(uid, req.get("text"))
+            return jresp(data, status) if status == 200 else err(status, data["message"])
+
+        if path == "/api/lang":
+            if owner:
+                return err(403, "This is for clients.")
+            return jresp({"lang": await self.d.set_lang(uid, req.get("lang"))})
 
         if path == "/api/comment":
             if owner:
@@ -454,9 +481,11 @@ class WebApp:
                 "first": user.get("first_name") or "",
                 "best": await self.d.has_best(tid),
                 "admin": owner,
-                "help": self.d.help_text(),
+                "help": (await self.d.for_reader(self.d.help_text(), "ru"))[0] if (not owner and await self.d.get_lang(uid) == "ru") else self.d.help_text(),
                 "copyright": self.d.copyright,
                 "owner": self.d.owner_name,
+                "maint": None if owner else await self.d.maint_for(uid),
+                "lang": "ru" if owner is False and await self.d.get_lang(uid) == "ru" else "en",
                 "welcome": await self.welcome(uid, tid),
             })
 
@@ -564,7 +593,7 @@ class WebApp:
         item = await self.d.suggestion_item(sid, i)
         if not item or not isinstance(item.get("file_id"), str):
             return err(404, "Not found")
-        doc = {"message_id": f"sug{sid}{i}", "file_id": item["file_id"], "kind": item.get("kind", "photo"),
+        doc = {"message_id": f"sug:{sid}:{i}", "file_id": item["file_id"], "kind": item.get("kind", "photo"),
                "thumb": item.get("thumb")}
         hit = self.cache.get((doc["message_id"], size))
         good = True
@@ -639,28 +668,29 @@ class WebApp:
             small = await self.small_preview(doc) if size == "full" else None
             return (*small, False) if small else None
 
-        raw = await self.download(doc["file_id"])
-        if raw is None:
-            return await stand_in()
-        if size == "full" and doc.get("kind") == "photo" and sniff(raw) == "image/jpeg":
-            res = ("image/jpeg", raw)  # a normal Telegram photo is already screen-sized
+        async with self.big_gate:  # (at most 2 big files in memory at once: the host has 512 MB)
+            raw = await self.download(doc["file_id"])
+            if raw is None:
+                return await stand_in()
+            if size == "full" and doc.get("kind") == "photo" and sniff(raw) == "image/jpeg":
+                res = ("image/jpeg", raw)  # a normal Telegram photo is already screen-sized
+                self.cache.put((mid, size), res)
+                return (*res, True)
+            side, quality = (THUMB_SIDE, 72) if size == "thumb" else (FULL_SIDE, 84)
+            try:
+                async with self.cpu_gate:
+                    data = await asyncio.to_thread(resize, raw, side, quality)
+                res = ("image/jpeg", data)
+            except ImportError:
+                ct = sniff(raw)
+                if ct == "application/octet-stream" or (size == "thumb" and len(raw) > 3_000_000):
+                    return await stand_in()
+                res = (ct, raw)
+            except Exception as e:  # e.g. HEIC, which this server can't decode
+                log.warning("Couldn't decode photo %s: %s", mid, e)
+                return await stand_in()
             self.cache.put((mid, size), res)
             return (*res, True)
-        side, quality = (THUMB_SIDE, 72) if size == "thumb" else (FULL_SIDE, 84)
-        try:
-            async with self.cpu_gate:
-                data = await asyncio.to_thread(resize, raw, side, quality)
-            res = ("image/jpeg", data)
-        except ImportError:
-            ct = sniff(raw)
-            if ct == "application/octet-stream" or (size == "thumb" and len(raw) > 3_000_000):
-                return await stand_in()
-            res = (ct, raw)
-        except Exception as e:  # e.g. HEIC, which this server can't decode
-            log.warning("Couldn't decode photo %s: %s", mid, e)
-            return await stand_in()
-        self.cache.put((mid, size), res)
-        return (*res, True)
 
     async def made_once(self, doc: dict, size: str):
         """Many people (or one fast swipe) asking for the same picture share ONE download and resize."""
