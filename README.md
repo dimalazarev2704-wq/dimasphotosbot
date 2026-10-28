@@ -273,9 +273,36 @@ Admin → **Add photos** (also on each family's page). Pick the family, a place 
 Admin → **Add a family** (makes the topic and code), and on each family's page: members with **Unlink**, **Add a person by Telegram ID**, **Make a new code**, **Clear best shots**, and **Delete this family** (keep the topic and files, or delete the topic with all its files). These do the same as the chat's /admin panel.
 
 ### Chatting with clients
-Clients tap **💬 Message or comment to Dima** (chat menu, **💬 Reply to Dima** under every announcement or message, or **💬 Chat with Dima** on the app's Home screen). Each message is saved and posted in a **💬 Comments** topic in the group (made automatically the first time). You can answer in three ways:
-- **In the group:** reply to their message in the Comments topic. Your answer goes straight to them.
+Clients tap **💬 Message or comment to Dima** (chat menu, **💬 Reply to Dima** under every announcement or message, or **💬 Chat with Dima** on the app's Home screen). Each message is saved and posted in a **💬 Messages** topic in the group (made automatically the first time). You can answer in three ways:
+- **In the group:** reply to their message in the Messages topic. Your answer goes straight to them.
 - **In the app:** Admin → **Messages** shows every conversation with an unread count. Open one, read it, and write back.
 - **To anyone, any time:** **✉️ Write to someone** in the Messages list, or **✉️ Message** on a member's card.
 
 For 3 days after you write to someone, whatever they type in the bot chat comes to you, so they can just answer you. Clients can send 10 messages an hour (up to 1000 characters each). Conversations older than 180 days are cleared automatically.
+
+### Feedback and deleting
+- **Feedback:** clients tap **📝 Send feedback** (chat menu, or the app's Home screen). It is posted in a **⭐ Feedback** topic in the group (made automatically) and listed in the app's Admin tab → **Feedback**, and in `/admin` → **Feedback** in the bot. Reply to it in the topic, or tap **Reply** to start a chat with that person. Clients can send 5 an hour, up to 1500 characters.
+- **Deleting (clients):** their own chat messages, their whole chat (**🗑 Delete this chat**, in the app or the bot), and their own feedback (**🗂 My feedback** in the bot, **🗑 Delete** in the app). They can't delete your messages one by one, but clearing the chat removes everything.
+- **Deleting (you):** single messages (🗑 on a bubble in the app, or a button in the bot), a whole chat, or a piece of feedback. Telegram copies in the group and in the client's chat are removed too, where Telegram allows it (within 48 hours).
+- **Chats inside the bot:** `/admin` → **💬 Messages** lists conversations (with unread counts), opens one, lets you **✍️ Reply**, delete a message, or delete the chat.
+- Unlinking a person or deleting a family also deletes their chat and feedback.
+
+## Russian / English (translation)
+
+Clients can tap **🌐 Русский / English** (bot menu, or the app's Home tab). After that:
+
+- The bot's menus, buttons and the app are shown in Russian for them (the Admin tab stays English).
+- Their Russian messages and feedback reach you in English (the original is shown below it).
+- Your messages and announcements reach Russian-speaking clients in Russian, with the original underneath.
+
+**Setup (free):** make an account at console.groq.com, create an API key, and add it on Render as the environment
+variable `GROQ_API_KEY`. Optional: `GROQ_MODEL` (default `llama-3.3-70b-versatile`; change it if Groq retires that name).
+Without a key everything still works; messages just aren't translated.
+
+**Files:** upload the new `i18n.py` (lowercase) next to `bot.py`, together with the updated `bot.py`, `webapp.py`, `app.html`.
+
+## Users list
+
+**/admin → 👥 Users** (and the app's Admin tab → Users) lists everyone who started the bot, newest first, with where they stand:
+in a family, added by a relative but not confirmed yet, asked for a new family, tried to log in with wrong details, or just started the bot.
+People who pressed Start before this update appear once they are in a family or try to log in; everyone else shows up the next time they press Start.
