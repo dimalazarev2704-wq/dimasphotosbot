@@ -495,6 +495,9 @@ async def register(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if await db.meta.find_one({"_id": {"$in": ["comments", "feedback"]}, "thread_id": thread_id}):
         await msg.reply_text("This is the 💬 Messages topic, so it can't be a family. Use the family's own topic.")
         return
+    if await db.meta.find_one({"_id": {"$in": ["line", "review"]}, "thread_id": thread_id}):
+        await msg.reply_text("This is one of the upload-review topics, so it can't be a family. Use the family's own topic.")
+        return
     if await db.meta.find_one({"_id": "addfam", "thread_id": thread_id}):
         await msg.reply_text("This is the ➕ Add families topic, so it can't be a family. Use the family's own topic.")
         return
@@ -683,6 +686,9 @@ async def on_group_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return  # the ➕ Add families topic is never a family
     if await db.meta.find_one({"_id": {"$in": ["comments", "feedback"]}, "thread_id": msg.message_thread_id}):
         return  # neither are the 💬 Messages and ⭐ Feedback topics
+    if await db.meta.find_one({"_id": {"$in": ["line", "review"]}, "thread_id": msg.message_thread_id}):
+        await line_media(update, context)  # (the 📤 Upload line / 📋 Photos on review topics: only for replacing a photo)
+        return
     await index_file(
         msg.message_thread_id, msg.message_id, file_id, msg.caption, msg.media_group_id, msg.date, kind,
         thumb_of(msg), video_extra(msg) if kind == "video" else None,
@@ -2067,6 +2073,8 @@ async def submit_suggestion(context: ContextTypes.DEFAULT_TYPE, user, user_doc, 
         return "Your family was changed, so please start the suggestion again."
     name = sug_name(user_doc, user)
     sid = secrets.token_hex(5)
+    if user_doc and user_doc.get("upline"):  # someone the owner put on the upload line: it goes there, not to Suggestions
+        return await submit_to_line(context.bot, user, fam, name, sid, sug)
     board: list[int] = []
     sug_tid = None
     for attempt in (1, 2):
@@ -2166,7 +2174,7 @@ async def process_suggestion(bot, sid: str, action: str, edit) -> None:
 
 async def _process_suggestion(bot, sid: str, action: str, edit) -> None:
     doc = await db.suggestions.find_one({"_id": sid})
-    if not doc or doc.get("status") != "pending":
+    if not doc or doc.get("status") not in ("pending", "line", "review"):
         await edit("This suggestion was already handled.")
         return
     name = doc["from_name"]
@@ -2261,6 +2269,364 @@ async def _process_suggestion(bot, sid: str, action: str, edit) -> None:
         + "."
     )
     await tell_client("🎉 Your suggested photos were added to the gallery. Thank you!")
+
+
+# ---------- the upload line (people the owner trusts to send lots of photos) ----------
+
+LINE_TITLES = {"line": "📤 Upload line", "review": "📋 Photos on review"}
+LINE_STATUSES = ["line", "review"]
+LINE_LOCK = asyncio.Lock()
+LINE_HELP = ("\n\nReply /go to publish · /hold to park it in Photos on review · /del to a photo to drop it · "
+             "send a new photo as a reply to a photo to replace it.")
+
+
+async def line_topic(bot, key: str, force_new: bool = False) -> int:
+    """One of the two owner topics ("line" or "review"), made the first time it's needed."""
+    async with LINE_LOCK:
+        meta = await db.meta.find_one({"_id": key})
+        if meta and meta.get("thread_id") and not force_new:
+            return meta["thread_id"]
+        topic = await bot.create_forum_topic(GROUP_ID, LINE_TITLES[key])
+        await db.meta.update_one({"_id": key}, {"$set": {"thread_id": topic.message_thread_id}}, upsert=True)
+        return topic.message_thread_id
+
+
+def line_buttons(sid: str, review: bool = False) -> InlineKeyboardMarkup:
+    row = [InlineKeyboardButton("✅ Go", callback_data=f"ln:go:{sid}")]
+    if not review:
+        row.append(InlineKeyboardButton("⏸ Hold", callback_data=f"ln:hold:{sid}"))
+    row.append(InlineKeyboardButton("❌ Reject", callback_data=f"ln:rej:{sid}"))
+    return InlineKeyboardMarkup([row])
+
+
+async def line_info(doc: dict) -> str:
+    fam = await db.families.find_one({"thread_id": doc["thread_id"]})
+    others = await db.families.find({"thread_id": {"$in": doc.get("others", [])}}).to_list()
+    kind = "Video" if all(i["kind"] == "video" for i in doc["items"]) else "Photo"
+    lines = [
+        f"{kind} batch from {doc['from_name']} ({fam['name'] if fam else '?'} family)",
+        count_line(doc["items"]),
+        f"Place: {doc.get('place') or 'unknown'}",
+        f"Date: {pretty_date(doc['date'])}",
+        ("Also for: " + ", ".join(f["name"] for f in others)) if others else "Only for their own family",
+    ]
+    if doc.get("unmatched"):
+        lines.append("Not a family last name I know: " + ", ".join(doc["unmatched"]))
+    return "\n".join(lines)
+
+
+async def post_line_batch(bot, doc: dict, key: str) -> tuple[list[int], int, int]:
+    """Posts a batch (photos, then a message with the buttons) in the line or review topic.
+    Returns (message ids of the photos, id of the buttons message, topic id). Raises on failure (nothing is left behind)."""
+    board: list[int] = []
+    for attempt in (1, 2):
+        try:
+            tid = await line_topic(bot, key, force_new=attempt == 2)
+            await post_items(bot, tid, doc["items"], board)
+            head = "⏸ On review\n" if key == "review" else "📤 Upload line\n"
+            prompt = await bot.send_message(
+                GROUP_ID, head + await line_info(doc) + LINE_HELP, message_thread_id=tid,
+                reply_markup=line_buttons(doc["_id"], key == "review"),
+            )
+            return board, prompt.message_id, tid
+        except (TimedOut, NetworkError):
+            await delete_ids(bot, board)
+            raise
+        except (TelegramError, RuntimeError) as e:
+            await delete_ids(bot, board)
+            board = []
+            if attempt == 1 and "thread" in (getattr(e, "message", "") or str(e)).lower():
+                continue  # the topic was deleted by hand: make a new one and retry once
+            raise
+    raise RuntimeError("couldn't post the batch")
+
+
+async def submit_to_line(bot, user, fam: dict, name: str, sid: str, sug: dict) -> str | None:
+    others, unmatched = list(sug.get("others", [])), list(sug.get("unmatched", []))
+    doc = {
+        "_id": sid, "status": "line", "from_id": user.id, "from_name": name, "thread_id": sug["thread_id"],
+        "others": others, "unmatched": unmatched, "place": sug.get("place"), "date": sug["date"],
+        "items": [i for ch in kind_chunks(sug["items"]) for i in ch],  # (same order as the posted messages)
+        "done": [], "created": datetime.now(timezone.utc), "edit_stage": None,
+    }
+    try:
+        board, prompt_id, tid = await post_line_batch(bot, doc, "line")
+    except (TimedOut, NetworkError):
+        log.warning("Timed out posting to the upload line")
+        return "Telegram was too slow. Please tap Send for approval again in a moment."
+    except (TelegramError, RuntimeError):
+        log.exception("Couldn't post to the upload line")
+        return "I couldn't send that to the photographer. Please try again later."
+    doc.pop("_id")
+    await db.suggestions.update_one({"_id": sid}, {"$set": {**doc, "board_ids": board, "prompt_id": prompt_id, "topic": tid}}, upsert=True)
+    if OWNER_ID:
+        try:
+            await bot.send_message(OWNER_ID, f"📤 {name} ({fam['name']} family) sent {len(doc['items'])} file(s) to the 📤 Upload line topic in the group.")
+        except TelegramError:
+            pass
+    return None
+
+
+async def line_refresh(bot, doc: dict) -> None:
+    """Updates the buttons message after the batch changed (a photo dropped or replaced, the info fixed)."""
+    doc = await db.suggestions.find_one({"_id": doc["_id"]}) or doc
+    review = doc.get("status") == "review"
+    try:
+        await bot.edit_message_text(
+            ("⏸ On review\n" if review else "📤 Upload line\n") + await line_info(doc) + LINE_HELP,
+            chat_id=GROUP_ID, message_id=doc["prompt_id"], reply_markup=line_buttons(doc["_id"], review),
+        )
+    except TelegramError:
+        pass
+
+
+async def line_doc_for(tid: int, rid: int | None) -> dict | None:
+    """The batch a reply points at (its buttons message or one of its photos); with no reply, the only batch in the topic."""
+    q = {"status": {"$in": LINE_STATUSES}, "topic": tid}
+    if rid:
+        return await db.suggestions.find_one({**q, "prompt_id": rid}) or await db.suggestions.find_one({**q, "board_ids": rid})
+    docs = await db.suggestions.find(q).to_list()
+    return docs[0] if len(docs) == 1 else None
+
+
+def line_yes_fix(sid: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Yes, publish", callback_data=f"ln:yes:{sid}"),
+        InlineKeyboardButton("✏️ No, fix it", callback_data=f"ln:fix:{sid}"),
+    ]])
+
+
+async def line_ask(bot, doc: dict) -> None:
+    """/go: shows what will be published and asks whether it is all right."""
+    await bot.send_message(
+        GROUP_ID, "✅ Is all this right?\n\n" + await line_info(doc), message_thread_id=doc["topic"],
+        reply_markup=line_yes_fix(doc["_id"]),
+    )
+
+
+async def line_publish(bot, sid: str, edit) -> None:
+    doc = await db.suggestions.find_one({"_id": sid})
+    if not doc or doc.get("status") not in LINE_STATUSES:
+        await edit("This batch was already handled.")
+        return
+    async def edit2(text: str, markup=None) -> None:  # (a half-failed publish keeps the Yes / Fix buttons, not the old Approve ones)
+        await edit(text, line_yes_fix(sid) if markup else None)
+
+    await process_suggestion(bot, sid, "y" if doc.get("others") else "o", edit2)
+    after = await db.suggestions.find_one({"_id": sid})
+    if after and after.get("status") == "approved":
+        await delete_ids(bot, [doc["prompt_id"]])
+
+
+async def line_reject(bot, sid: str, edit) -> None:
+    doc = await db.suggestions.find_one({"_id": sid})
+    await process_suggestion(bot, sid, "n", edit)
+    if doc and (await db.suggestions.find_one({"_id": sid}) or {}).get("status") == "rejected":
+        await delete_ids(bot, [doc["prompt_id"]])
+
+
+async def line_hold(bot, doc: dict) -> str:
+    """/hold: moves the batch to the 📋 Photos on review topic. Returns a short note for the owner."""
+    if doc.get("status") == "review":
+        return "It's already in Photos on review."
+    try:
+        board, prompt_id, tid = await post_line_batch(bot, {**doc, "status": "review"}, "review")
+    except (TelegramError, RuntimeError):
+        log.exception("Couldn't move a batch to review")
+        return "⚠️ I couldn't move it. Nothing changed."
+    old = list(doc.get("board_ids", [])) + [doc["prompt_id"]]
+    await db.suggestions.update_one(
+        {"_id": doc["_id"]},
+        {"$set": {"status": "review", "board_ids": board, "prompt_id": prompt_id, "topic": tid, "edit_stage": None}},
+    )
+    await delete_ids(bot, old)
+    return "⏸ Moved to 📋 Photos on review."
+
+
+LINE_STAGES = ["date", "place", "fams"]
+
+
+async def line_ask_stage(bot, doc: dict, stage: str) -> None:
+    """Asks the next 'is this right?' question, with a Skip button."""
+    if stage == "date":
+        text = f"📅 Date: {pretty_date(doc['date'])}\nType the right date (like 2026-07-04, today, yesterday, or unknown), or tap Skip if it's right."
+    elif stage == "place":
+        text = f"📍 Place: {doc.get('place') or 'unknown'}\nType the right place (or unknown), or tap Skip if it's right."
+    else:
+        others = await db.families.find({"thread_id": {"$in": doc.get("others", [])}}).to_list()
+        text = ("👪 Other families: " + (", ".join(f["name"] for f in others) or "none")
+                + "\nType their last names separated by commas (or no, for only their own family), or tap Skip if it's right.")
+    sent = await bot.send_message(
+        GROUP_ID, text, message_thread_id=doc["topic"],
+        reply_markup=one_button("✅ Skip, this is right", f"ln:sk:{doc['_id']}"),
+    )
+    await db.suggestions.update_one({"_id": doc["_id"]}, {"$set": {"edit_stage": stage, "edit_mid": sent.message_id}})
+
+
+async def line_advance(bot, doc: dict) -> None:
+    """Moves to the next question, or (after the last one) shows the summary again."""
+    cur = doc.get("edit_stage")
+    nxt = LINE_STAGES.index(cur) + 1 if cur in LINE_STAGES else 0
+    doc = await db.suggestions.find_one({"_id": doc["_id"]}) or doc
+    if nxt < len(LINE_STAGES):
+        await line_ask_stage(bot, doc, LINE_STAGES[nxt])
+        return
+    await db.suggestions.update_one({"_id": doc["_id"]}, {"$set": {"edit_stage": None}})
+    await line_refresh(bot, doc)
+    await line_ask(bot, doc)
+
+
+async def on_line_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    if not is_owner(q.from_user.id):
+        await q.answer("Only the photographer can do this.", show_alert=True)
+        return
+    _, action, sid = q.data.split(":")
+    if action != "hold":
+        await q.answer()  # (Hold answers once, with its result)
+    bot = context.bot
+
+    async def edit(text: str, markup=None) -> None:
+        try:
+            await q.edit_message_text(text, reply_markup=markup)
+        except TelegramError:
+            pass
+
+    doc = await db.suggestions.find_one({"_id": sid})
+    if not doc or doc.get("status") not in LINE_STATUSES:
+        if action == "hold":
+            await q.answer()
+        await edit("This batch was already handled.")
+        return
+    if action == "go":
+        await line_ask(bot, doc)
+    elif action == "yes":
+        await line_publish(bot, sid, edit)
+    elif action == "rej":
+        await line_reject(bot, sid, edit)
+    elif action == "hold":
+        await q.answer(await line_hold(bot, doc), show_alert=True)
+    elif action == "fix":
+        await edit("✏️ Okay, let's check it.")
+        await line_ask_stage(bot, doc, LINE_STAGES[0])
+    elif action == "sk":
+        if doc.get("edit_stage") not in LINE_STAGES or doc.get("edit_mid") != q.message.message_id:
+            await edit("That question is old.")
+            return
+        await edit(q.message.text + "\n✔️ Skipped.")
+        await line_advance(bot, doc)
+
+
+async def line_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/go, /hold and /del, written by the owner in the upload-line or review topic (as a reply to a batch)."""
+    msg = update.effective_message
+    if not msg or not msg.from_user or not is_owner(msg.from_user.id) or not msg.is_topic_message:
+        return
+    tid = msg.message_thread_id
+    if not await db.meta.find_one({"_id": {"$in": ["line", "review"]}, "thread_id": tid}):
+        return
+    cmd = (msg.text or "").split()[0].lstrip("/").split("@")[0].lower()
+    rep = msg.reply_to_message
+    rid = rep.message_id if rep and rep.message_id != tid else None
+    doc = await line_doc_for(tid, rid)
+    if not doc:
+        await msg.reply_text("Reply to a photo or to the buttons message of the batch you mean (or use it when only one batch is here).")
+        return
+    if cmd == "go":
+        await line_ask(context.bot, doc)
+    elif cmd == "hold":
+        await msg.reply_text(await line_hold(context.bot, doc))
+    elif cmd == "del":
+        if not rid or rid not in doc.get("board_ids", []):
+            await msg.reply_text("Reply to the photo you want to drop with /del.")
+            return
+        if doc.get("done"):
+            await msg.reply_text("This batch was already partly published, so I can't change its photos. Tap Go again to finish it.")
+            return
+        i = doc["board_ids"].index(rid)
+        items, board = list(doc["items"]), list(doc["board_ids"])
+        items.pop(i)
+        board.pop(i)
+        await delete_ids(context.bot, [rid])
+        if not items:
+            await delete_ids(context.bot, [doc["prompt_id"]])
+            await db.suggestions.update_one({"_id": doc["_id"]}, {"$set": {"status": "rejected", "items": [], "board_ids": []}})
+            await msg.reply_text("That was the last photo, so the batch is gone.")
+            try:
+                await context.bot.send_message(doc["from_id"], "Thanks for the suggestion! The photographer didn't add those photos this time.")
+            except TelegramError:
+                pass
+            return
+        await db.suggestions.update_one({"_id": doc["_id"]}, {"$set": {"items": items, "board_ids": board}})
+        await line_refresh(context.bot, doc)
+
+
+async def line_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """The owner replies to a photo with a new (edited) photo or file: it takes the old one's place in the batch."""
+    msg = update.effective_message
+    if not msg.from_user or not is_owner(msg.from_user.id) or not msg.reply_to_message:
+        return
+    doc = await db.suggestions.find_one({"status": {"$in": LINE_STATUSES}, "topic": msg.message_thread_id, "board_ids": msg.reply_to_message.message_id})
+    if not doc:
+        return
+    if doc.get("done"):
+        await msg.reply_text("This batch was already partly published, so I can't replace its photos.")
+        return
+    if msg.media_group_id and not once(context, f"linerep:{msg.media_group_id}"):
+        return  # (one answer per album: only the first file is used)
+    file_id, kind = media_of(msg, videos=True)
+    if not file_id:
+        return
+    item = {"file_id": file_id, "kind": kind, **({"thumb": thumb_of(msg)} if thumb_of(msg) else {}),
+            **((video_extra(msg) or {}) if kind == "video" else {})}
+    i = doc["board_ids"].index(msg.reply_to_message.message_id)
+    items, board = list(doc["items"]), list(doc["board_ids"])
+    items[i], board[i] = item, msg.message_id
+    await db.suggestions.update_one({"_id": doc["_id"]}, {"$set": {"items": items, "board_ids": board}})
+    await delete_ids(context.bot, [msg.reply_to_message.message_id])
+    try:
+        await msg.reply_text("🔁 Replaced. This one will be published.")
+    except TelegramError:
+        pass
+
+
+async def on_line_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """The owner types the answer to a 'fix it' question in the upload-line / review topic."""
+    msg = update.effective_message
+    if not msg or not msg.from_user or not is_owner(msg.from_user.id) or not msg.is_topic_message or not msg.text:
+        return
+    docs = await db.suggestions.find(
+        {"status": {"$in": LINE_STATUSES}, "topic": msg.message_thread_id, "edit_stage": {"$in": LINE_STAGES}}).to_list()
+    if not docs:
+        return
+    rid = msg.reply_to_message.message_id if msg.reply_to_message else None
+    doc = next((d for d in docs if rid and d.get("edit_mid") == rid), None) or max(docs, key=lambda d: d.get("edit_mid") or 0)  # (a reply picks its question, else the newest)
+    text = " ".join(msg.text.split())[:400]
+    stage, upd = doc["edit_stage"], {}
+    if stage == "date":
+        day = parse_date_answer(text)
+        if not day:
+            await msg.reply_text("I didn't get that date. Type it like 2026-07-04, or today, yesterday or unknown (or tap Skip).")
+            return
+        upd["date"] = day
+    elif stage == "place":
+        upd["place"] = None if clean_words(text) in UNKNOWN_WORDS else text[:80]
+    else:
+        others, unmatched = [], []
+        if clean_words(text) not in ("no", "none", "nope", "n", "nobody", "-"):
+            for raw in re.split(r"[,\n;]| and ", text)[:10]:
+                name = " ".join(raw.split())[:40]
+                if not normalize(name):
+                    continue
+                found = await db.families.find({"key": normalize(name)}).to_list()
+                if len(found) == 1 and found[0]["thread_id"] != doc["thread_id"]:
+                    if found[0]["thread_id"] not in others:
+                        others.append(found[0]["thread_id"])
+                elif len(found) != 1:
+                    unmatched.append(name)
+        upd.update(others=others, unmatched=unmatched)
+    await db.suggestions.update_one({"_id": doc["_id"]}, {"$set": upd})
+    await line_advance(context.bot, {**doc, **upd})
 
 
 # ---------- announcements (owner only) ----------
@@ -2588,7 +2954,9 @@ async def purge_person(bot, uid: int) -> None:
     await drop_scheduled_for([uid])
     await delete_chat(bot, uid)
     await delete_feedback(bot, uid, None)
-    await db.suggestions.update_many({"from_id": uid, "status": "pending"}, {"$set": {"status": "rejected"}})  # (nothing of theirs is approved later)
+    for _d in await db.suggestions.find({"from_id": uid, "status": {"$in": ["line", "review"]}}).to_list():
+        await delete_ids(bot, list(_d.get("board_ids", [])) + [_d["prompt_id"]] if _d.get("prompt_id") else list(_d.get("board_ids", [])))
+    await db.suggestions.update_many({"from_id": uid, "status": {"$in": ["pending", "line", "review"]}}, {"$set": {"status": "rejected"}})  # (nothing of theirs is approved later)
     await db.starters.delete_one({"_id": uid})
     RU_USERS.discard(uid)
     LANG_USERS.pop(uid, None)
@@ -4289,13 +4657,16 @@ async def members_view(tid: int):
     if not fam:
         return None
     people = await db.users.find({"thread_id": tid}).sort("first_name", 1).to_list()
-    rows = [[_btn(f"Unlink {p['first_name']}"[:60], f"a:ul:{tid}:{p['_id']}")] for p in people[:25]]
+    rows = [[_btn(f"Unlink {p['first_name']}"[:40], f"a:ul:{tid}:{p['_id']}"),
+             _btn(f"📤 Line: {'ON' if p.get('upline') else 'off'} · {p['first_name']}"[:40], f"a:ln:{tid}:{p['_id']}")]
+            for p in people[:25]]
     rows.append([_btn("⬅️ Back", f"a:f:{tid}")])
     if not people:
         text = f"No one has linked to the {fam['name']} family yet."
     else:
         lines = [
             f"• {p['first_name']} (id {p['_id']}" + (f", @{p['username']}" if p.get("username") else "") + ")"
+            + (" 📤 upload line" if p.get("upline") else "")
             + (f" — added by {p['added_by']}" if p.get("added_by") else "")
             + (" ⏳ hasn't confirmed their name yet" if p.get("pending") else "")
             for p in people[:25]
@@ -5024,6 +5395,14 @@ async def on_admin_button(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         code = await new_code()
         await db.families.update_one({"thread_id": tid}, {"$set": {"code": code}})
         await show(f"🔄 New code for the {fam['name']} family: {code}", one_button("⬅️ Back to family", f"a:f:{tid}"))
+
+    elif action == "ln":  # put a person on / take them off the upload line
+        tid, uid = int(parts[2]), int(parts[3])
+        u = await db.users.find_one({"_id": uid, "thread_id": tid})
+        if u:
+            await db.users.update_one({"_id": uid}, {"$set": {"upline": not u.get("upline")}})
+        view = await members_view(tid)
+        await show(*view) if view else await show("That family no longer exists.", one_button("⬅️ Families", "a:fl:0"))
 
     elif action == "mem":
         view = await members_view(int(parts[2]))
@@ -5935,6 +6314,9 @@ def main() -> None:
         app.add_handler(MessageHandler(grp & filters.UpdateType.MESSAGE & filters.TEXT & ~filters.COMMAND & filters.REPLY, on_comments_reply))
         app.add_handler(CallbackQueryHandler(on_remove_button, pattern=r"^rm:(y|n):\d+$"))
         app.add_handler(CallbackQueryHandler(on_suggestion_button, pattern=r"^sa:(y|o|n):[0-9a-f]{10}$"))
+        app.add_handler(CallbackQueryHandler(on_line_button, pattern=r"^ln:(go|hold|rej|yes|fix|sk):[0-9a-f]{10}$"))
+        app.add_handler(CommandHandler(["go", "hold", "del"], line_cmd, filters=grp))
+        app.add_handler(MessageHandler(grp & filters.UpdateType.MESSAGE & filters.TEXT & ~filters.COMMAND, on_line_text), group=1)
     else:
         log.warning("GROUP_ID is not set: send /id in your group, then put it in the environment.")
 

@@ -342,3 +342,14 @@ There is only **one shared copy**. Every family in the group sees it, including 
 **Leaving families out:** when you start a group upload you get a checklist of the group's families (all ticked). Untick any family that should not see these files, then tap **➡️ Continue** (the app has the same list under the picker). Left-out families never see the files, even though they are in the group. To change it for one file later, open the photo in the app as the owner → ✏️ Edit → **Who sees it**.
 
 When you finish, the bot offers to tell everyone in the group (not the left-out families). To remove group files: open the group in the app and delete a photo as usual, or in the bot use Groups → the group → **🗑 Delete the group's shared files**. Deleting a group also deletes its shared files.
+
+## Upload line (for people who send lots of photos)
+
+In Admin → Families → a family → Members, tap "📤 Line: off" next to a person to switch it ON. Their suggestions then go to a
+📤 Upload line topic in the group instead of the family's Suggestions topic. In that topic:
+
+- `/go` (reply to the batch): shows the info and asks "Is all this right?". Yes publishes it to the family (and any other
+  families listed). No asks the date, place and families one by one; each question has a Skip button.
+- `/hold`: moves the batch to a 📋 Photos on review topic (reply `/go` there later).
+- `/del` as a reply to a photo drops that photo. Replying to a photo with a new (edited) photo or file replaces it.
+- Buttons under the batch do the same: ✅ Go, ⏸ Hold, ❌ Reject.
