@@ -207,6 +207,7 @@ class WebApp:
         self.uploads: dict = {}  # upload key -> the running/finished upload, so a repeated tap can't post a photo twice
         self.upload_gate = asyncio.Semaphore(1)  # one big file in memory at a time
         self.last_orig: dict[int, float] = {}
+        self.tr_hits: dict[int, list] = {}
         self.conns = 0
 
     # ---------- plumbing ----------
@@ -291,12 +292,27 @@ class WebApp:
         denied = self.upload_denied(headers)
         if denied:
             return denied
-        try:
-            tid = int(query.get("fam", ""))
-        except ValueError:
-            return err(400, "Please pick a family.")
-        if abs(tid) > 2 ** 53 or not await self.d.db().families.find_one({"thread_id": tid}):
-            return err(404, "That family no longer exists.")
+        fam_q = query.get("fam", "")
+        gid = None
+        if fam_q.startswith("g:"):  # a whole group (one shared copy that every family in it sees)
+            gid = fam_q[2:]
+            if not re.fullmatch(r"[0-9a-f]{6}", gid):
+                return err(400, "Please pick a family.")
+            if not await self.d.db().groups.find_one({"_id": gid}):
+                return err(404, "That group no longer exists.")
+            tid = None
+            try:
+                skip = sorted({int(x) for x in query.get("skip", "").split(",") if x.strip()})[:60]
+            except ValueError:
+                return err(400, "Bad request")
+        else:
+            skip = []
+            try:
+                tid = int(fam_q)
+            except ValueError:
+                return err(400, "Please pick a family.")
+            if abs(tid) > 2 ** 53 or not await self.d.db().families.find_one({"thread_id": tid}):
+                return err(404, "That family no longer exists.")
         day = self.d.parse_date(query.get("date", ""))
         if day is None:
             return err(400, "Please give a date like 2026-07-04 (not in the future), or choose that you don't know it.")
@@ -314,22 +330,22 @@ class WebApp:
         key = headers.get("x-upload-key", "")
         if not re.fullmatch(r"[0-9a-zA-Z_-]{8,40}", key):
             return err(400, "Bad request")
-        sig = (tid, day, place, len(body))
+        sig = (gid or tid, day, place, len(body), tuple(skip))
         cur = self.uploads.get(key)
         if cur is not None and cur[0] != sig:
             return err(409, "That upload changed. Please start it again.")
         if cur is None:
-            fut = asyncio.ensure_future(self.do_upload(key, tid, place, day, name, body))
+            fut = asyncio.ensure_future(self.do_upload(key, tid, place, day, name, body, gid, skip))
             self.uploads[key] = (sig, fut)
         else:
             fut = cur[1]
         status, data = await asyncio.shield(fut)  # (a repeat of the same upload waits for, and gets, the same answer)
         return jresp(data, status)
 
-    async def do_upload(self, key: str, tid: int, place, day: str, name: str, body: bytes):
+    async def do_upload(self, key: str, tid, place, day: str, name: str, body: bytes, gid=None, skip=None):
         try:
             async with self.upload_gate:
-                status, data = await self.d.upload_photo(tid, place, day, name, body)
+                status, data = await self.d.upload_photo(tid, place, day, name, body, **({"gid": gid, "skip": skip} if gid else {}))
         except Exception:
             log.exception("Upload failed")
             status, data = 500, {"error": "Something went wrong. Please try again."}
@@ -348,11 +364,22 @@ class WebApp:
             return str(day or "")
 
 
+    async def cards(self, docs: list, uid: int) -> list:
+        gn = await self.d.group_names_for(docs)  # (photos of a whole group are labelled with the group's name)
+        out = []
+        for x in docs:
+            c = self.card(x, uid)
+            if gn.get(x.get("thread_id")):
+                c["g"] = gn[x["thread_id"]]
+            out.append(c)
+        return out
+
     def card(self, doc: dict, uid: int) -> dict:
         return {
             "id": doc["message_id"], "k": doc.get("kind", "document"), "d": doc.get("date") or "",
             "dt": self.pd(doc.get("date") or ""), "loc": doc.get("location") or "",
             "by": doc.get("by") or "", "best": bool(doc.get("best")),
+            **({"dur": int(doc.get("dur") or 0), "mb": round((doc.get("vsize") or 0) / 1048576, 1)} if doc.get("kind") == "video" else {}),
             "t": self.photo_url(doc["message_id"], "thumb", uid),
             "f": self.photo_url(doc["message_id"], "full", uid),
         }
@@ -365,10 +392,11 @@ class WebApp:
         Opening the app with the "new" welcome is what counts as having seen it."""
         db = self.d.db()
         cutoff = datetime.now(timezone.utc) - timedelta(days=NEW_DAYS)
-        new_q = {"thread_id": tid, "sug": {"$ne": True}, "added": {"$gte": cutoff}}
+        vq = await self.d.vis_q(tid)  # (the family's own photos + its groups' shared ones, minus files that leave it out)
+        new_q = {**vq, "sug": {"$ne": True}, "added": {"$gte": cutoff}}
         n_new = await db.photos.count_documents(new_q)
         best = await self.d.has_best(tid)
-        total = await db.photos.count_documents({"thread_id": tid})
+        total = await db.photos.count_documents(vq)
         mode = "latest"
         if n_new >= NEW_MIN:
             newest = await db.photos.find(new_q).sort([("added", -1)]).limit(1).to_list()
@@ -384,10 +412,10 @@ class WebApp:
             q, sort = new_q, [("added", -1), ("message_id", -1)]
             title, sub = "✨ New photos", f"{n_new} new photo{'s' if n_new != 1 else ''} in the last {NEW_DAYS} days"
         elif mode == "best":
-            q, sort = {"thread_id": tid, "best": True}, [("message_id", -1)]
+            q, sort = {**vq, "best": True}, [("message_id", -1)]
             title, sub = "⭐ Best shots", "Picked for you"
         else:
-            q, sort = {"thread_id": tid}, [("message_id", -1)]
+            q, sort = dict(vq), [("message_id", -1)]
             title, sub = "📸 Latest photos", ""
         docs = await db.photos.find(q).sort(sort).limit(WELCOME_ITEMS).to_list()
         if mode == "new" and docs and not self.d.is_owner(uid):
@@ -395,7 +423,7 @@ class WebApp:
             if newest_at:
                 await db.users.update_one({"_id": uid}, {"$set": {"seen_new": newest_at}})
         return {"mode": mode, "title": title, "sub": sub, "total": total,
-                "items": [self.card(x, uid) for x in docs]}
+                "items": await self.cards(docs, uid)}
 
     async def api(self, path: str, headers: dict, body: bytes) -> Resp:
         user = validate_init_data(headers.get("x-init-data", ""), self.d.token)
@@ -434,13 +462,11 @@ class WebApp:
                 return err(403, "This is for clients.")
             docs = (await db.comments.find({"uid": uid}).sort("at", -1).limit(50).to_list())[::-1]
             lang = await self.d.get_lang(uid)
-            msgs = []
-            for d in docs:
-                t, orig = d.get("text", ""), None
-                if d.get("dir") == "out":  # (the photographer's words, in the reader's language)
-                    t, orig = await self.d.for_reader(t, lang)
-                msgs.append({"id": d["_id"], "dir": d.get("dir", "in"), "text": t, "at": self.d.fmt_when(d.get("at")),
-                             **({"orig": orig} if orig else {})})
+            async def shown(d):  # (the photographer's words, in the reader's language)
+                return await self.d.for_reader(d.get("text", ""), lang) if d.get("dir") == "out" else (d.get("text", ""), None)
+            pairs = await asyncio.gather(*[shown(d) for d in docs])  # (all at once, not one by one)
+            msgs = [{"id": d["_id"], "dir": d.get("dir", "in"), "text": t, "at": self.d.fmt_when(d.get("at")),
+                     **({"orig": orig} if orig else {})} for d, (t, orig) in zip(docs, pairs)]
             return jresp({"messages": msgs})
 
         if path in ("/api/chat_delete", "/api/chat_clear", "/api/feedback", "/api/feedback_list", "/api/feedback_delete"):
@@ -462,6 +488,27 @@ class WebApp:
                 return err(403, "This is for clients.")
             return jresp({"lang": await self.d.set_lang(uid, req.get("lang"))})
 
+        if path == "/api/langs":
+            if owner:
+                return err(403, "This is for clients.")
+            return jresp(await self.d.langs_list())
+
+        if path == "/api/tr":  # English app texts -> the person's language (saved after the first time)
+            if owner:
+                return err(403, "This is for clients.")
+            lang = req.get("lang")
+            strings = req.get("strings")
+            if not isinstance(lang, str) or not isinstance(strings, list) or len(strings) > 120:
+                return err(400, "Bad request")
+            now = time.time()
+            hits = [t for t in self.tr_hits.get(uid, []) if now - t < 60]
+            if len(hits) >= 12:
+                return err(429, "One moment please.")
+            self.tr_hits[uid] = hits + [now]
+            if len(self.tr_hits) > 2000:
+                self.tr_hits = {k: v for k, v in self.tr_hits.items() if v and now - v[-1] < 60}
+            return jresp({"tr": await self.d.ui_tr(strings, lang)})
+
         if path == "/api/comment":
             if owner:
                 return err(403, "This is for clients.")
@@ -476,22 +523,23 @@ class WebApp:
             return err(403, "Pick a family in the Admin tab first.")
 
         if path == "/api/home":
+            lang = await self.d.get_lang(uid)
             return jresp({
                 "family": await self.d.family_name(tid) or "",
                 "first": user.get("first_name") or "",
                 "best": await self.d.has_best(tid),
                 "admin": owner,
-                "help": (await self.d.for_reader(self.d.help_text(), "ru"))[0] if (not owner and await self.d.get_lang(uid) == "ru") else self.d.help_text(),
+                "help": (await self.d.for_reader(self.d.help_text(), lang))[0] if (not owner and lang != "en") else self.d.help_text(),
                 "copyright": self.d.copyright,
                 "owner": self.d.owner_name,
-                "maint": None if owner else await self.d.maint_for(uid),
-                "lang": "ru" if owner is False and await self.d.get_lang(uid) == "ru" else "en",
+                "lang": lang if owner is False else "en",
+                "lang_set": True if owner else await self.d.lang_chosen(uid),
                 "welcome": await self.welcome(uid, tid),
             })
 
         if path == "/api/dates":
             cur = await db.photos.aggregate([
-                {"$match": {"thread_id": tid, "date": {"$type": "string"}}},
+                {"$match": {**await self.d.vis_q(tid), "date": {"$type": "string"}}},
                 {"$group": {"_id": "$date", "n": {"$sum": 1}, "cover": {"$min": "$message_id"}}},
                 {"$sort": {"_id": -1}},
             ])
@@ -502,7 +550,7 @@ class WebApp:
 
         if path == "/api/places":
             cur = await db.photos.aggregate([
-                {"$match": {"thread_id": tid}},
+                {"$match": await self.d.vis_q(tid)},
                 {"$group": {"_id": {"$ifNull": ["$loc_id", "none"]}, "loc": {"$first": "$location"}, "n": {"$sum": 1},
                             "cover": {"$min": "$message_id"}}},
             ])
@@ -514,7 +562,7 @@ class WebApp:
 
         if path == "/api/photos":
             mode, value = req.get("mode"), req.get("value")
-            q = {"thread_id": tid}  # (always the caller's own family)
+            q = await self.d.vis_q(tid)  # (always the caller's own family + its groups)
             sort = [("date", 1), ("message_id", 1)]
             if mode == "date":
                 if not isinstance(value, str) or len(value) != 10:
@@ -528,6 +576,7 @@ class WebApp:
                 q["best"] = True
                 sort = [("date", -1), ("message_id", 1)]  # newest day first
             elif mode == "sug":
+                q["thread_id"] = tid  # (suggestions belong to one family only)
                 q["sug"] = True
             elif mode == "new":
                 q["sug"] = {"$ne": True}
@@ -542,7 +591,7 @@ class WebApp:
                 return err(400, "Bad request")
             skip = max(0, min(skip, 100000))
             docs = await db.photos.find(q).sort(sort).skip(skip).limit(PAGE + 1).to_list()
-            return jresp({"items": [self.card(x, uid) for x in docs[:PAGE]], "more": len(docs) > PAGE})
+            return jresp({"items": await self.cards(docs[:PAGE], uid), "more": len(docs) > PAGE})
 
         if path == "/api/send_original":
             doc = await self.my_photo(req.get("id"), tid)
@@ -563,10 +612,13 @@ class WebApp:
         if not isinstance(mid, int) or isinstance(mid, bool) or abs(mid) > 2**53:
             return None
         doc = await self.d.db().photos.find_one({"message_id": mid})
-        return doc if doc and doc.get("thread_id") == tid else None
+        ok = doc and doc.get("thread_id") in await self.d.visible_tids(tid) and tid not in (doc.get("skip") or [])
+        return doc if ok else None
 
     def sug_card(self, row: dict, sid: str, i: int, uid: int) -> dict:
-        return {"id": None, "sug": True, "k": "photo", "d": "", "dt": row["dt"], "loc": row["place"], "by": row["from"],
+        kd = (row.get("kinds") or [{}] * (i + 1))[i] if i < len(row.get("kinds") or [1]) else {}
+        vid = kd.get("k") == "video"
+        return {"id": None, "sug": True, "k": "video" if vid else "photo", **({"dur": kd.get("dur", 0), "mb": 0} if vid else {}), "d": "", "dt": row["dt"], "loc": row["place"], "by": row["from"],
                 "best": False, "t": self.sug_url(sid, i, "thumb", uid), "f": self.sug_url(sid, i, "full", uid)}
 
     def sug_sign(self, sid: str, i: int, size: str, uid: int, exp: int) -> str:
@@ -620,7 +672,7 @@ class WebApp:
             return err(403, "This link expired. Close and reopen the app.")
         if self.d.is_owner(uid):  # the owner may see every family's photos (but a deleted family's are gone)
             doc = await self.d.db().photos.find_one({"message_id": mid})
-            if doc and not await self.d.db().families.find_one({"thread_id": doc.get("thread_id")}):
+            if doc and not await self.d.owner_can_see(doc.get("thread_id")):
                 doc = None
         else:
             tid = await self.family_of(uid)  # (checked every time, so removing someone cuts them off)
@@ -658,6 +710,12 @@ class WebApp:
     async def make_image(self, doc: dict, size: str):
         """-> (content type, bytes, is_sharp) or None. is_sharp is False for a blurry stand-in."""
         mid = doc["message_id"]
+        if doc.get("kind") == "video":  # (a bot can't download big videos: the app shows Telegram's own preview picture)
+            small = await self.small_preview(doc)
+            if not small:
+                return None
+            self.cache.put((mid, size), small)
+            return (*small, True)
         if size == "thumb":
             small = await self.small_preview(doc)
             if small:

@@ -26,13 +26,20 @@ h2{font-size:1.15em;margin:18px 0 2px}
 .topbar{display:flex;align-items:center;gap:8px;margin-bottom:4px}
 .topbar .sp{flex:1}
 .topbar button{border:0;background:var(--sec);color:var(--text);border-radius:12px;min-width:44px;min-height:40px;padding:6px 12px;font:inherit;font-size:.8em}
-.row{display:flex;align-items:center;gap:14px;width:100%;margin:0 0 10px;padding:10px;border:0;border-radius:16px;background:var(--sec);color:var(--text);font:inherit;text-align:left}
+h1,label{overflow-wrap:anywhere}
+.chips{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 12px}.chip{max-width:100%;overflow-wrap:anywhere;min-height:40px;border:0;border-radius:999px;padding:7px 14px;background:var(--sec);color:var(--text);font:inherit;font-size:.85em}.chip.on{background:var(--btn);color:var(--btntext);font-weight:600}
+.row>span{min-width:0;overflow-wrap:anywhere}
+.row{display:flex;align-items:center;gap:14px;width:100%;margin:0 0 10px;padding:10px;border:0;border-radius:16px;background:var(--sec);color:var(--text);font:inherit;text-align:start}
 .row img,.row .ph{width:72px;height:72px;border-radius:12px;object-fit:cover;background:#8884;flex:none}
 .row b{display:block}
 .grid{display:grid;grid-template-columns:repeat(3,1fr);gap:4px;margin-top:10px}
 .grid button{padding:0;border:0;background:#8883;aspect-ratio:1;overflow:hidden;border-radius:6px;position:relative}
 .grid img{width:100%;height:100%;object-fit:cover;display:block}
 .grid .star{position:absolute;right:4px;top:2px;font-size:14px}
+.grid .grp{position:absolute;left:4px;top:4px;max-width:80%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:1px 7px;border-radius:999px;background:#000a;color:#fff;font-size:11px;font-weight:600}
+.grid .vid{position:absolute;left:4px;bottom:4px;padding:1px 7px;border-radius:999px;background:#000a;color:#fff;font-size:11px;font-weight:600}
+.grid .vbox{width:100%;height:100%;display:flex;align-items:center;justify-content:center;font-size:30px}
+#vplay{position:absolute;width:84px;height:84px;border-radius:50%;background:#000a;color:#fff;font-size:38px;display:none;align-items:center;justify-content:center;z-index:2;padding-left:6px;box-sizing:border-box}
 .cta{display:block;width:100%;min-height:56px;margin:16px 0 0;border:0;border-radius:16px;background:var(--btn);color:var(--btntext);font:inherit;font-weight:700}
 .cta.alt{background:var(--sec);color:var(--text)}
 .cta[disabled]{opacity:.5}
@@ -66,7 +73,7 @@ textarea{min-height:140px}
 .stats{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin:10px 0}
 .stat{padding:12px;border-radius:14px;background:var(--sec)}
 .stat b{display:block;font-size:1.5em}
-.badge{display:inline-block;min-width:22px;padding:1px 7px;border-radius:11px;background:#e53935;color:#fff;font-size:.7em;margin-left:8px;text-align:center}
+.badge{display:inline-block;min-width:22px;padding:1px 7px;border-radius:11px;background:#e53935;color:#fff;font-size:.7em;margin-inline-start:8px;text-align:center}
 .banner{display:flex;align-items:center;gap:8px;background:var(--btn);color:var(--btntext);border-radius:12px;padding:8px 12px;margin-bottom:8px;font-size:.85em}
 .banner button{margin-left:auto;border:0;background:#fff3;color:inherit;border-radius:10px;padding:6px 12px;font:inherit}
 .chat{display:flex;flex-direction:column;gap:8px;margin:10px 0}
@@ -84,8 +91,8 @@ textarea{min-height:140px}
 .card .btns button[disabled]{opacity:.5}
 #viewer .tools{display:flex;gap:8px;margin-bottom:8px}
 #viewer .tools button{flex:1;min-height:46px;border:0;border-radius:12px;background:#ffffff28;color:#fff;font:inherit;font-size:.8em;font-weight:600}
-#vdlg{position:absolute;inset:0;background:#000d;display:none;align-items:center;justify-content:center;padding:16px;z-index:3;touch-action:auto;overflow:auto}
-#vdlg .box{width:100%;max-width:460px;background:var(--bg);color:var(--text);border-radius:18px;padding:16px}
+#vdlg{position:absolute;inset:0;background:#000d;display:none;align-items:flex-start;justify-content:center;padding:16px;z-index:3;touch-action:auto;overflow:auto}
+#vdlg .box{margin:auto;width:100%;max-width:460px;background:var(--bg);color:var(--text);border-radius:18px;padding:16px}
 .file{display:flex;gap:10px;align-items:center;padding:8px 10px;border-radius:12px;background:var(--bg);margin:6px 0;font-size:.8em}
 .file .nm{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .file .st{flex:none;color:var(--hint);text-align:right;max-width:55%}
@@ -159,7 +166,7 @@ function confirmAsk(text) {
   confirmOpen = true;
   return new Promise(res => {
     const done = ok => { confirmOpen = false; res(!!ok); };
-    if (LANG === "ru" && !IS_ADMIN) text = ruT(text);
+    if (LANG !== "en" && !IS_ADMIN) text = ruT(text);
     try { tg.showConfirm(text, done); } catch (e) { done(window.confirm(text)); }
   });
 }
@@ -204,11 +211,12 @@ let LANG = "en";
 const RU_EXACT = {
   "Home": "Главная", "Dates": "Даты", "Places": "Места", "All": "Все", "Best": "Лучшие", "Suggested": "Предложено",
   "Loading…": "Загрузка…", "‹ Back": "‹ Назад", "Cancel": "Отмена", "Save": "Сохранить", "Send": "Отправить",
-  "Sending…": "Отправка…", "Help": "Помощь", "Oops": "Ой", "Try again": "Повторить", "Close": "Закрыть", "✖ Close": "✖ Закрыть",
+  "Sending…": "Отправка…", "Help": "Помощь", "Oops": "Ой", "Try again": "Повторить", "Close the app": "Закрыть приложение", "Close": "Закрыть", "✖ Close": "✖ Закрыть",
   "A+": "A+", "A−": "A−", "Bigger text": "Крупнее текст", "Smaller text": "Мельче текст",
   "Hi! 👋": "Привет! 👋", "✨ New photos": "✨ Новые фото", "See all new photos": "Все новые фото", "See all photos": "Все фото",
   "No photos yet. Check back soon!": "Фото пока нет. Загляните позже!", "No photos here yet.": "Здесь пока нет фото.",
   "Show more photos": "Показать ещё фото", "No messages yet.": "Сообщений пока нет.",
+  "🌐 Language": "🌐 Язык", "Search a language…": "Найти язык…", "Recommended": "Рекомендуемые", "All languages": "Все языки", "No language found. Try its English name.": "Язык не найден. Попробуйте английское название.",
   "📝 Send feedback": "📝 Отправить отзыв", "Send feedback": "Отправить отзыв", "📝 Feedback": "📝 Отзыв", "Your feedback": "Ваш отзыв",
   "🖼 All photos": "🖼 Все фото", "⭐ Best shots": "⭐ Лучшие кадры", "⭐ In Best shots": "⭐ В лучших кадрах",
   "💡 Suggested by your family": "💡 Предложено вашей семьёй", "📅 Pick a date": "📅 Выберите дату", "📍 Pick a place": "📍 Выберите место",
@@ -224,6 +232,7 @@ const RU_EXACT = {
   "✅ Sent to your chat": "✅ Отправлено в ваш чат", "⚠️ Please type your message.": "⚠️ Пожалуйста, введите сообщение.",
   "⚠️ Please type your feedback.": "⚠️ Пожалуйста, введите отзыв.",
   "📥 Send me the photo in chat": "📥 Отправить фото мне в чат",
+  "📥 Send me the video in chat": "📥 Отправить видео мне в чат",
   "Delete this photo from the group and the family's list? This can't be undone.": "Удалить это фото из группы и списка семьи? Это нельзя отменить.",
   "🌐 Русский / English": "🌐 Русский / English",
   "In this app: use the buttons at the bottom to pick Dates, Places or All photos. Tap a photo to see it full screen. Swipe left or right for the next one, pinch (or double tap) to zoom. “Send me the photo in chat” puts the full-quality photo in your chat with me.":
@@ -253,17 +262,58 @@ function ruPlural(n, one, few, many) {  // (Russian plural forms; "фото" doe
   return a === 1 && b !== 11 ? one : (a >= 2 && a <= 4 && (b < 10 || b >= 20) ? few : many);
 }
 const ugc = n => !!(n && (n.nodeType === 3 ? n.parentElement : n) && (n.nodeType === 3 ? n.parentElement : n).closest("[data-ugc]"));  // (text people wrote is never translated)
-function ruT(s) {
-  if (typeof s !== "string" || !s.trim()) return s;
-  const cy = (s.match(/[А-Яа-яЁё]/g) || []).length, la = (s.match(/[A-Za-z]/g) || []).length;
-  if (cy && cy >= la) return s;  // (already Russian; a Russian name inside an English sentence still gets the sentence translated)
+// ---------- any other language: the server translates (and remembers) the English texts, then they are swapped in ----------
+const RTL_LANGS = ["ar", "he", "fa", "ur", "yi"];
+const TRD = new Map(), TRVALS = new Set(), TRFAIL = new Set();
+let trQueue = new Set(), trTimer = null, trSave = null;
+function trLoad() {
+  TRD.clear(); TRVALS.clear(); TRFAIL.clear(); trQueue = new Set();
+  try { const o = JSON.parse(localStorage.getItem("tr_" + LANG) || "{}"); for (const k in o) if (typeof o[k] === "string") { TRD.set(k, o[k]); TRVALS.add(o[k]); } } catch (e) {}
+}
+function trPersist() {
+  clearTimeout(trSave);
+  trSave = setTimeout(() => { try { const o = {}; for (const [k, v] of TRD) o[k] = v; const j = JSON.stringify(o); if (j.length < 400000) localStorage.setItem("tr_" + LANG, j); } catch (e) {} }, 800);
+}
+function trT(s) {
+  if (typeof s !== "string" || !s.trim() || !/[A-Za-z]/.test(s)) return s;
   const lead = s.match(/^\s*/)[0], tail = s.match(/\s*$/)[0], core = s.trim();
-  let out = RU_EXACT[core];
+  if (TRD.has(core)) return lead + TRD.get(core) + tail;
+  if (TRVALS.has(core) || TRFAIL.has(core) || core.length > 300) return s;
+  trQueue.add(core);
+  if (!trTimer) trTimer = setTimeout(trFlush, 150);
+  return s;
+}
+async function trFlush() {
+  trTimer = null;
+  const lang = LANG, list = [...trQueue]; trQueue = new Set();
+  if (!list.length || lang === "en" || lang === "ru" || IS_ADMIN) return;
+  for (let i = 0; i < list.length; i += 100) {
+    const chunk = list.slice(i, i + 100);
+    try {
+      const r = await api("/api/tr", { lang, strings: chunk });
+      if (lang !== LANG) return;  // (they switched language meanwhile)
+      for (const k of chunk) { const t = r.tr && r.tr[k]; if (t) { TRD.set(k, t); TRVALS.add(t); } else TRFAIL.add(k); }
+    } catch (e) { for (const k of chunk) TRFAIL.add(k); }
+  }
+  trPersist();
+  ruWalk(document.body);
+}
+function applyLang() {
+  document.documentElement.lang = LANG;
+  document.documentElement.dir = !IS_ADMIN && RTL_LANGS.includes(LANG) ? "rtl" : "ltr";
+  if (LANG !== "en" && LANG !== "ru" && !IS_ADMIN) trLoad();
+}
+function ruT(s) {
+  if (LANG !== "ru") return trT(s);
+  if (typeof s !== "string" || !s.trim()) return s;
+  if (!/[A-Za-z]/.test(s)) return s;  // (nothing English in it; a Russian name inside an English sentence still gets the sentence translated)
+  const lead = s.match(/^\s*/)[0], tail = s.match(/\s*$/)[0], core = s.trim();
+  let out = Object.prototype.hasOwnProperty.call(RU_EXACT, core) ? RU_EXACT[core] : undefined;
   if (out === undefined) for (const [rx, to] of RU_RULES) { if (rx.test(core)) { out = core.replace(rx, to); break; } }
   return out === undefined ? s : lead + out + tail;
 }
 function ruWalk(root) {
-  if (!root || LANG !== "ru" || IS_ADMIN) return;
+  if (!root || LANG === "en" || IS_ADMIN) return;
   const w = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
   let n; while ((n = w.nextNode())) { if (ugc(n)) continue; const t = ruT(n.nodeValue); if (t !== n.nodeValue) n.nodeValue = t; }
   if (root.querySelectorAll) for (const el of [root, ...root.querySelectorAll("[placeholder],[aria-label],[title]")])
@@ -271,7 +321,7 @@ function ruWalk(root) {
     for (const at of ["placeholder", "aria-label", "title"]) { const v = el.getAttribute(at); if (v) { const t = ruT(v); if (t !== v) el.setAttribute(at, t); } }
 }
 new MutationObserver(ms => {
-  if (LANG !== "ru" || IS_ADMIN) return;
+  if (LANG === "en" || IS_ADMIN) return;
   for (const m of ms) {
     if (m.type === "characterData") { if (ugc(m.target)) continue; const t = ruT(m.target.nodeValue); if (t !== m.target.nodeValue) m.target.nodeValue = t; }
     else for (const nd of m.addedNodes) ruWalk(nd.nodeType === 3 ? nd.parentNode : nd);
@@ -305,13 +355,15 @@ async function homeScreen() {
     HOME = got;
     homeAt = Date.now();
     IS_ADMIN = !!HOME.admin;
-    LANG = !IS_ADMIN && HOME.lang === "ru" ? "ru" : "en";
+    LANG = !IS_ADMIN && typeof HOME.lang === "string" && /^[A-Za-z-]{2,5}$/.test(HOME.lang) ? HOME.lang : "en";
+    applyLang();
+    if (!IS_ADMIN && HOME.lang_set === false) { $tabs.replaceChildren(); langScreen(true); return; }  // (first time here: the language is asked once)
     if (IS_ADMIN && adminFam == null) { setTab("admin"); return; }
     drawTabs();
   }
   const w = HOME.welcome;
   if (!w) { if (IS_ADMIN) { leaveFamily(); return; } show([h("div", { class: "msg", text: "Nothing to show yet." })]); return; }
-  if (LANG === "ru" && !IS_ADMIN) ruWalk(document.body);  // (the static viewer buttons too)
+  if (LANG !== "en" && !IS_ADMIN) ruWalk(document.body);  // (the static viewer buttons too)
   const nodes = [
     banner(),
     h("div", { class: "topbar" }, h("div", { class: "sp" }),
@@ -331,17 +383,37 @@ async function homeScreen() {
   }
   if (!IS_ADMIN) nodes.push(h("button", { class: "cta alt", text: "💬 Chat with " + (HOME.owner || "the photographer"), on: { click: () => push(commentScreen) } }),
     h("button", { class: "cta alt", text: "📝 Send feedback", on: { click: () => push(feedbackScreen) } }),
-    h("button", { class: "cta alt", text: "🌐 Русский / English", on: { click: () => oneAtATime(async () => {
-      try { const r = await api("/api/lang", { lang: LANG === "ru" ? "en" : "ru" }); LANG = r.lang; } catch (e) { return; }
-      HOME = null; setTab("home");
-    }) } }));
+    h("button", { class: "cta alt", text: "🌐 Language", on: { click: () => push(() => langScreen(false)) } }));
   nodes.push(footer());
   show(nodes);
+}
+let LANGS_DATA = null;
+async function langScreen(first) {
+  loading(); const my = navId;
+  try { LANGS_DATA = LANGS_DATA || await api("/api/langs", {}); } catch (e) { if (my === navId) errorScreen(e, () => langScreen(first)); return; }
+  if (my !== navId) return;
+  const pick = code => oneAtATime(async () => {
+    try { const r = await api("/api/lang", { lang: code }); LANG = r.lang; } catch (e) { return; }
+    location.reload();  // (a clean start: every text, including the fixed buttons, is shown in the new language)
+  });
+  const row = l => h("button", { class: "row", on: { click: () => pick(l.c) } },
+    h("span", { "data-ugc": "1", text: l.n }), l.e !== l.n ? h("span", { class: "hint", "data-ugc": "1", style: "margin-inline-start:8px", text: l.e }) : null);
+  const list = h("div", {});
+  const box = h("input", { type: "search", maxlength: "40", placeholder: "Search a language…", autocomplete: "off" });
+  const draw = () => {
+    const q = box.value.trim().toLowerCase();
+    if (!q) { list.replaceChildren(h("h2", { text: "Recommended" }), ...LANGS_DATA.rec.map(row), h("h2", { text: "All languages" }), ...LANGS_DATA.all.map(row)); return; }
+    const hit = LANGS_DATA.all.filter(l => l.n.toLowerCase().includes(q) || l.e.toLowerCase().includes(q) || l.c.toLowerCase() === q);
+    list.replaceChildren(...(hit.length ? hit.map(row) : [h("div", { class: "msg", text: "No language found. Try its English name." })]));
+  };
+  box.addEventListener("input", draw);
+  show([first ? null : backBtn(), h("h1", { text: first ? "🌐 Choose your language / Выберите язык" : "🌐 Language" }), box, list, footer()]);
+  draw();
 }
 function bubbles(list, mine, canDelete, onDelete) {  // mine = the direction that is "me" (shown on the right)
   return list.length ? list.map(m => h("div", { class: "bubble " + (m.dir === mine ? "me" : "them") },
     h("div", { style: "white-space:pre-wrap", "data-ugc": "1", text: m.text }),
-    m.orig ? h("div", { class: "hint", style: "white-space:pre-wrap", text: "🌐 " + m.orig }) : null,
+    m.orig ? h("div", { class: "hint", "data-ugc": "1", style: "white-space:pre-wrap", text: "🌐 " + m.orig }) : null,
     h("div", { class: "hint" }, m.at, canDelete(m) ? h("button", { class: "tiny", "aria-label": "Delete this message", text: "🗑", on: { click: () => onDelete(m) } }) : null)))
     : h("div", { class: "msg", text: "No messages yet." });
 }
@@ -423,10 +495,13 @@ const datesScreen = () => listScreen("📅 Pick a date", "/api/dates", "date");
 const placesScreen = () => listScreen("📍 Pick a place", "/api/places", "loc");
 
 // ---------- grids ----------
+const vlen = s => Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");
 function photoGrid(items) {
   return h("div", { class: "grid" }, items.map((p, i) =>
     h("button", { on: { click: () => { viewList = items; openViewer(i); } }, "aria-label": "Photo " + (i + 1) },
-      h("img", { src: p.t, alt: "", loading: "lazy", on: { error: e => { e.target.replaceWith(h("div", { class: "hint", style: "padding:8px", text: "Tap to open" })); } } }),
+      h("img", { src: p.t, alt: "", loading: "lazy", on: { error: e => { e.target.replaceWith(p.k === "video" ? h("div", { class: "vbox", text: "🎬" }) : h("div", { class: "hint", style: "padding:8px", text: "Tap to open" })); } } }),
+      p.k === "video" ? h("span", { class: "vid", text: "▶ " + (p.dur ? vlen(p.dur) : "Video") }) : null,
+      p.g ? h("span", { class: "grp", "data-ugc": "1", text: "👥 " + p.g }) : null,
       p.best ? h("span", { class: "star", text: "⭐" }) : null)));
 }
 async function gridScreen(title, query, extra) {
@@ -441,7 +516,7 @@ async function loadMore(title, query, all, extra) {
   const have = new Set(all.map(p => p.id));  // (a photo added meanwhile can shift the pages, so skip repeats)
   all.skip = (all.skip || 0) + data.items.length;
   all.push(...data.items.filter(p => !have.has(p.id)));
-  const nodes = [banner(), backBtn(), h("h1", { text: title }), extra || null,
+  const nodes = [banner(), backBtn(), h("h1", query.mode === "date" || query.mode === "loc" ? { "data-ugc": "1", text: title } : { text: title }), extra || null,
     all.length ? photoGrid(all) : h("div", { class: "msg", text: "No photos here yet." })];
   if (data.more) nodes.push(h("button", { class: "cta alt", on: { click: async (ev) => {
     ev.target.disabled = true; ev.target.textContent = "Loading…";
@@ -499,7 +574,7 @@ function toggleBest(ev) {
   return oneAtATime(async () => {
     b.disabled = true;
     try { const r = await api("/api/admin/photo_best", { id: p.id, best: !p.best }); p.best = r.best; dirty = true; }
-    catch (e) { b.textContent = "⚠️ " + e.message; return; }
+    catch (e) { b.textContent = "⚠️ " + e.message; b.disabled = false; return; }
     if (viewList[cur] === p) drawTools();
   });
 }
@@ -530,12 +605,23 @@ function editPhoto() {
     save.disabled = true; msg.textContent = "";
     try {
       const r = await api("/api/admin/photo_edit", { id: p.id, place: place.value, date: idk.checked ? "unknown" : day.value });
+      if (vis.dirty && vis.all) await api("/api/admin/photo_vis", { id: p.id, skip: vis.all.filter(f => !f.sees).map(f => f.tid) });
       p.d = r.d; p.dt = r.dt; p.loc = r.loc; dirty = true; dlg.style.display = "none"; showPhoto();
     } catch (e) { msg.textContent = "⚠️ " + e.message; save.disabled = false; }
   } } });
+  const vis = h("div", {});
+  let visSet = null;  // (group photos only: the families that will see it)
+  if (p.g) api("/api/admin/photo_vis", { id: p.id }).then(r => {
+    visSet = new Set(r.families.filter(f => f.sees).map(f => f.tid));
+    vis.replaceChildren(h("label", { text: "👥 Who sees it" }), ...r.families.map(f => {
+      const cb = h("input", { type: "checkbox", style: "width:auto;margin-right:8px" }); cb.checked = f.sees;
+      cb.addEventListener("change", () => { cb.checked ? visSet.add(f.tid) : visSet.delete(f.tid); f.sees = cb.checked; vis.dirty = true; });
+      return h("label", { style: "display:flex;align-items:center;padding:4px 0" }, cb, f.name + " family"); }));
+    vis.all = r.families;
+  }).catch(() => {});
   dlg.replaceChildren(h("div", { class: "box" }, h("h2", { text: "Edit this photo" }),
     h("label", { text: "📍 Place" }), place, h("label", { text: "📅 Date" }), day,
-    h("label", { class: "chk" }, idk, "I don't know the date"), msg, save,
+    h("label", { class: "chk" }, idk, "I don't know the date"), vis, msg, save,
     h("button", { class: "cta alt", text: "Cancel", on: { click: () => { dlg.style.display = "none"; } } })));
   dlg.style.display = "flex";
 }
@@ -544,9 +630,16 @@ function showPhoto() {
   resetZoom();
   vimg.style.opacity = ".4";
   vimg.onload = () => { vimg.style.opacity = "1"; };
-  vimg.onerror = () => { vimg.style.opacity = "1"; document.getElementById("vcap").textContent = "Couldn\u2019t load this photo. Close the app and open it again."; };
+  vimg.onerror = () => { vimg.style.opacity = "1"; if (p.k === "video") { vimg.style.visibility = "hidden"; return; }  // (a video with no preview picture still has its play button)
+    document.getElementById("vcap").textContent = "Couldn\u2019t load this photo. Close the app and open it again."; };
+  vimg.style.visibility = "visible";
   vimg.src = p.f;
-  document.getElementById("vcap").textContent = [p.dt, p.loc, p.by ? "Added by " + p.by : ""].filter(Boolean).join(" · ") + "   (" + (cur + 1) + " of " + viewList.length + ")";
+  const isVid = p.k === "video";
+  let pl = document.getElementById("vplay");
+  if (!pl) { pl = h("div", { id: "vplay", text: "▶", on: { click: () => document.getElementById("vorig").click() } }); V.querySelector(".stage").append(pl); }
+  pl.style.display = isVid ? "flex" : "none";
+  document.getElementById("vorig").textContent = isVid ? "📥 Send me the video in chat" : "📥 Send me the photo in chat";
+  document.getElementById("vcap").textContent = [isVid ? "🎬 Video" + (p.dur ? " " + vlen(p.dur) : "") + (p.mb ? " · " + p.mb + " MB" : "") : "", p.dt, p.loc, p.g ? "👥 " + p.g : "", p.by ? "Added by " + p.by : ""].filter(Boolean).join(" · ") + "   (" + (cur + 1) + " of " + viewList.length + ")";
   document.getElementById("vprev").style.visibility = cur > 0 ? "visible" : "hidden";
   document.getElementById("vnext").style.visibility = cur < viewList.length - 1 ? "visible" : "hidden";
   drawTools();
@@ -566,7 +659,7 @@ document.getElementById("vorig").onclick = async (ev) => {
 let t0 = null, pinch = null, lastTap = 0;
 const dist = (a, b) => Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
 V.addEventListener("touchstart", e => {
-  if (e.target.closest("button") || e.target.closest("#vdlg")) return;
+  if (e.target.closest("button") || e.target.closest("#vdlg") || e.target.closest("#vplay")) return;
   if (e.touches.length === 2) { pinch = { d: dist(e.touches[0], e.touches[1]), s: scale }; t0 = null; }
   else if (e.touches.length === 1) { t0 = { x: e.touches[0].clientX, y: e.touches[0].clientY, tx, ty, moved: false }; }
 }, { passive: true });
@@ -612,16 +705,62 @@ async function adminHome() {
     bigRow("💬", "Messages", s.comments, () => push(commentsScreen)),
     bigRow("📝", "Feedback", s.feedback, () => push(feedbackAdminScreen)),
     bigRow("💡", "Suggestions inbox", s.sugs, () => push(sugsScreen)),
-    bigRow("📣", "Announcements & messages", s.scheduled ? s.scheduled + " scheduled" : "", () => { if (annDraft.aud === "person") annDraft = { aud: "all", person: "", text: "" }; push(() => annScreen(d.families)); }),
+    bigRow("📣", "Announcements & messages", s.scheduled ? s.scheduled + " scheduled" : "", () => { if (annDraft.aud === "person") annDraft = { aud: "all", person: "", text: "", picks: [] }; push(() => annScreen()); }),
+    bigRow("🏷", "Groups", d.groups && d.groups.length ? d.groups.length : "", () => push(() => groupsScreen())),
     bigRow("🕵️", "Login attempts", s.tries, () => push(() => triesScreen())),
     bigRow("👥", "Users", "", () => push(usersScreen)),
-    h("h2", { text: "Families" }),
-    d.families.length ? d.families.map(f => h("button", { class: "row", on: { click: () => push(() => familyScreen(f.tid)) } },
+    h("h2", { text: "Families" }), groupChips(d.groups || [], "fams", () => { const y = window.scrollY; adminHome().then(() => window.scrollTo(0, y)); }),
+    d.families.length ? d.families.filter(f => !gf.fams || ((d.groups || []).find(g => g.id === gf.fams) || { tids: [] }).tids.includes(f.tid)).map(f => h("button", { class: "row", on: { click: () => push(() => familyScreen(f.tid)) } },
       h("span", {}, h("b", { text: f.name + " family" }),
         h("span", { class: "hint", text: "Code " + f.code + " · " + f.people + (f.people === 1 ? " person" : " people") + " · " + f.photos + (f.photos === 1 ? " photo" : " photos") + (f.best ? " · ⭐ " + f.best : "") }),
         f.sugs ? h("span", { class: "badge", text: f.sugs + " suggested" }) : null)))
       : h("div", { class: "msg", text: "No families yet. Tap “Add a family” above." }),
+    d.families.length && gf.fams && !d.families.some(f => ((d.groups || []).find(g => g.id === gf.fams) || { tids: [] }).tids.includes(f.tid)) ? h("div", { class: "msg", text: "No families in this group yet." }) : null,
     footer()]);
+}
+async function groupsScreen() {
+  const d = await adminLoad("/api/admin/groups", {}, groupsScreen); if (!d) return;
+  show([backBtn(), h("h1", { text: "🏷 Groups" }),
+    h("div", { class: "hint", text: "Groups are shortcuts for choosing families, for example “Camp”. A family can be in several." }),
+    d.groups.length ? d.groups.map(g => h("button", { class: "row", on: { click: () => push(() => groupScreen(g.id)) } },
+      h("span", {}, h("b", { "data-ugc": "1", text: "🏷 " + g.name }),
+        h("span", { class: "hint", text: g.tids.length + (g.tids.length === 1 ? " family" : " families") + " · " + g.people + (g.people === 1 ? " person" : " people") }))))
+      : h("div", { class: "msg", text: "No groups yet." }),
+    h("button", { class: "cta", text: "➕ New group", on: { click: () => push(() => groupScreen(null)) } }), footer()]);
+}
+async function groupScreen(gid) {
+  loading(); const my = navId;
+  let ov, gs;
+  try { ov = await api("/api/admin/overview", {}); gs = ov.groups || []; } catch (e) { if (my === navId) errorScreen(e, () => groupScreen(gid)); return; }
+  if (my !== navId) return;
+  const g = gid ? gs.find(x => x.id === gid) : { id: null, name: "", tids: [] };
+  if (!g) { show([backBtn(), h("div", { class: "msg", text: "That group no longer exists." }), footer()]); return; }
+  const name = h("input", { type: "text", maxlength: "30", placeholder: "Group name, for example Camp" }); name.value = g.name;
+  const picked = new Set(g.tids);
+  const msg = h("div", { class: "hint" });
+  const count = h("div", { class: "hint", text: "" });
+  const upd = () => { count.textContent = picked.size + (picked.size === 1 ? " family" : " families") + " in this group"; };
+  const rows = ov.families.map(f => {
+    const cb = h("input", { type: "checkbox", style: "width:auto;margin-right:8px" }); cb.checked = picked.has(f.tid);
+    cb.addEventListener("change", () => { cb.checked ? picked.add(f.tid) : picked.delete(f.tid); upd(); });
+    return h("label", { style: "display:flex;align-items:center;padding:6px 0" }, cb, f.name + " family");
+  });
+  upd();
+  const save = h("button", { class: "cta", text: "💾 Save", on: { click: () => oneAtATime(async () => {
+    msg.textContent = ""; save.disabled = true;
+    try {
+      await api("/api/admin/group_save", { id: g.id, name: name.value, tids: [...picked] });
+      if (my === navId) back();
+    } catch (e) { msg.textContent = "⚠️ " + e.message; save.disabled = false; }
+  }) } });
+  show([backBtn(), h("h1", { text: g.id ? "🏷 " + g.name : "🏷 New group" }),
+    h("label", { text: "Name" }), name, h("label", { text: "Families" }), ...rows, count, msg, save,
+    g.id ? h("button", { class: "cta alt", text: "📣 Announce to this group", on: { click: () => { annDraft = { aud: "group:" + g.id, person: "", text: "", picks: [] }; push(() => annScreen()); } } }) : null,
+    g.id ? h("button", { class: "cta alt", text: "📤 Add photos for the whole group", on: { click: () => push(() => uploadScreen("g:" + g.id)) } }) : null,
+    g.id ? h("button", { class: "cta danger", text: "🗑 Delete this group", on: { click: () => oneAtATime(async () => {
+      if (!await confirmAsk("Delete the group “" + g.name + "”? The families stay, but the group's shared photos are deleted. Announcements scheduled for this group are cancelled.")) return;
+      try { await api("/api/admin/group_delete", { id: g.id }); if (my === navId) back(); } catch (e) { msg.textContent = "⚠️ " + e.message; }
+    }) } }) : null, footer()]);
 }
 async function familyScreen(tid) {
   const d = await adminLoad("/api/admin/family", { tid }, () => familyScreen(tid)); if (!d) return;
@@ -635,10 +774,19 @@ async function familyScreen(tid) {
       h("div", { class: "hint", text: "ID " + p.id }),
       p.by ? h("div", { class: "hint", text: "Added by " + p.by }) : null,
       p.pending ? h("div", { class: "hint", text: "⏳ hasn't confirmed their name yet" }) : null,
-      h("div", { class: "btns" }, p.pending ? null : h("button", { text: "✉️ Message", on: { click: () => { annDraft = { aud: "person", person: String(p.id), text: annDraft.aud === "person" && annDraft.person === String(p.id) ? annDraft.text : "" }; push(() => annScreen()); } } }), h("button", { class: "danger", text: "Unlink",
+      h("div", { class: "btns" }, p.pending ? null : h("button", { text: "✉️ Message", on: { click: () => { annDraft = { aud: "person", person: String(p.id), text: annDraft.aud === "person" && annDraft.person === String(p.id) ? annDraft.text : "", picks: [] }; push(() => annScreen()); } } }), h("button", { class: "danger", text: "Unlink",
         on: { click: () => famAct(d.tid, "member_unlink", { uid: p.id }, "Unlink " + (p.first || "this person") + " from the " + d.name + " family?") } }))))
       : h("div", { class: "msg", text: "Nobody has linked yet." }),
     h("button", { class: "cta alt", text: "➕ Add a person by Telegram ID", on: { click: () => push(() => addPersonScreen(d.tid, d.name)) } }),
+    d.groups && d.groups.length ? h("h2", { text: "Groups" }) : null,
+    d.groups && d.groups.length ? d.groups.map(g => {
+      const cb = h("input", { type: "checkbox", style: "width:auto;margin-right:8px" }); cb.checked = g.on;
+      cb.addEventListener("change", () => oneAtATime(async () => {
+        try { await api("/api/admin/group_member", { id: g.id, tid: d.tid, on: cb.checked }); }
+        catch (e) { cb.checked = !cb.checked; await alertMsg("⚠️ " + e.message); }
+      }));
+      return h("label", { style: "display:flex;align-items:center;padding:6px 0" }, cb, h("span", { "data-ugc": "1", text: "🏷 " + g.name }));
+    }) : null,
     h("h2", { text: "Family settings" }),
     h("button", { class: "cta alt", text: "💬 Welcome message (to send them)", on: { click: () => push(() => inviteScreen(d.tid, d.name)) } }),
     h("button", { class: "cta alt", text: "🔄 Make a new code",
@@ -738,15 +886,17 @@ function deleteFamilyScreen(tid, famName) {
 
 // conversations with clients
 async function commentsScreen() {
-  const d = await adminLoad("/api/admin/comments", {}, commentsScreen); if (!d) return;
-  show([backBtn(), h("h1", { text: "💬 Messages" }),
+  loading(); const my0 = navId;
+  const gs = await groupList(); if (my0 !== navId) return; groupChips(gs, "msgs", () => {});
+  const d = await adminLoad("/api/admin/comments", gf.msgs ? { group: gf.msgs } : {}, commentsScreen); if (!d) return;
+  show([backBtn(), h("h1", { text: "💬 Messages" }), groupChips(gs, "msgs", commentsScreen),
     h("div", { class: "hint", text: "Clients write to you from the bot or the app. You can also reply to a message in the group's Messages topic." }),
     d.rows.length ? d.rows.map(r => h("button", { class: "row", on: { click: () => push(() => threadScreen(r.uid)) } },
       h("span", {}, h("b", { text: r.name + " · " + r.family + " family" }),
         r.unread ? h("span", { class: "badge", text: r.unread + " new" }) : null,
         h("span", { class: "hint", text: (r.dir === "out" ? "You: " : "") + r.last.slice(0, 80) + " · " + r.at }))))
       : h("div", { class: "msg", text: "No messages yet." }),
-    h("button", { class: "cta alt", text: "✉️ Write to someone", on: { click: () => { annDraft = { aud: "person", person: "", text: "" }; push(() => annScreen()); } } }),
+    h("button", { class: "cta alt", text: "✉️ Write to someone", on: { click: () => { annDraft = { aud: "person", person: "", text: "", picks: [] }; push(() => annScreen()); } } }),
     footer()]);
 }
 async function feedbackAdminScreen() {
@@ -814,39 +964,63 @@ async function sugsScreen() {
       const mk = (text, cls, fn) => { const b = h("button", { class: cls, text, on: { click: fn } }); btns.push(b); return b; };
       return h("div", { class: "card" },
         h("b", { text: r.from + " · " + r.family + " family" }),
-        h("div", { class: "hint", text: r.dt + (r.place ? " · " + r.place : "") + " · " + r.n + (r.n === 1 ? " photo" : " photos") + " · " + r.at }),
+        h("div", { class: "hint", text: r.dt + (r.place ? " · " + r.place : "") + " · " + (r.n - (r.v || 0) ? (r.n - (r.v || 0)) + (r.n - (r.v || 0) === 1 ? " photo" : " photos") : "") + (r.n - (r.v || 0) && r.v ? ", " : "") + (r.v ? r.v + (r.v === 1 ? " video" : " videos") : "") + " · " + r.at }),
         r.others.length ? h("div", { class: "hint", text: "Other families in the photos: " + r.others.join(", ") }) : null,
         photoGrid(r.cards),
         h("div", { class: "btns" },
           r.others.length ? mk("✅ Approve for all listed", "", () => act(r, "y", btns)) : mk("✅ Approve", "", () => act(r, "y", btns)),
           r.others.length ? mk("✅ Their family only", "alt", () => act(r, "o", btns)) : null,
-          mk("❌ Reject", "danger", () => act(r, "n", btns, "Reject these photos? They won't be added."))));
+          mk("❌ Reject", "danger", () => act(r, "n", btns, "Reject these? They won't be added."))));
     }) : h("div", { class: "msg", text: "Nothing is waiting. 🎉" }),
     footer()]);
 }
 function alertMsg(text) {
   text = String(text).slice(0, 250);  // (Telegram's popup refuses long text)
-  if (LANG === "ru" && !IS_ADMIN) text = ruT(text);
+  if (LANG !== "en" && !IS_ADMIN) text = ruT(text);
   return new Promise(res => { try { tg.showAlert(text, () => res()); } catch (e) { window.alert(text); res(); } });
 }
 
 // announcements
-let annDraft = { aud: "all", person: "", text: "" };
+let annDraft = { aud: "all", person: "", text: "", picks: [] };
 let peopleCache = null;
-function annAud(dr) { return dr.aud === "all" ? "all" : dr.aud === "person" ? "u:" + dr.person : parseInt(dr.aud, 10); }
-function annScreen(families) {
+function annAud(dr) {
+  if (dr.aud === "all") return "all";
+  if (dr.aud === "person") return "u:" + dr.person;
+  if (dr.aud === "pick") return "m:" + [...(dr.picks || [])].sort((a, b) => a - b).join(".");
+  if (String(dr.aud).startsWith("group:")) return "g:" + String(dr.aud).slice(6);
+  return parseInt(dr.aud, 10);
+}
+function annScreen(families, groups) {
   navId++;
-  if (!families) {  // (opened from a person's card: fetch the family list first)
+  if (!families || !groups) {  // (opened from a person's card: fetch the family and group lists first)
     loading(); const my0 = navId;
-    api("/api/admin/overview", {}).then(d => { if (my0 === navId) annScreen(d.families); })
+    api("/api/admin/overview", {}).then(d => { if (my0 === navId) annScreen(d.families, d.groups || []); })
       .catch(e => { if (my0 === navId) errorScreen(e, () => annScreen()); });
     return;
   }
+  annDraft.picks = (annDraft.picks || []).filter(t => families.some(f => f.tid === t));
   const sel = h("select", {}, h("option", { value: "all", text: "📣 Everyone (all families)" }),
-    (families || []).map(f => h("option", { value: String(f.tid), text: f.name + " family" })),
+    groups.length ? h("optgroup", { label: "Groups" }, groups.map(g => h("option", { value: "group:" + g.id, text: "🏷 " + g.name + " (" + g.tids.length + ")" }))) : null,
+    families.length > 1 ? h("option", { value: "pick", text: "☑️ Pick several families…" }) : null,
+    h("optgroup", { label: "One family" }, families.map(f => h("option", { value: String(f.tid), text: f.name + " family" }))),
     h("option", { value: "person", text: "👤 One person…" }));
   sel.value = annDraft.aud;
-  if (sel.value !== annDraft.aud) sel.value = "all";
+  let gone = null;
+  if (sel.value !== annDraft.aud) { gone = /^group:/.test(annDraft.aud) ? "That group no longer exists, so the audience was set back to Everyone." : (/^\d+$/.test(annDraft.aud) ? "That family no longer exists, so the audience was set back to Everyone." : null); annDraft.aud = "all"; sel.value = "all"; }
+  const picksCount = h("div", { class: "hint", text: "" });
+  const syncPicks = () => { picksCount.textContent = annDraft.picks.length + " picked"; };
+  const pickWrap = h("div", { style: "display:none" }, h("label", { text: "Tick the families" }),
+    h("div", { style: "display:flex;gap:8px;margin:6px 0 4px" },
+      h("button", { class: "small", text: "Select all", on: { click: () => { annDraft.picks = families.map(f => f.tid); boxes.forEach(b => { b.checked = true; }); syncPicks(); } } }),
+      h("button", { class: "small", text: "Clear", on: { click: () => { annDraft.picks = []; boxes.forEach(b => { b.checked = false; }); syncPicks(); } } })),
+    families.map(f => {
+      const cb = h("input", { type: "checkbox", style: "width:auto;margin-right:8px" }); cb.checked = annDraft.picks.includes(f.tid);
+      cb.addEventListener("change", () => { annDraft.picks = cb.checked ? [...new Set([...annDraft.picks, f.tid])] : annDraft.picks.filter(t => t !== f.tid); syncPicks(); });
+      cb._tid = f.tid;
+      return h("label", { style: "display:flex;align-items:center;padding:6px 0" }, cb, f.name + " family");
+    }), picksCount);
+  const boxes = [...pickWrap.querySelectorAll("input[type=checkbox]")];
+  syncPicks();
   const psel = h("select", {});
   const pwrap = h("div", {}, h("label", { text: "Which person?" }), psel);
   const msg = h("div", { class: "hint", text: "" });
@@ -866,6 +1040,7 @@ function annScreen(families) {
     }
   };
   const sync = () => {
+    pickWrap.style.display = sel.value === "pick" ? "" : "none";
     pwrap.style.display = sel.value === "person" ? "" : "none";
     text.placeholder = sel.value === "person" ? "Write your message…" : "Write your announcement…";
     if (sel.value === "person") fillPeople();
@@ -873,20 +1048,21 @@ function annScreen(families) {
   sel.addEventListener("change", () => { annDraft.aud = sel.value; sync(); });
   psel.addEventListener("change", () => { annDraft.person = psel.value; });
   const review = h("button", { class: "cta", text: "Review", on: { click: async () => {
-    annDraft = { aud: sel.value, person: psel.value || "", text: text.value };
+    annDraft = { aud: sel.value, person: psel.value || "", text: text.value, picks: annDraft.picks };
     if (sel.value === "person" && !annDraft.person) { msg.textContent = "⚠️ Please pick a person."; return; }
+    if (sel.value === "pick" && !annDraft.picks.length) { msg.textContent = "⚠️ Please tick at least one family."; return; }
     review.disabled = true; msg.textContent = "";
     try {
       const r = await api("/api/admin/ann_preview", { aud: annAud(annDraft), text: annDraft.text });
-      if (my === navId) annReview(families, r);
+      if (my === navId) annReview(families, groups, r);
     } catch (e) { msg.textContent = "⚠️ " + e.message; review.disabled = false; }
   } } });
-  show([backBtn(), h("h1", { text: "📣 Announcement or message" }), h("label", { text: "Who gets it?" }), sel, pwrap,
+  show([backBtn(), h("h1", { text: "📣 Announcement or message" }), gone ? h("div", { class: "msg err", text: "⚠️ " + gone }) : null, h("label", { text: "Who gets it?" }), sel, pickWrap, pwrap,
     h("label", { text: "Message" }), text, msg, review,
     h("button", { class: "cta alt", text: "🕒 Scheduled messages", on: { click: () => push(scheduledScreen) } }), footer()]);
   sync();
 }
-function annReview(families, pv) {
+function annReview(families, groups, pv) {
   navId++;
   const msg = h("div", { class: "hint", text: "" });
   const aud = annAud(annDraft);
@@ -895,7 +1071,7 @@ function annReview(families, pv) {
     send.disabled = true; msg.textContent = "Starting…";
     try {
       const r = await api("/api/admin/ann_send", { aud, text: annDraft.text });
-      annDraft = { aud: "all", person: "", text: "" };
+      annDraft = { aud: "all", person: "", text: "", picks: [] };
       await alertMsg("📣 Sending to " + r.count + (r.count === 1 ? " person" : " people") + ". The bot will message you when it's done.");
       back();
     } catch (e) { msg.textContent = "⚠️ " + e.message; send.disabled = false; }
@@ -906,7 +1082,7 @@ function annReview(families, pv) {
     sched.disabled = true; msg.textContent = "";
     try {
       const r = await api("/api/admin/ann_schedule", { aud, text: annDraft.text, when: when.value.slice(0, 16).replace("T", " ") });
-      annDraft = { aud: "all", person: "", text: "" };
+      annDraft = { aud: "all", person: "", text: "", picks: [] };
       await alertMsg("✅ Scheduled for " + r.label + " to " + r.who + ".");
       back();
     } catch (e) { msg.textContent = "⚠️ " + e.message; sched.disabled = false; }
@@ -915,7 +1091,7 @@ function annReview(families, pv) {
     h("div", { class: "hint", text: "Goes to " + (annDraft.aud === "person" ? pv.who : pv.count + (pv.count === 1 ? " person" : " people") + " in " + pv.who) + ":" }),
     h("div", { class: "msg", text: (pv.header || "📣 Announcement") + "\n\n" + annDraft.text }),
     send, h("label", { text: "…or send it later (" + (pv.tz || "bot") + " time)" }), when, sched, msg,
-    h("button", { class: "cta alt", text: "✏️ Edit the message", on: { click: () => annScreen(families) } }), footer()]);
+    h("button", { class: "cta alt", text: "✏️ Edit the message", on: { click: () => annScreen() } }), footer()]);
 }
 async function scheduledScreen() {
   const d = await adminLoad("/api/admin/scheduled", {}, scheduledScreen); if (!d) return;
@@ -934,15 +1110,25 @@ async function scheduledScreen() {
 }
 
 // login attempts
+const gf = { users: "", msgs: "", fams: "" };  // the group each admin list is filtered by ("" = everyone)
+async function groupList() { try { return (await api("/api/admin/groups", {})).groups || []; } catch (e) { return []; } }
+function groupChips(groups, key, rerender) {
+  if (!groups.length) { gf[key] = ""; return null; }
+  if (gf[key] && !groups.some(g => g.id === gf[key])) gf[key] = "";  // (that group was deleted)
+  const mk = (id, label) => h("button", { class: "chip" + (gf[key] === id ? " on" : ""), "data-ugc": "1", text: label, on: { click: () => { gf[key] = id; rerender(); } } });
+  return h("div", { class: "chips" }, mk("", "All"), groups.map(g => mk(g.id, "🏷 " + g.name)));
+}
 async function usersScreen() {
-  const d = await adminLoad("/api/admin/users", {}, usersScreen); if (!d) return;
-  show([backBtn(), h("h1", { text: "👥 Users" }),
+  loading(); const my0 = navId;
+  const gs = await groupList(); if (my0 !== navId) return; groupChips(gs, "users", () => {});
+  const d = await adminLoad("/api/admin/users", gf.users ? { group: gf.users } : {}, usersScreen); if (!d) return;
+  show([backBtn(), h("h1", { text: "👥 Users" }), groupChips(gs, "users", usersScreen),
     h("div", { class: "hint", text: d.total + " in total" + (d.shown < d.total ? " (showing the newest " + d.shown + ")" : "") + " · " + d.inFamily + " in a family · " + (d.total - d.inFamily) + " not yet" }),
     d.rows.length ? d.rows.map(p => h("div", { class: "card" },
       h("b", { text: p.name || "(no name)" }), p.username ? " @" + p.username : "",
       h("div", { class: "hint", text: p.status }),
       h("div", { class: "hint", text: "ID " + p.id + (p.at ? " · started " + p.at : "") })))
-      : h("div", { class: "msg", text: "Nobody has started the bot yet." })]);
+      : h("div", { class: "msg", text: gf.users ? "Nobody in this group yet." : "Nobody has started the bot yet." })]);
 }
 async function triesScreen() {
   const d = await adminLoad("/api/admin/tries", {}, triesScreen);
@@ -990,7 +1176,7 @@ const IMG_NAME = /\.(heic|heif|jpe?g|png|webp|gif)$/i;
 const fmtSize = n => n >= 1048576 ? (n / 1048576).toFixed(1) + " MB" : Math.max(1, Math.round(n / 1024)) + " KB";
 function newKey() { let k = ""; for (let i = 0; i < 24; i++) k += Math.floor(Math.random() * 36).toString(36); return k; }
 async function uploadOne(file, meta, key, signal) {
-  const q = new URLSearchParams({ fam: String(meta.fam), place: meta.place, date: meta.date, name: file.name || "photo" });
+  const q = new URLSearchParams({ fam: String(meta.fam), place: meta.place, date: meta.date, name: file.name || "photo", skip: meta.skip || "" });
   let res;
   try {
     res = await fetch("/api/admin/upload?" + q, { method: "POST", signal, body: file,
@@ -1002,12 +1188,13 @@ async function uploadOne(file, meta, key, signal) {
   return data;
 }
 function uploadScreen(pre) {
-  adminLoad("/api/admin/overview", {}, () => uploadScreen(pre)).then(d => { if (d) drawUpload(pre, d.families); });
+  adminLoad("/api/admin/overview", {}, () => uploadScreen(pre)).then(d => { if (d) drawUpload(pre, d.families, d.groups || []); });
 }
-function drawUpload(pre, families) {
+function drawUpload(pre, families, groups) {
   const my = navId;
   let items = [], running = false, ctl = null, stopFlag = false, doneFam = null;
   const sel = h("select", {}, h("option", { value: "", text: "Pick a family…" }),
+    groups.map(g => h("option", { value: "g:" + g.id, text: "👥 " + g.name + " (the whole group)" })),
     families.map(f => h("option", { value: String(f.tid), text: f.name + " family" })));
   if (pre != null) sel.value = String(pre);
   const place = h("input", { type: "text", maxlength: "80", placeholder: "Leave empty if you don't know" });
@@ -1018,6 +1205,20 @@ function drawUpload(pre, families) {
   const list = h("div", {}), msg = h("div", { class: "hint", text: "" }), bar = h("i"), summary = h("div", {});
   const start = h("button", { class: "cta", text: "⬆️ Upload", on: { click: () => run(false) } });
   const stop = h("button", { class: "cta alt", text: "Stop", style: "display:none", on: { click: () => { stopFlag = true; if (ctl) ctl.abort(); } } });
+  const leave = h("div", { style: "display:none" });  // (for a whole group: untick the families to leave out)
+  const skip = new Set();
+  const famName_ = new Map(families.map(f => [f.tid, f.name]));
+  function drawLeave() {
+    const g = groups.find(x => "g:" + x.id === sel.value);
+    leave.style.display = g ? "" : "none";
+    if (!g) { leave.replaceChildren(); skip.clear(); return; }
+    for (const t of [...skip]) if (!g.tids.includes(t)) skip.delete(t);
+    leave.replaceChildren(h("label", { text: "👥 Who sees these (untick to leave a family out)" }),
+      ...g.tids.map(t => { const cb = h("input", { type: "checkbox", style: "width:auto;margin-right:8px" }); cb.checked = !skip.has(t);
+        cb.addEventListener("change", () => { cb.checked ? skip.delete(t) : skip.add(t); });
+        return h("label", { style: "display:flex;align-items:center;padding:4px 0" }, cb, (famName_.get(t) || "?") + " family"); }));
+  }
+  sel.addEventListener("change", drawLeave);
   const choose = h("button", { class: "cta alt", text: "📷 Choose photos", on: { click: () => pick.click() } });
   const wait = items_ => items_.filter(i => i.state === "ready" || i.state === "fail");
   function paint() {
@@ -1054,7 +1255,8 @@ function drawUpload(pre, families) {
     msg.textContent = "";
     if (!sel.value) { msg.textContent = "⚠️ Please pick the family first."; return; }
     if (!idk.checked && !day.value) { msg.textContent = "⚠️ Please pick the date, or tick “I don't know the date”."; return; }
-    const meta = { fam: parseInt(sel.value, 10), place: place.value, date: idk.checked ? "unknown" : day.value };
+    const isGroup = sel.value.startsWith("g:");
+    const meta = { fam: isGroup ? sel.value : parseInt(sel.value, 10), skip: isGroup ? [...skip].join(",") : "", place: place.value, date: idk.checked ? "unknown" : day.value };
     const famName = sel.selectedOptions[0].text;
     running = true; stopFlag = false; paint();
     for (const it of items.filter(i => i.state === "ready" || i.state === "fail")) {
@@ -1065,7 +1267,7 @@ function drawUpload(pre, families) {
       try { const r = await uploadOne(it.file, meta, it.key, ctl.signal); it.state = "done"; doneFam = meta.fam; if (r.indexed === false) it.msg = "⚠️ In the group, but not in the app yet"; }
       catch (e) {
         it.state = "fail"; it.msg = e.message;
-        if (e.maybe) it.key = newKey();  // (it may already be in the group: a retry is the owner's call)
+        if (e.maybe || /changed/i.test(e.message)) it.key = newKey();  // (it may already be in the group: a retry is the owner's call)
       }
       clearTimeout(timer);
       paint();
@@ -1073,21 +1275,22 @@ function drawUpload(pre, families) {
     running = false; ctl = null; paint();
     const done = items.filter(i => i.state === "done").length, failed = items.filter(i => i.state === "fail").length;
     summary.replaceChildren(...(done ? [
-      h("div", { class: "msg", text: "✅ " + done + (done === 1 ? " photo" : " photos") + " added to the " + famName + "." + (failed ? " " + failed + " didn't go through." : "") + (stopFlag ? " (Stopped.)" : "") }),
-      h("button", { class: "cta alt", text: "📸 Browse their photos", on: { click: () => enterFamily(meta.fam, famName.replace(/ family$/, "")) } })] : []));
+      h("div", { class: "msg", text: "✅ " + done + (done === 1 ? " photo" : " photos") + (isGroup ? " added for the whole group." : " added to the " + famName + ".") + (failed ? " " + failed + " didn't go through." : "") + (stopFlag ? " (Stopped.)" : "") }),
+      isGroup ? h("div", { class: "hint", text: "Every family in this group sees these." }) : h("button", { class: "cta alt", text: "📸 Browse their photos", on: { click: () => enterFamily(meta.fam, famName.replace(/ family$/, "")) } })] : []));
   }
   show([backBtn(), h("h1", { text: "📤 Add photos" }),
-    h("label", { text: "Family" }), sel,
+    h("label", { text: "Family or whole group" }), sel, leave,
     h("label", { text: "📍 Place" }), place,
     h("label", { text: "📅 Date" }), day, h("label", { class: "chk" }, idk, "I don't know the date"),
     h("div", { class: "hint", style: "margin-top:12px", text: "Photos go up as files, so the full quality is kept. Up to 30 MB each. For bigger files, send them through the chat." }),
     choose, pick, list, h("div", { class: "bar" }, bar), msg, start, stop, summary, footer()]);
+  drawLeave();
   paint();
 }
 
 document.addEventListener("visibilitychange", () => {
   const typing = [...document.querySelectorAll("textarea,input")].some(x => x.value);  // (never wipe something half-written)
-  if (document.visibilityState === "visible" && HOME && !viewerOpen() && !typing && stack.length <= 1 && Date.now() - homeAt > 3600 * 1000) { HOME = null; setTab("home"); }
+  if (document.visibilityState === "visible" && HOME && !viewerOpen() && !typing && stack.length <= 1 && Date.now() - homeAt > 3600 * 1000) { HOME = null; setTab(typeof tab !== "undefined" && tab ? tab : (IS_ADMIN && adminFam == null ? "admin" : "home")); }  // (the home screen is what reloads HOME and the tab bar)
 });
 setTab("home");
 </script>

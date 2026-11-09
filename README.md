@@ -287,13 +287,13 @@ For 3 days after you write to someone, whatever they type in the bot chat comes 
 - **Chats inside the bot:** `/admin` → **💬 Messages** lists conversations (with unread counts), opens one, lets you **✍️ Reply**, delete a message, or delete the chat.
 - Unlinking a person or deleting a family also deletes their chat and feedback.
 
-## Russian / English (translation)
+## Any language (translation)
 
-Clients can tap **🌐 Русский / English** (bot menu, or the app's Home tab). After that:
+The first time someone opens the bot (`/start`) or the app, they are asked for their language: a **Recommended** list (Русский, Українська, English) and a **search** for about 75 others (type the English name or the name in its own letters, for example `hebrew` or `español`). They can change it any time with **🌐 Language** (bot menu, or the app's Home tab). People who picked a language before are asked once on their next visit. After that:
 
-- The bot's menus, buttons and the app are shown in Russian for them (the Admin tab stays English).
-- Their Russian messages and feedback reach you in English (the original is shown below it).
-- Your messages and announcements reach Russian-speaking clients in Russian, with the original underneath.
+- The bot's menus, buttons and the app are shown in their language (the Admin tab stays English). Russian uses a hand-written translation; every other language is translated with Groq the first time someone picks it, then saved, so it is instant for the next people. Right-to-left languages (Arabic, Hebrew, Persian, Urdu, Yiddish) flip the layout.
+- Their messages and feedback reach you in English (the original is shown below it).
+- Your messages and announcements reach them in their language, with the original underneath.
 
 **Setup (free):** make an account at console.groq.com, create an API key, and add it on Render as the environment
 variable `GROQ_API_KEY`. Optional: `GROQ_MODEL` (default `llama-3.3-70b-versatile`; change it if Groq retires that name).
@@ -306,3 +306,39 @@ Without a key everything still works; messages just aren't translated.
 **/admin → 👥 Users** (and the app's Admin tab → Users) lists everyone who started the bot, newest first, with where they stand:
 in a family, added by a relative but not confirmed yet, asked for a new family, tried to log in with wrong details, or just started the bot.
 People who pressed Start before this update appear once they are in a family or try to log in; everyone else shows up the next time they press Start.
+
+## Groups and choosing who gets an announcement
+
+**Admin → 🏷 Groups** (app) or **/admin → 🏷 Groups** (bot): make named groups of families (for example "Camp"). A family can be in several groups.
+Tick the families inside a group, or open a family's page and tick its groups. Deleting a family removes it from every group.
+
+**Announcements** (and "Write to someone") can go to: everyone, a group, several families you tick, one family, or one person.
+The preview shows who will get it before you send. For a scheduled announcement to a group, the group's families are looked up when it is sent, so families you add later are included.
+
+**Filters:** the Families list, 👥 Users and 💬 Messages have group buttons (All / each group) in both the bot and the app.
+
+Groups need no new setup. Limits: 30 groups, group names up to 30 characters, up to 100 hand-picked families per announcement.
+
+## Videos
+
+You can add videos the same way as photos, from the bot chat or by posting in a family's topic in the group:
+
+- **Bot chat:** /admin → Add photos → pick the family → place and date → send photos **and videos** (a video sent as a File is kept as a file).
+- **Group topic:** post the video with a caption like `2026-07-04 | Central Park`, same as a photo. Replying `/best` or `/remove` to a video works too.
+
+Videos can be any size (the bot never downloads them, it passes them on by Telegram's file id). Clients see them in the bot with the photos, and in the app as a thumbnail with a ▶ badge and the length.
+In the app, tapping ▶ (or the button) sends the full video to the client's chat. The app doesn't play videos itself. A video can't be added from the app's upload screen (photos only), but clients **can** suggest videos: in ➕ Suggest photos they send photos and videos together (a video sent as a File stays a File). In the group's suggestions topic and in the app's Suggested inbox you see each video's thumbnail and length, with the usual Approve / Reject. When you approve, the videos join the family's gallery (and the other families you approve for) with “Added by …”, exactly like suggested photos.
+GIFs are ignored.
+
+## Photos and videos for a whole group
+
+For a photo or video of everyone in a group (for example the whole camp), add it **once** to the group instead of to every family:
+
+- **Bot chat:** /admin → **📤 Add photos** → tap the **👥 group** button above the families (or open the group under **Groups** → **📤 Add photos/videos for the whole group**) → place → date → send photos **and videos**. For the place you can type `group` to use “Camp · whole group”.
+- **App:** Admin tab → **Add photos** → choose **👥 Camp (the whole group)** in the picker (photos only; videos go through the bot chat).
+
+There is only **one shared copy**. Every family in the group sees it, including families you add to the group later, and a family you take out of the group stops seeing it right away. Families outside the group never see it. It shows up with the family's own photos in the bot and the app (dates, places, All, Best shots, New photos), labelled **👥 Camp**. The copy is kept in the Telegram group's **General** topic (the bot never indexes that topic from what you post there by hand).
+
+**Leaving families out:** when you start a group upload you get a checklist of the group's families (all ticked). Untick any family that should not see these files, then tap **➡️ Continue** (the app has the same list under the picker). Left-out families never see the files, even though they are in the group. To change it for one file later, open the photo in the app as the owner → ✏️ Edit → **Who sees it**.
+
+When you finish, the bot offers to tell everyone in the group (not the left-out families). To remove group files: open the group in the app and delete a photo as usual, or in the bot use Groups → the group → **🗑 Delete the group's shared files**. Deleting a group also deletes its shared files.

@@ -65,6 +65,7 @@ EXACT = {
     "Please tap ✅ Yes or ✏️ Start over above.": "Пожалуйста, нажмите ✅ Да или ✏️ Начать заново выше.",
     "Send the photos, then tap Send for approval.": "Отправьте фото, затем нажмите «Отправить на одобрение».",
     "📥 Got it. Send more, or tap Send for approval.": "📥 Принято. Отправьте ещё или нажмите «Отправить на одобрение».",
+    "I only take photos, videos and image files. That one was skipped.": "Я принимаю только фото, видео и файлы-изображения. Этот файл пропущен.",
     "I only take photos and image files. That one was skipped.": "Я принимаю только фото и файлы-изображения. Этот файл пропущен.",
     "📍 Where were they taken? Type the place, or type unknown if you don't know.":
         "📍 Где это снято? Напишите место или «unknown», если не знаете.",
@@ -86,6 +87,7 @@ EXACT = {
     "🗑 Your chat was deleted.": "🗑 Ваш чат удалён.",
     "There was no chat to delete.": "Нет чата для удаления.",
     "ℹ️ How this works": "ℹ️ Как это работает",
+    "🌐 Language": "🌐 Язык",
 }
 
 # (pattern, template using the groups): for texts that contain a name or a number
