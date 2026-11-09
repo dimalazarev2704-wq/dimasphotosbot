@@ -1866,7 +1866,7 @@ SUG_MAX_ITEMS = 30
 UNKNOWN_WORDS = {"unknown", "no date", "nodate", "idk", "dont know", "i dont know", "dunno", "not sure", "skip"}
 ASK_SUG_PLACE = "📍 Where were they taken? Type the place, or type unknown if you don't know."
 ASK_SUG_OTHER = (
-    "👪 Are other families in these photos too? Type their last names separated by commas "
+    "👪 Are other families in these photos too? Type their FAMILY last names (not first names) separated by commas "
     "(for example: Novak, Smith), or type no."
 )
 
@@ -2097,7 +2097,7 @@ async def submit_suggestion(context: ContextTypes.DEFAULT_TYPE, user, user_doc, 
     if others:
         lines.append("Other families in the photos: " + ", ".join(f["name"] for f in others))
     if sug.get("unmatched"):
-        lines.append("Names I couldn't match: " + ", ".join(sug["unmatched"]))
+        lines.append("Not a family last name I know (they may be first names): " + ", ".join(sug["unmatched"]))
     try:
         prompt = await bot.send_message(
             GROUP_ID, "\n".join(lines), message_thread_id=sug_tid,

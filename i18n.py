@@ -69,8 +69,8 @@ EXACT = {
     "I only take photos and image files. That one was skipped.": "Я принимаю только фото и файлы-изображения. Этот файл пропущен.",
     "📍 Where were they taken? Type the place, or type unknown if you don't know.":
         "📍 Где это снято? Напишите место или «unknown», если не знаете.",
-    "👪 Are other families in these photos too? Type their last names separated by commas (for example: Novak, Smith), or type no.":
-        "👪 На этих фото есть другие семьи? Напишите их фамилии через запятую (например: Novak, Smith) или напишите «no».",
+    "👪 Are other families in these photos too? Type their FAMILY last names (not first names) separated by commas (for example: Novak, Smith), or type no.":
+        "👪 На этих фото есть другие семьи? Напишите ФАМИЛИИ семей (не имена) через запятую (например: Novak, Smith) или напишите «no».",
     "Not yet. Please answer my question first, then send the photos again.": "Ещё рано. Сначала ответьте на мой вопрос, потом отправьте фото снова.",
     "That suggestion timed out. Tap ➕ Suggest photos to start again.": "Время вышло. Нажмите ➕ Предложить фото, чтобы начать заново.",
     "That timed out. Tap 👪 Add a family member to start again.": "Время вышло. Нажмите 👪 Добавить родственника, чтобы начать заново.",
