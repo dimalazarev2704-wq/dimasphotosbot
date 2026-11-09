@@ -58,6 +58,8 @@ from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 from pymongo import AsyncMongoClient
 from telegram import (
+    BotCommand,
+    BotCommandScopeChat,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     InputMediaDocument,
@@ -6283,6 +6285,23 @@ async def post_init(app: Application) -> None:
             log.exception("Couldn't set the bot's Open button (the 📱 button in the menu still works)")
     else:
         log.warning("WEBAPP_URL / RENDER_EXTERNAL_URL is not set (or isn't https): the photo app is off.")
+    if GROUP_ID:  # the "/" menu inside the group only (the commands in a private chat are left as they are in BotFather)
+        try:
+            await app.bot.set_my_commands(
+                [
+                    BotCommand("go", "Upload line: publish this batch (reply to it)"),
+                    BotCommand("hold", "Upload line: move this batch to Photos on review"),
+                    BotCommand("del", "Upload line: drop a photo (reply to it)"),
+                    BotCommand("register", "Make this topic a family: /register LastName"),
+                    BotCommand("code", "Show this family's code"),
+                    BotCommand("members", "Who is linked to this family"),
+                    BotCommand("families", "List all families"),
+                    BotCommand("best", "Mark a photo as a best shot (reply to it)"),
+                ],
+                scope=BotCommandScopeChat(chat_id=GROUP_ID),
+            )
+        except TelegramError:
+            log.warning("Couldn't set the group's command menu (the commands still work when typed)")
     log.info("Connected to MongoDB database '%s'", DB_NAME)
 
 
