@@ -4532,6 +4532,39 @@ async def users_view(page: int, gid: str | None = None):
     return text, InlineKeyboardMarkup(filt + ([nav] if nav else []) + [[_btn("⬅️ Admin panel", "a:home")]])
 
 
+async def upline_data() -> dict:
+    """Who is in a family (and whether the owner put them on the upload line) + how many batches wait."""
+    rows = [p for p in await users_rows() if p["linked"]]
+    on = {u["_id"] for u in await db.users.find({"upline": True}).to_list()}
+    for p in rows:
+        p["on"] = p["id"] in on
+    rows.sort(key=lambda p: (not p["on"], (p["name"] or "").casefold(), p["id"]))
+    waiting = await db.suggestions.count_documents({"status": "line"})
+    review = await db.suggestions.count_documents({"status": "review"})
+    return {"rows": rows, "waiting": waiting, "review": review}
+
+
+async def upline_view(page: int):
+    d = await upline_data()
+    rows = d["rows"]
+    per = 8
+    page = max(0, min(page, max(0, (len(rows) - 1) // per)))
+    chunk = rows[page * per:(page + 1) * per]
+    text = ("📤 Upload line\n\nPeople switched ON send their photos to the 📤 Upload line topic in your group instead of Suggestions. "
+            "In that topic reply /go to publish a batch, /hold to move it to 📋 Photos on review, or /del to drop a photo "
+            "(or use the buttons under the batch).\n\n"
+            f"Waiting in the line: {d['waiting']} · On review: {d['review']}\n\nTap a person to switch them ON or off:"
+            if rows else "📤 Upload line\n\nNobody is in a family yet.")
+    kb = [[_btn(f"{'✅ ON' if p['on'] else '⚪ off'} · {(p['name'] or '(no name)')[:24]} ({p['status'].replace('👪 ', '').replace(' family', '')[:20]})",
+                f"a:lt:{p['id']}:{page}")] for p in chunk]
+    nav = []
+    if page > 0:
+        nav.append(_btn("⬅️ Back", f"a:lv:{page - 1}"))
+    if (page + 1) * per < len(rows):
+        nav.append(_btn("More ➡️", f"a:lv:{page + 1}"))
+    return text, InlineKeyboardMarkup(kb + ([nav] if nav else []) + [[_btn("⬅️ Admin panel", "a:home")]])
+
+
 def admin_home_markup() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
@@ -4541,7 +4574,7 @@ def admin_home_markup() -> InlineKeyboardMarkup:
             [_btn("📣 Announce", "a:an:0"), _btn("🕒 Scheduled", "a:sc:0")],
             [_btn("💬 Messages", "a:ms:0"), _btn("📝 Feedback", "a:fb:0")],
             [_btn("🏷 Groups", "a:gr:0"), _btn("👥 Users", "a:us:0")],
-            [_btn("📊 Stats", "a:stats")],
+            [_btn("📤 Upload line", "a:lv:0"), _btn("📊 Stats", "a:stats")],
         ]
     )
 
@@ -4932,6 +4965,18 @@ async def on_admin_button(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await delete_feedback(context.bot, None, parts[2])
         await show(*await feedback_view(0))
 
+
+    elif action == "lv":  # the upload line: who is on it
+        context.user_data.pop("adm", None)
+        await show(*await upline_view(int(parts[2])))
+
+    elif action == "lt":  # switch one person on / off the upload line
+        context.user_data.pop("adm", None)
+        uid = int(parts[2])
+        u = await db.users.find_one({"_id": uid})
+        if u:
+            await db.users.update_one({"_id": uid}, {"$set": {"upline": not u.get("upline")}})
+        await show(*await upline_view(int(parts[3])))
 
     elif action == "us":  # everyone who started the bot
         context.user_data.pop("adm", None)
@@ -5507,7 +5552,7 @@ ADMIN_ACTIONS = {
     "overview", "family", "photo_best", "photo_remove", "photo_edit", "photo_vis", "sugs", "sug_act",
     "ann_preview", "ann_send", "ann_schedule", "scheduled", "sched_cancel",
     "tries", "try_add", "try_dismiss", "try_unlock", "tries_clear",
-    "fam_add", "fam_code", "people", "users", "groups", "group_save", "group_delete", "group_member", "comments", "thread", "chat_send", "chat_clear", "chat_msg_delete", "feedback", "feedback_read", "feedback_delete", "invite", "invite_send", "fam_delete", "member_unlink", "person_add", "best_clear",
+    "fam_add", "fam_code", "people", "users", "upline", "upline_set", "groups", "group_save", "group_delete", "group_member", "comments", "thread", "chat_send", "chat_clear", "chat_msg_delete", "feedback", "feedback_read", "feedback_delete", "invite", "invite_send", "fam_delete", "member_unlink", "person_add", "best_clear",
 }
 
 
@@ -5830,6 +5875,21 @@ async def _admin_api(bot, action: str, req: dict) -> tuple[int, dict]:
         if not (isinstance(gid, str) and re.fullmatch(r"[0-9a-f]{6}", gid)) or tid is None or not isinstance(req.get("on"), bool):
             return bad
         return await group_member(gid, tid, req["on"])
+
+    if action == "upline":
+        d = await upline_data()
+        return 200, {"waiting": d["waiting"], "review": d["review"],
+                     "rows": [{"id": p["id"], "name": p["name"], "username": p["username"], "status": p["status"], "on": p["on"]} for p in d["rows"][:300]]}
+
+    if action == "upline_set":
+        uid = _int(req.get("uid"), 1)
+        if uid is None or not isinstance(req.get("on"), bool):
+            return bad
+        u = await db.users.find_one({"_id": uid})
+        if not u or u.get("pending") or u.get("thread_id") is None:
+            return 404, {"error": "That person isn't in a family."}
+        await db.users.update_one({"_id": uid}, {"$set": {"upline": req["on"]}})
+        return 200, {"ok": True}
 
     if action == "users":
         rows = await users_rows(req.get("group") if isinstance(req.get("group"), str) else None)
