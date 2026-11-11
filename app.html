@@ -708,7 +708,7 @@ async function adminHome() {
     bigRow("📣", "Announcements & messages", s.scheduled ? s.scheduled + " scheduled" : "", () => { if (annDraft.aud === "person") annDraft = { aud: "all", person: "", text: "", picks: [] }; push(() => annScreen()); }),
     bigRow("🏷", "Groups", d.groups && d.groups.length ? d.groups.length : "", () => push(() => groupsScreen())),
     bigRow("🕵️", "Login attempts", s.tries, () => push(() => triesScreen())),
-    bigRow("📤", "Upload line", "", () => push(uplineScreen)),
+    bigRow("📸", "Photographers", "", () => push(uplineScreen)),
     bigRow("👥", "Users", "", () => push(usersScreen)),
     h("h2", { text: "Families" }), groupChips(d.groups || [], "fams", () => { const y = window.scrollY; adminHome().then(() => window.scrollTo(0, y)); }),
     d.families.length ? d.families.filter(f => !gf.fams || ((d.groups || []).find(g => g.id === gf.fams) || { tids: [] }).tids.includes(f.tid)).map(f => h("button", { class: "row", on: { click: () => push(() => familyScreen(f.tid)) } },
@@ -1133,8 +1133,8 @@ async function usersScreen() {
 }
 async function uplineScreen() {
   const d = await adminLoad("/api/admin/upline", {}, uplineScreen); if (!d) return;
-  show([backBtn(), h("h1", { text: "📤 Upload line" }),
-    h("div", { class: "hint", text: "People switched ON send their photos to the 📤 Upload line topic in your group instead of Suggestions. There, reply /go to publish a batch, /hold to move it to 📋 Photos on review, or /del to drop a photo. Waiting: " + d.waiting + " · On review: " + d.review }),
+  show([backBtn(), h("h1", { text: "📸 Photographers line" }),
+    h("div", { class: "hint", text: "People switched ON are your top photographers: what they send goes to the 📤 Photographers line topic in your group. Everyone else's photos go to the shared 📤 Upload line topic. In either topic, reply /go to publish a batch, /hold to move it to 📋 Photos on review, or /del to drop a photo. Waiting: " + d.waiting + " · On review: " + d.review }),
     d.rows.length ? d.rows.map(p => h("div", { class: "card" },
       h("b", { text: p.name || "(no name)" }), p.username ? " @" + p.username : "",
       h("div", { class: "hint", text: p.status }),

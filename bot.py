@@ -497,7 +497,7 @@ async def register(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if await db.meta.find_one({"_id": {"$in": ["comments", "feedback"]}, "thread_id": thread_id}):
         await msg.reply_text("This is the 💬 Messages topic, so it can't be a family. Use the family's own topic.")
         return
-    if await db.meta.find_one({"_id": {"$in": ["line", "review"]}, "thread_id": thread_id}):
+    if await db.meta.find_one({"_id": {"$in": ["line", "pro", "review"]}, "thread_id": thread_id}):
         await msg.reply_text("This is one of the upload-review topics, so it can't be a family. Use the family's own topic.")
         return
     if await db.meta.find_one({"_id": "addfam", "thread_id": thread_id}):
@@ -688,8 +688,8 @@ async def on_group_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return  # the ➕ Add families topic is never a family
     if await db.meta.find_one({"_id": {"$in": ["comments", "feedback"]}, "thread_id": msg.message_thread_id}):
         return  # neither are the 💬 Messages and ⭐ Feedback topics
-    if await db.meta.find_one({"_id": {"$in": ["line", "review"]}, "thread_id": msg.message_thread_id}):
-        await line_media(update, context)  # (the 📤 Upload line / 📋 Photos on review topics: only for replacing a photo)
+    if await db.meta.find_one({"_id": {"$in": ["line", "pro", "review"]}, "thread_id": msg.message_thread_id}):
+        await line_media(update, context)  # (the 📤 Upload line / 📤 Photographers line / 📋 Photos on review topics: only for replacing a photo)
         return
     await index_file(
         msg.message_thread_id, msg.message_id, file_id, msg.caption, msg.media_group_id, msg.date, kind,
@@ -1598,7 +1598,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         context.user_data["sug"] = {
             "stage": "place", "items": [], "thread_id": thread_id, "until": time.time() + SESSION_SECONDS,
         }
-        await show("💡 Suggest photos for your family's gallery.\n\n" + ASK_SUG_PLACE, one_button("Cancel", "menu"))
+        await show(f"💡 Suggest photos to {(os.getenv('OWNER_NAME', '') or 'the photographer').strip()[:40]}.\n\n" + ASK_SUG_PLACE, one_button("Cancel", "menu"))
 
     elif data == "sg:send":  # send the suggestion to the photographer for approval
         sug, expired = get_sug(context)
@@ -2075,8 +2075,8 @@ async def submit_suggestion(context: ContextTypes.DEFAULT_TYPE, user, user_doc, 
         return "Your family was changed, so please start the suggestion again."
     name = sug_name(user_doc, user)
     sid = secrets.token_hex(5)
-    if user_doc and user_doc.get("upline"):  # someone the owner put on the upload line: it goes there, not to Suggestions
-        return await submit_to_line(context.bot, user, fam, name, sid, sug)
+    if not LEGACY_SUGGESTIONS:  # it goes to the photographer (you): the 📤 Photographers line for the people you picked, else the shared 📤 Upload line
+        return await submit_to_line(context.bot, user, fam, name, sid, sug, "pro" if user_doc and user_doc.get("upline") else "line")
     board: list[int] = []
     sug_tid = None
     for attempt in (1, 2):
@@ -2275,7 +2275,8 @@ async def _process_suggestion(bot, sid: str, action: str, edit) -> None:
 
 # ---------- the upload line (people the owner trusts to send lots of photos) ----------
 
-LINE_TITLES = {"line": "📤 Upload line", "review": "📋 Photos on review"}
+LINE_TITLES = {"line": "📤 Upload line", "pro": "📤 Photographers line", "review": "📋 Photos on review"}
+LEGACY_SUGGESTIONS = False  # (True = the old way: a Suggestions topic per family with Approve / Reject buttons)
 LINE_STATUSES = ["line", "review"]
 LINE_LOCK = asyncio.Lock()
 LINE_HELP = ("\n\nReply /go to publish · /hold to park it in Photos on review · /del to a photo to drop it · "
@@ -2325,7 +2326,7 @@ async def post_line_batch(bot, doc: dict, key: str) -> tuple[list[int], int, int
         try:
             tid = await line_topic(bot, key, force_new=attempt == 2)
             await post_items(bot, tid, doc["items"], board)
-            head = "⏸ On review\n" if key == "review" else "📤 Upload line\n"
+            head = LINE_TITLES[key] + "\n"
             prompt = await bot.send_message(
                 GROUP_ID, head + await line_info(doc) + LINE_HELP, message_thread_id=tid,
                 reply_markup=line_buttons(doc["_id"], key == "review"),
@@ -2343,16 +2344,16 @@ async def post_line_batch(bot, doc: dict, key: str) -> tuple[list[int], int, int
     raise RuntimeError("couldn't post the batch")
 
 
-async def submit_to_line(bot, user, fam: dict, name: str, sid: str, sug: dict) -> str | None:
+async def submit_to_line(bot, user, fam: dict, name: str, sid: str, sug: dict, lane: str = "line") -> str | None:
     others, unmatched = list(sug.get("others", [])), list(sug.get("unmatched", []))
     doc = {
         "_id": sid, "status": "line", "from_id": user.id, "from_name": name, "thread_id": sug["thread_id"],
         "others": others, "unmatched": unmatched, "place": sug.get("place"), "date": sug["date"],
         "items": [i for ch in kind_chunks(sug["items"]) for i in ch],  # (same order as the posted messages)
-        "done": [], "created": datetime.now(timezone.utc), "edit_stage": None,
+        "done": [], "created": datetime.now(timezone.utc), "edit_stage": None, "lane": lane,
     }
     try:
-        board, prompt_id, tid = await post_line_batch(bot, doc, "line")
+        board, prompt_id, tid = await post_line_batch(bot, doc, lane)
     except (TimedOut, NetworkError):
         log.warning("Timed out posting to the upload line")
         return "Telegram was too slow. Please tap Send for approval again in a moment."
@@ -2363,7 +2364,7 @@ async def submit_to_line(bot, user, fam: dict, name: str, sid: str, sug: dict) -
     await db.suggestions.update_one({"_id": sid}, {"$set": {**doc, "board_ids": board, "prompt_id": prompt_id, "topic": tid}}, upsert=True)
     if OWNER_ID:
         try:
-            await bot.send_message(OWNER_ID, f"📤 {name} ({fam['name']} family) sent {len(doc['items'])} file(s) to the 📤 Upload line topic in the group.")
+            await bot.send_message(OWNER_ID, f"📤 {name} ({fam['name']} family) sent {len(doc['items'])} file(s) to the {LINE_TITLES[lane]} topic in the group.")
         except TelegramError:
             pass
     return None
@@ -2375,7 +2376,7 @@ async def line_refresh(bot, doc: dict) -> None:
     review = doc.get("status") == "review"
     try:
         await bot.edit_message_text(
-            ("⏸ On review\n" if review else "📤 Upload line\n") + await line_info(doc) + LINE_HELP,
+            (LINE_TITLES["review" if review else doc.get("lane", "line")] + "\n") + await line_info(doc) + LINE_HELP,
             chat_id=GROUP_ID, message_id=doc["prompt_id"], reply_markup=line_buttons(doc["_id"], review),
         )
     except TelegramError:
@@ -2525,7 +2526,7 @@ async def line_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not msg or not msg.from_user or not is_owner(msg.from_user.id) or not msg.is_topic_message:
         return
     tid = msg.message_thread_id
-    if not await db.meta.find_one({"_id": {"$in": ["line", "review"]}, "thread_id": tid}):
+    if not await db.meta.find_one({"_id": {"$in": ["line", "pro", "review"]}, "thread_id": tid}):
         return
     cmd = (msg.text or "").split()[0].lstrip("/").split("@")[0].lower()
     rep = msg.reply_to_message
@@ -4550,11 +4551,11 @@ async def upline_view(page: int):
     per = 8
     page = max(0, min(page, max(0, (len(rows) - 1) // per)))
     chunk = rows[page * per:(page + 1) * per]
-    text = ("📤 Upload line\n\nPeople switched ON send their photos to the 📤 Upload line topic in your group instead of Suggestions. "
-            "In that topic reply /go to publish a batch, /hold to move it to 📋 Photos on review, or /del to drop a photo "
-            "(or use the buttons under the batch).\n\n"
-            f"Waiting in the line: {d['waiting']} · On review: {d['review']}\n\nTap a person to switch them ON or off:"
-            if rows else "📤 Upload line\n\nNobody is in a family yet.")
+    text = ("📤 Photographers line\n\nPeople switched ON are your top photographers: what they send goes to the 📤 Photographers line topic "
+            "in your group. Everyone else's photos go to the shared 📤 Upload line topic. In either topic reply /go to publish a batch, "
+            "/hold to move it to 📋 Photos on review, or /del to drop a photo (or use the buttons under the batch).\n\n"
+            f"Waiting: {d['waiting']} · On review: {d['review']}\n\nTap a person to switch them ON or off:"
+            if rows else "📤 Photographers line\n\nNobody is in a family yet.")
     kb = [[_btn(f"{'✅ ON' if p['on'] else '⚪ off'} · {(p['name'] or '(no name)')[:24]} ({p['status'].replace('👪 ', '').replace(' family', '')[:20]})",
                 f"a:lt:{p['id']}:{page}")] for p in chunk]
     nav = []
@@ -4574,7 +4575,7 @@ def admin_home_markup() -> InlineKeyboardMarkup:
             [_btn("📣 Announce", "a:an:0"), _btn("🕒 Scheduled", "a:sc:0")],
             [_btn("💬 Messages", "a:ms:0"), _btn("📝 Feedback", "a:fb:0")],
             [_btn("🏷 Groups", "a:gr:0"), _btn("👥 Users", "a:us:0")],
-            [_btn("📤 Upload line", "a:lv:0"), _btn("📊 Stats", "a:stats")],
+            [_btn("📸 Photographers", "a:lv:0"), _btn("📊 Stats", "a:stats")],
         ]
     )
 
@@ -4693,7 +4694,7 @@ async def members_view(tid: int):
         return None
     people = await db.users.find({"thread_id": tid}).sort("first_name", 1).to_list()
     rows = [[_btn(f"Unlink {p['first_name']}"[:40], f"a:ul:{tid}:{p['_id']}"),
-             _btn(f"📤 Line: {'ON' if p.get('upline') else 'off'} · {p['first_name']}"[:40], f"a:ln:{tid}:{p['_id']}")]
+             _btn(f"📸 Photographer: {'ON' if p.get('upline') else 'off'} · {p['first_name']}"[:40], f"a:ln:{tid}:{p['_id']}")]
             for p in people[:25]]
     rows.append([_btn("⬅️ Back", f"a:f:{tid}")])
     if not people:
@@ -4701,7 +4702,7 @@ async def members_view(tid: int):
     else:
         lines = [
             f"• {p['first_name']} (id {p['_id']}" + (f", @{p['username']}" if p.get("username") else "") + ")"
-            + (" 📤 upload line" if p.get("upline") else "")
+            + (" 📸 photographer" if p.get("upline") else "")
             + (f" — added by {p['added_by']}" if p.get("added_by") else "")
             + (" ⏳ hasn't confirmed their name yet" if p.get("pending") else "")
             for p in people[:25]
@@ -6352,9 +6353,9 @@ async def post_init(app: Application) -> None:
         try:
             await app.bot.set_my_commands(
                 [
-                    BotCommand("go", "Upload line: publish this batch (reply to it)"),
-                    BotCommand("hold", "Upload line: move this batch to Photos on review"),
-                    BotCommand("del", "Upload line: drop a photo (reply to it)"),
+                    BotCommand("go", "Publish this batch (reply to it)"),
+                    BotCommand("hold", "Move this batch to Photos on review"),
+                    BotCommand("del", "Drop a photo from a batch (reply to it)"),
                     BotCommand("register", "Make this topic a family: /register LastName"),
                     BotCommand("code", "Show this family's code"),
                     BotCommand("members", "Who is linked to this family"),
