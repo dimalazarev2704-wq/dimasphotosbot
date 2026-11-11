@@ -5492,6 +5492,9 @@ async def chat_id_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if type(context.error).__name__ == "Conflict":  # two copies of the bot ran for a few seconds while Render swapped them: harmless
+        log.warning("Telegram says another copy of the bot is polling (normal for a few seconds while a deploy swaps copies)")
+        return
     log.error("Unhandled error", exc_info=context.error)
 
 
