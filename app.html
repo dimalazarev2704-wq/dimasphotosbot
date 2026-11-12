@@ -1340,6 +1340,37 @@ document.addEventListener("visibilitychange", () => {
   const typing = [...document.querySelectorAll("textarea,input")].some(x => x.value);  // (never wipe something half-written)
   if (document.visibilityState === "visible" && HOME && !viewerOpen() && !typing && stack.length <= 1 && Date.now() - homeAt > 3600 * 1000) { HOME = null; setTab(typeof tab !== "undefined" && tab ? tab : (IS_ADMIN && adminFam == null ? "admin" : "home")); }  // (the home screen is what reloads HOME and the tab bar)
 });
+async function helperScreen() {
+  const q = new URLSearchParams(location.search);
+  const first = (q.get("n") || "").slice(0, 40);
+  let pin = "";
+  const input = h("input", { type: "password", inputmode: "numeric", autocomplete: "off", maxlength: "8", placeholder: "Code", style: "text-align:center;font-size:22px;letter-spacing:6px" });
+  const msg = h("div", { class: "msg" });
+  const go = h("button", { class: "cta", text: "Continue", on: { click: () => oneAtATime(async () => {
+    pin = input.value.replace(/\D/g, "");
+    if (!pin) return;
+    msg.textContent = "";
+    try { const d = await api("/api/helper/families", { pin }); input.value = ""; pickScreen(d.families); }
+    catch (e) { msg.textContent = e.message; }
+  }) } });
+  const newScreen = (again) => {
+    const nm = h("input", { type: "text", autocomplete: "off", maxlength: "60", placeholder: "Family last name", value: (q.get("l") || "").slice(0, 60) });
+    const m2 = h("div", { class: "msg" });
+    const mk = h("button", { class: "cta", text: "Create family and link this phone", on: { click: () => oneAtATime(async () => {
+      try { const r = await api("/api/helper/newfam", { pin, name: nm.value, first, again }); pin = ""; await alertMsg("Done! The " + r.name + " family is made and this phone is linked."); HOME = null; setTab("home"); }
+      catch (e) { m2.textContent = e.message; if (e.exists) { mk.textContent = "Make it anyway"; mk.onclick = () => oneAtATime(async () => { try { const r = await api("/api/helper/newfam", { pin, name: nm.value, first, again: true }); pin = ""; await alertMsg("Done! The " + r.name + " family is made and this phone is linked."); HOME = null; setTab("home"); } catch (e2) { m2.textContent = e2.message; } }); } }
+    }) } });
+    show([h("h1", { text: "➕ New family" }), nm, m2, mk]);
+  };
+  const pickScreen = fams => show([h("h1", { text: "Which family is this phone for?" }),
+    h("button", { class: "cta alt", text: "➕ New family", on: { click: () => newScreen(false) } }),
+    fams.length ? fams.map(f => h("button", { class: "row", on: { click: () => oneAtATime(async () => {
+      try { await api("/api/helper/link", { pin, tid: f.tid, first }); pin = ""; await alertMsg("Done! This phone is linked to the " + f.name + " family."); HOME = null; setTab("home"); }
+      catch (e) { await alertMsg(e.message || "Couldn't link."); }
+    }) } }, h("b", { text: f.name + " family" }))) : h("div", { class: "msg", text: "No families yet." })]);
+  show([h("h1", { text: "🤝 Photographer's code" }), h("div", { class: "hint", text: "Enter your own code to link this phone without the family's 6-digit code." }), input, msg, go]);
+}
+if (new URLSearchParams(location.search).get("helper") === "1" && initData && !IS_ADMIN) helperScreen(); else
 setTab("home");
 </script>
 </body>

@@ -456,6 +456,12 @@ class WebApp:
                     row["cards"] = [self.sug_card(row, row["id"], i, uid) for i in range(min(row["n"], 10))]
             return jresp(data, status)
 
+        if path in ("/api/helper/families", "/api/helper/link", "/api/helper/newfam"):  # (the photographer letting someone in on their phone)
+            if owner:
+                return err(403, "This is for clients.")
+            status, data = await self.d.helper(uid, user, path.rsplit("/", 1)[1], req)
+            return jresp(data, status)
+
         if owner:
             tid = await self.owner_family(uid, req)
         else:

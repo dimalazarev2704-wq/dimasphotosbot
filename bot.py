@@ -44,6 +44,7 @@ import contextvars
 import hashlib
 import json
 import hmac
+from urllib.parse import quote
 import logging
 import os
 from pathlib import Path
@@ -102,6 +103,7 @@ BOT_TOKEN = os.environ["BOT_TOKEN"]
 MONGODB_URI = os.environ["MONGODB_URI"]
 DB_NAME = os.getenv("MONGODB_DB", "photobot")
 GROUP_ID = int(os.getenv("GROUP_ID", "0") or 0)  # your private photo group; use /id to find it
+HELPER_PIN = re.sub(r"\D", "", os.getenv("HELPER_PIN", ""))[:8]  # the photographer's own short code, for letting someone in on their phone
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "")  # needed for /addphotos in private chat
 # Your own Telegram user ID (send /id to the bot in a private chat). This account gets the
 # /admin panel and skips the /addphotos password. The bot stores nothing about you.
@@ -924,6 +926,79 @@ async def unlink_private(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     )
 
 
+HELPER_GLOBAL_FAILS = 30  # wrong codes from ALL accounts together per hour; stops someone using many accounts to guess it
+
+
+async def helper_global_locked() -> bool:
+    doc = await db.attempts.find_one({"_id": "pin:all"})
+    return bool(doc and doc.get("locked_until", 0) > time.time())
+
+
+async def helper_global_fail(bot) -> None:
+    now = time.time()
+    old = await db.attempts.find_one({"_id": "pin:all"})
+    if old and old.get("fails") and now - old.get("first", now) > 3600:
+        await db.attempts.update_one({"_id": "pin:all"}, {"$set": {"fails": 0, "first": now}})
+    await db.attempts.update_one({"_id": "pin:all"}, {"$inc": {"fails": 1}, "$setOnInsert": {"first": now}}, upsert=True)
+    doc = await db.attempts.find_one({"_id": "pin:all"})
+    if doc and doc.get("fails", 0) >= HELPER_GLOBAL_FAILS:
+        await db.attempts.update_one({"_id": "pin:all"}, {"$set": {"fails": 0, "locked_until": now + LOCK_SECONDS}})
+        if OWNER_ID:
+            try:
+                await bot.send_message(OWNER_ID, f"🔒 Many wrong “I have {OWNER_NAME} with me” codes were tried. That login is switched off for an hour.")
+            except TelegramError:
+                pass
+
+
+async def helper_api(bot, uid: int, user: dict, action: str, req: dict) -> tuple[int, dict]:
+    """The photographer is standing next to this person: his own short code lets him pick their family, no 6-digit code."""
+    if not HELPER_PIN:
+        return 404, {"error": "Not available."}
+    key = f"pin:{uid}"
+    if await helper_global_locked():
+        return 429, {"error": "Too many wrong codes. Please try again in a while."}
+    lock = await locked_for(key)
+    if lock:
+        return 429, {"error": lock_text(lock)}
+    pin = re.sub(r"\D", "", str(req.get("pin") or ""))[:20]
+    if not hmac.compare_digest(pin.encode(), HELPER_PIN.encode()):
+        await helper_global_fail(bot)
+        locked = await record_fail(key)
+        return 403, {"error": "That code isn't right." + (" " + lock_text(LOCK_SECONDS) if locked else "")}
+    await clear_fails(key)
+    if await db.users.find_one({"_id": uid}):
+        return 400, {"error": "This phone is already linked. Close the app and open it again."}
+    if action == "families":
+        fams = await db.families.find({}).sort("name", 1).to_list()
+        return 200, {"families": [{"tid": f["thread_id"], "name": f["name"]} for f in fams]}
+    if action == "newfam":  # a brand-new family, made right here
+        name = " ".join(str(req.get("name") or "").split())[:60]
+        if not normalize(name):
+            return 400, {"error": "Please type the family's last name."}
+        if not GROUP_ID:
+            return 400, {"error": "GROUP_ID isn't set yet, so I can't make a topic."}
+        if await db.families.find_one({"key": normalize(name)}) and req.get("again") is not True:
+            return 409, {"error": f"There is already a {name} family.", "exists": True}
+        try:
+            tid, _code, _posted = await make_family(bot, name)
+        except TelegramError as e:
+            return 502, {"error": f"I couldn't make the topic ({e.message})."}
+        req = dict(req, tid=tid)
+    tid = _int(req.get("tid"))
+    fam = await db.families.find_one({"thread_id": tid}) if tid is not None else None
+    if not fam:
+        return 404, {"error": "That family no longer exists."}
+    first = " ".join(str(req.get("first") or "").split())[:40] or user.get("first_name") or "Friend"
+    await db.tries.delete_one({"_id": uid})
+    await db.users.update_one(
+        {"_id": uid},
+        {"$set": {"thread_id": fam["thread_id"], "first_name": first, "username": user.get("username"), "linked_at": datetime.now(timezone.utc)}},
+        upsert=True,
+    )
+    log.info("Linked %s (%s) to family %s with the photographer's code", first, uid, fam["name"])
+    return 200, {"ok": True, "name": fam["name"]}
+
+
 async def handle_link_step(update: Update, context: ContextTypes.DEFAULT_TYPE, link: dict) -> None:
     msg = update.message
     user = update.effective_user
@@ -944,7 +1019,10 @@ async def handle_link_step(update: Update, context: ContextTypes.DEFAULT_TYPE, l
         link.update(stage="code", last=text)
         await msg.reply_text(
             "Thanks! Now the 6-digit code you were given.\n\nNew here and don't have a code?",
-            reply_markup=one_button("🆕 I'm new, I don't have a code", "nf:new"),
+            reply_markup=InlineKeyboardMarkup(
+                ([[InlineKeyboardButton(f"🤝 I have {OWNER_NAME} with me", web_app=WebAppInfo(url=f"{WEBAPP_URL}/app?helper=1&n=" + quote(link["first"][:40]) + "&l=" + quote(link["last"][:60])))]]
+                 if HELPER_PIN and WEBAPP_URL else [])
+                + [[_btn("🆕 I'm new, I don't have a code", "nf:new")]]),
         )
 
     elif stage == "nf":
@@ -6319,6 +6397,9 @@ class WebDeps:
         return status, data
 
     admin_actions = ADMIN_ACTIONS
+
+    async def helper(self, uid: int, user: dict, action: str, req: dict) -> tuple[int, dict]:
+        return await helper_api(self.app.bot, uid, user, action, req)
 
     @staticmethod
     def fmt_when(dt):

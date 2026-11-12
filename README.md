@@ -375,3 +375,7 @@ In either topic:
 ## Not opened yet
 - When someone opens a photo full-screen, the app records it (`db.seen`). Owner views are never recorded.
 - Admin → "👀 Not opened yet" (bot /admin and the app) lists families where nobody opened the app since their newest photos arrived, with how many new photos each person saw, and a "🔔 Remind" button (the same gentle message with an Open button; one manual reminder per family per 6 hours).
+
+
+## Letting someone in on their own phone
+Set `HELPER_PIN` (4–8 digits, your own secret) in Render. At the login's code step a "🤝 I have <name> with me" button opens the app, asks for that code, then lists the families (names only); tap one and that phone is linked. Wrong codes lock out after a few tries.

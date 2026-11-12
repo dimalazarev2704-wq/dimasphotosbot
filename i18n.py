@@ -92,6 +92,7 @@ EXACT = {
 
 # (pattern, template using the groups): for texts that contain a name or a number
 PATTERNS = [
+    (r"🤝 I have (.+?) with me", r"🤝 Со мной \1"),
     (r"Your request is waiting for (.+?)\. I'll message you here as soon as your family is set up\. 🙂",
      r"Ваш запрос ожидает \1. Я напишу вам здесь, как только ваша семья будет настроена. 🙂"),
     (r"Nice to meet you, (.+?)! What's your family's last name\?", r"Приятно познакомиться, \1! Какая фамилия у вашей семьи?"),
