@@ -379,3 +379,6 @@ In either topic:
 
 ## Letting someone in on their own phone
 Set `HELPER_PIN` (4–8 digits, your own secret) in Render. At the login's code step a "🤝 I have <name> with me" button opens the app, asks for that code, then lists the families (names only); tap one and that phone is linked. Wrong codes lock out after a few tries.
+
+## Trying the login yourself
+As the owner, send `/testlogin` in the bot: for 30 minutes you are treated like a new client (send /start and log in with a code or the "I have Dima with me" button). `/exittest` gives your owner powers back and removes the test login.

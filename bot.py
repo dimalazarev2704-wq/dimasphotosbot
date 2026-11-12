@@ -304,9 +304,23 @@ async def send_with_retry(coro_factory, retry_timeouts: bool = False):
     raise RuntimeError("Gave up after repeated rate limits")
 
 
-def is_owner(user_id: int | None) -> bool:
-    """True only for the Telegram ID in OWNER_ID. Nothing about the owner is stored."""
+TEST_MODE: dict = {}  # owner id -> when "test as a new client" ends (memory only; a restart ends it)
+TEST_MINUTES = 30
+
+
+def is_real_owner(user_id: int | None) -> bool:
     return bool(OWNER_ID) and user_id == OWNER_ID
+
+
+def is_owner(user_id: int | None) -> bool:
+    """True only for the Telegram ID in OWNER_ID (unless the owner is trying the login as a new client)."""
+    if not is_real_owner(user_id):
+        return False
+    until = TEST_MODE.get(user_id)
+    if until and until > time.time():
+        return False
+    TEST_MODE.pop(user_id, None)
+    return True
 
 
 async def is_group_admin(bot, chat_id: int, user_id: int) -> bool:
@@ -4968,6 +4982,37 @@ async def stats_text() -> str:
     ).strip()
 
 
+async def testlogin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """The real owner only: be treated like a brand-new client for a while, to try the login on their own phone."""
+    uid = update.effective_user.id
+    if not is_real_owner(uid):
+        return
+    clear_flows(context)
+    context.user_data.pop("link", None)
+    for coll in (db.users, db.tries):
+        await coll.delete_one({"_id": uid})
+    await db.favs.delete_many({"uid": uid})
+    await db.seen.delete_many({"uid": uid})
+    TEST_MODE[uid] = time.time() + TEST_MINUTES * 60
+    await update.message.reply_text(
+        f"🧪 Test mode for {TEST_MINUTES} minutes: I treat you like a brand-new client. Send /start and log in as they would.\n\n"
+        "Send /exittest any time to get your owner powers back (it also removes this test login).")
+
+
+async def exittest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    uid = update.effective_user.id
+    if not is_real_owner(uid):
+        return
+    TEST_MODE.pop(uid, None)
+    clear_flows(context)
+    context.user_data.pop("link", None)
+    await db.users.delete_one({"_id": uid})
+    await db.tries.delete_one({"_id": uid})
+    await db.favs.delete_many({"uid": uid})
+    await db.seen.delete_many({"uid": uid})
+    await update.message.reply_text("✅ Test mode is off. You're the owner again. Send /admin.")
+
+
 async def buttons_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Owner only: shows who just tried to log in. Tap a person, then a family, and they are connected."""
     if not is_owner(update.effective_user.id):
@@ -6689,6 +6734,8 @@ def main() -> None:
     app.add_handler(CommandHandler("unlink", unlink_private, filters=priv))
     app.add_handler(CommandHandler("admin", admin_cmd, filters=priv))
     app.add_handler(CommandHandler("buttons", buttons_cmd, filters=priv))
+    app.add_handler(CommandHandler("testlogin", testlogin_cmd, filters=priv))
+    app.add_handler(CommandHandler("exittest", exittest_cmd, filters=priv))
     app.add_handler(CommandHandler("addphotos", addphotos, filters=priv))
     app.add_handler(CommandHandler("done", done, filters=priv))
     app.add_handler(MessageHandler(priv & filters.UpdateType.MESSAGE & filters.TEXT & ~filters.COMMAND, on_private_text))
