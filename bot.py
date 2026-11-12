@@ -996,6 +996,11 @@ async def helper_api(bot, uid: int, user: dict, action: str, req: dict) -> tuple
         upsert=True,
     )
     log.info("Linked %s (%s) to family %s with the photographer's code", first, uid, fam["name"])
+    try:  # the same welcome they would get after typing the code
+        await bot.send_message(uid, f"You're in, {first}! 🎉 Here are the {fam['name']} family's photos.", reply_markup=await family_menu(fam["thread_id"]))
+        await ensure_keyboard(bot, uid, uid)
+    except TelegramError:
+        pass
     return 200, {"ok": True, "name": fam["name"]}
 
 
