@@ -112,7 +112,7 @@ textarea{min-height:140px}
   <div id="vdlg"></div>
   <div class="bot">
     <div class="tools" id="vtools" style="display:none"></div>
-    <div class="btns"><button id="vorig">📥 Send me the photo in chat</button><button id="vclose">✖ Close</button></div>
+    <div class="btns"><button id="vfav" style="display:none">♡ Favorite</button><button id="vorig">📥 Send me the photo in chat</button><button id="vclose">✖ Close</button></div>
     <div class="copy" id="vcopy"></div>
   </div>
 </div>
@@ -218,7 +218,7 @@ const RU_EXACT = {
   "Show more photos": "Показать ещё фото", "No messages yet.": "Сообщений пока нет.",
   "🌐 Language": "🌐 Язык", "Search a language…": "Найти язык…", "Recommended": "Рекомендуемые", "All languages": "Все языки", "No language found. Try its English name.": "Язык не найден. Попробуйте английское название.",
   "📝 Send feedback": "📝 Отправить отзыв", "Send feedback": "Отправить отзыв", "📝 Feedback": "📝 Отзыв", "Your feedback": "Ваш отзыв",
-  "🖼 All photos": "🖼 Все фото", "⭐ Best shots": "⭐ Лучшие кадры", "⭐ In Best shots": "⭐ В лучших кадрах",
+  "🖼 All photos": "🖼 Все фото", "⭐ Best shots": "⭐ Лучшие кадры", "⭐ In Best shots": "⭐ В лучших кадрах", "♡ Favorite": "♡ В избранное", "♥ In favorites": "♥ В избранном", "♥ My favorites": "♥ Избранное", "Favorites": "Избранное",
   "💡 Suggested by your family": "💡 Предложено вашей семьёй", "📅 Pick a date": "📅 Выберите дату", "📍 Pick a place": "📍 Выберите место",
   "🔄 Check for new messages": "🔄 Проверить новые сообщения", "🗑 Delete this chat": "🗑 Удалить этот чат", "🗑 Delete": "🗑 Удалить",
   "Delete this message": "Удалить это сообщение", "Delete this message?": "Удалить это сообщение?", "Delete this feedback?": "Удалить этот отзыв?",
@@ -338,6 +338,7 @@ function drawTabs() {
     defs.push(["home", "🏠", "Home"], ["dates", "📅", "Dates"], ["places", "📍", "Places"], ["all", "🖼", "All"]);
     if (HOME && HOME.best) defs.push(["best", "⭐", "Best"]);
     defs.push(["sug", "💡", "Suggested"]);
+    if (!IS_ADMIN && HOME && HOME.favs > 0) defs.push(["fav", "♥", "Favorites"]);  // (only once they have a heart)
   }
   $tabs.replaceChildren(...defs.map(([k, ic, label]) =>
     h("button", { class: k === tab ? "on" : "", on: { click: () => { haptic(); setTab(k); } } }, h("span", { class: "ic", text: ic }), label)));
@@ -536,6 +537,7 @@ const ROOTS = {
   all: () => gridScreen("🖼 All photos", { mode: "all" }),
   best: () => gridScreen("⭐ Best shots", { mode: "best" }),
   sug: suggestedScreen,
+  fav: () => gridScreen("♥ My favorites", { mode: "fav" }),
   admin: () => adminHome(),
 };
 
@@ -642,9 +644,28 @@ function showPhoto() {
   document.getElementById("vcap").textContent = [isVid ? "🎬 Video" + (p.dur ? " " + vlen(p.dur) : "") + (p.mb ? " · " + p.mb + " MB" : "") : "", p.dt, p.loc, p.g ? "👥 " + p.g : "", p.by ? "Added by " + p.by : ""].filter(Boolean).join(" · ") + "   (" + (cur + 1) + " of " + viewList.length + ")";
   document.getElementById("vprev").style.visibility = cur > 0 ? "visible" : "hidden";
   document.getElementById("vnext").style.visibility = cur < viewList.length - 1 ? "visible" : "hidden";
-  drawTools();
+  drawTools(); drawFav();
+  if (!p.seen) { p.seen = true; api("/api/seen", { id: p.id }).catch(() => {}); }  // (tells the photographer this photo was looked at)
   for (const j of [cur + 1, cur - 1]) if (viewList[j]) { const pre = new Image(); pre.src = viewList[j].f; }  // warm the neighbours
 }
+function drawFav() {
+  const b = document.getElementById("vfav"), p = viewList[cur];
+  const on = !IS_ADMIN && p && !p.sug && p.id != null;
+  b.style.display = on ? "" : "none";
+  if (!on) return;
+  b.disabled = false;
+  const t = p.fav ? "♥ In favorites" : "♡ Favorite";
+  b.textContent = LANG !== "en" ? ruT(t) : t;
+}
+document.getElementById("vfav").onclick = (ev) => oneAtATime(async () => {
+  const b = ev.currentTarget, p = viewList[cur]; if (!p || p.id == null) return;
+  b.disabled = true;
+  try {
+    const r = await api("/api/fav", { id: p.id, on: !p.fav });
+    p.fav = r.fav; if (HOME) HOME.favs = r.favs; dirty = tab === "fav" ? true : dirty; drawTabs(); haptic();
+  } catch (e) { b.textContent = "⚠️ " + e.message; setTimeout(() => { if (viewList[cur] === p) drawFav(); }, 2500); return; }
+  if (viewList[cur] === p) drawFav();
+});
 function step(d) { const n = cur + d; if (n >= 0 && n < viewList.length) { cur = n; showPhoto(); haptic(); } }
 document.getElementById("vprev").onclick = () => step(-1);
 document.getElementById("vnext").onclick = () => step(1);
@@ -708,6 +729,7 @@ async function adminHome() {
     bigRow("📣", "Announcements & messages", s.scheduled ? s.scheduled + " scheduled" : "", () => { if (annDraft.aud === "person") annDraft = { aud: "all", person: "", text: "", picks: [] }; push(() => annScreen()); }),
     bigRow("🏷", "Groups", d.groups && d.groups.length ? d.groups.length : "", () => push(() => groupsScreen())),
     bigRow("🕵️", "Login attempts", s.tries, () => push(() => triesScreen())),
+    bigRow("👀", "Not opened yet", "", () => push(notOpenedScreen)),
     bigRow("📸", "Photographers", "", () => push(uplineScreen)),
     bigRow("👥", "Users", "", () => push(usersScreen)),
     h("h2", { text: "Families" }), groupChips(d.groups || [], "fams", () => { const y = window.scrollY; adminHome().then(() => window.scrollTo(0, y)); }),
@@ -767,6 +789,7 @@ async function familyScreen(tid) {
   const d = await adminLoad("/api/admin/family", { tid }, () => familyScreen(tid)); if (!d) return;
   show([backBtn(), h("h1", { text: d.name + " family" }),
     h("div", { class: "hint", text: "Code " + d.code + " · " + d.photos + (d.photos === 1 ? " photo" : " photos") + " · ⭐ " + d.best + " best" }),
+    d.activity ? h("div", { class: "hint", style: "white-space:pre-line", text: d.activity }) : null,
     h("button", { class: "cta", on: { click: () => enterFamily(d.tid, d.name) }, text: "📸 Browse their photos" }),
     h("button", { class: "cta alt", on: { click: () => push(() => uploadScreen(d.tid)) }, text: "📤 Add photos to this family" }),
     h("h2", { text: "Members" }),
@@ -775,6 +798,7 @@ async function familyScreen(tid) {
       h("div", { class: "hint", text: "ID " + p.id }),
       p.by ? h("div", { class: "hint", text: "Added by " + p.by }) : null,
       p.pending ? h("div", { class: "hint", text: "⏳ hasn't confirmed their name yet" }) : null,
+      p.opened ? h("div", { class: "hint", text: p.opened }) : null,
       h("div", { class: "btns" }, p.pending ? null : h("button", { text: "✉️ Message", on: { click: () => { annDraft = { aud: "person", person: String(p.id), text: annDraft.aud === "person" && annDraft.person === String(p.id) ? annDraft.text : "", picks: [] }; push(() => annScreen()); } } }), h("button", { class: "danger", text: "Unlink",
         on: { click: () => famAct(d.tid, "member_unlink", { uid: p.id }, "Unlink " + (p.first || "this person") + " from the " + d.name + " family?") } }))))
       : h("div", { class: "msg", text: "Nobody has linked yet." }),
@@ -1141,6 +1165,18 @@ async function uplineScreen() {
       h("div", { class: "btns" }, h("button", { text: p.on ? "✅ ON (tap to turn off)" : "Turn ON",
         on: { click: () => oneAtATime(async () => { try { await api("/api/admin/upline_set", { uid: p.id, on: !p.on }); } catch (e) { await alertMsg(e.message || "Couldn't change that."); } uplineScreen(); }) } }))))
       : h("div", { class: "msg", text: "Nobody is in a family yet." })]);
+}
+async function notOpenedScreen() {
+  const d = await adminLoad("/api/admin/not_opened", {}, notOpenedScreen); if (!d) return;
+  show([backBtn(), h("h1", { text: "👀 Not opened yet" }),
+    h("div", { class: "hint", text: "Families where nobody has opened the app since their newest photos arrived. \"Saw\" counts photos someone opened full-screen." }),
+    d.families.length ? d.families.map(f => h("div", { class: "card" },
+      h("b", { text: f.name + " family" }),
+      h("div", { class: "hint", text: "Last opened: " + f.last + " · saw " + f.seen + " of " + f.total + " new photos" + (f.reminded ? " · reminded " + f.reminded : "") }),
+      f.people.map(p => h("div", { class: "hint", text: "• " + p.name + ": opened " + p.opened + ", saw " + p.saw + " of " + f.total })),
+      h("div", { class: "btns" }, h("button", { text: "🔔 Remind them",
+        on: { click: () => oneAtATime(async () => { try { const r = await api("/api/admin/remind", { tid: f.tid }); await alertMsg(r.note); } catch (e) { await alertMsg(e.message || "Couldn't send that."); } notOpenedScreen(); }) } }))))
+      : h("div", { class: "msg", text: "🎉 Everyone has opened the app since their newest photos arrived." })]);
 }
 async function triesScreen() {
   const d = await adminLoad("/api/admin/tries", {}, triesScreen);

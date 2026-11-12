@@ -27,6 +27,7 @@ URL_LIFETIME = 6 * 3600
 PAGE = 90  # photos per page in the grid
 WELCOME_ITEMS = 12  # photos on the welcome screen
 NEW_DAYS = 14  # how long photos count as "new"
+FAV_MAX = 2000  # most hearts one person can keep
 NEW_MIN = 2  # how many new photos it takes to show the "New photos" welcome
 THUMB_SIDE, FULL_SIDE = 360, 1600
 MAX_JSON = 16 * 1024
@@ -366,9 +367,13 @@ class WebApp:
 
     async def cards(self, docs: list, uid: int) -> list:
         gn = await self.d.group_names_for(docs)  # (photos of a whole group are labelled with the group's name)
+        mids = [x["message_id"] for x in docs if isinstance(x.get("message_id"), int)]
+        favs = {f["mid"] for f in await self.d.db().favs.find({"uid": uid, "mid": {"$in": mids}}).to_list()} if mids and not self.d.is_owner(uid) else set()
         out = []
         for x in docs:
             c = self.card(x, uid)
+            if x.get("message_id") in favs:
+                c["fav"] = True
             if gn.get(x.get("thread_id")):
                 c["g"] = gn[x["thread_id"]]
             out.append(c)
@@ -524,7 +529,10 @@ class WebApp:
 
         if path == "/api/home":
             lang = await self.d.get_lang(uid)
+            if not owner:
+                await self.d.db().users.update_one({"_id": uid}, {"$set": {"last_open": datetime.now(timezone.utc)}})  # (so the photographer can tell who has opened the app)
             return jresp({
+                "favs": 0 if owner else await self.fav_count(uid, tid),
                 "family": await self.d.family_name(tid) or "",
                 "first": user.get("first_name") or "",
                 "best": await self.d.has_best(tid),
@@ -575,6 +583,10 @@ class WebApp:
             elif mode == "best":
                 q["best"] = True
                 sort = [("date", -1), ("message_id", 1)]  # newest day first
+            elif mode == "fav":  # this person's own hearts (only photos their family can still see)
+                mine = [f["mid"] for f in await db.favs.find({"uid": uid}).sort("at", -1).limit(FAV_MAX).to_list()]
+                q["message_id"] = {"$in": mine}
+                sort = [("date", -1), ("message_id", 1)]
             elif mode == "sug":
                 q["thread_id"] = tid  # (suggestions belong to one family only)
                 q["sug"] = True
@@ -593,6 +605,30 @@ class WebApp:
             docs = await db.photos.find(q).sort(sort).skip(skip).limit(PAGE + 1).to_list()
             return jresp({"items": await self.cards(docs[:PAGE], uid), "more": len(docs) > PAGE})
 
+        if path == "/api/fav":
+            on = req.get("on")
+            doc = await self.my_photo(req.get("id"), tid)
+            if not doc or not isinstance(on, bool):
+                return err(404, "Photo not found")
+            if owner:  # (the owner's preview never saves anything about them)
+                return jresp({"ok": True, "fav": on, "favs": 0})
+            db = self.d.db()
+            key = f"{uid}:{doc['message_id']}"
+            if on:
+                if await db.favs.count_documents({"uid": uid}) >= FAV_MAX and not await db.favs.find_one({"_id": key}):
+                    return err(400, f"That's the most favorites I can keep ({FAV_MAX}). Please un-heart a few first.")
+                await db.favs.update_one({"_id": key}, {"$set": {"uid": uid, "mid": doc["message_id"], "tid": tid, "at": datetime.now(timezone.utc)}}, upsert=True)
+            else:
+                await db.favs.delete_one({"_id": key})
+            return jresp({"ok": True, "fav": on, "favs": await self.fav_count(uid, tid)})
+
+        if path == "/api/seen":  # a photo was opened full-screen (so the photographer can see what was looked at)
+            doc = await self.my_photo(req.get("id"), tid)
+            if not doc or owner or doc.get("sug"):
+                return jresp({"ok": True})
+            await self.d.db().seen.update_one({"_id": f"{uid}:{doc['message_id']}"}, {"$set": {"uid": uid, "mid": doc["message_id"], "tid": tid, "at": datetime.now(timezone.utc)}}, upsert=True)
+            return jresp({"ok": True})
+
         if path == "/api/send_original":
             doc = await self.my_photo(req.get("id"), tid)
             if not doc:
@@ -607,6 +643,16 @@ class WebApp:
             return jresp({"ok": True}) if ok else err(502, "I couldn't send it. Please open the chat with me and try again.")
 
         return err(404, "Not found")
+
+    async def fav_count(self, uid: int, tid: int) -> int:
+        """How many hearts this person has on photos their family can still see."""
+        db = self.d.db()
+        mine = [f["mid"] for f in await db.favs.find({"uid": uid}).limit(FAV_MAX).to_list()]
+        if not mine:
+            return 0
+        q = await self.d.vis_q(tid)
+        q["message_id"] = {"$in": mine}
+        return await db.photos.count_documents(q)
 
     async def my_photo(self, mid, tid: int):
         if not isinstance(mid, int) or isinstance(mid, bool) or abs(mid) > 2**53:

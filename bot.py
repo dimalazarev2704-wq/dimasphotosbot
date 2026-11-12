@@ -594,6 +594,8 @@ async def unlink(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     person = matches[0]
     await db.users.delete_one({"_id": person["_id"]})
+    await db.favs.delete_many({"uid": person["_id"]})
+    await db.seen.delete_many({"uid": person["_id"]})
     await purge_person(context.bot, person["_id"])
     await msg.reply_text(
         f"Unlinked {person['first_name']} from the {fam['name']} family. "
@@ -1852,6 +1854,7 @@ async def on_notify_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await show("OK, I won't message them.")
         return
     text, markup = notify_message(info)
+    await db.families.update_many({"thread_id": {"$in": info.get("tids") or [info["tid"]]}}, {"$set": {"notified_at": datetime.now(timezone.utc), "reminded": False}})
     sent = failed = 0
     for u in await db.users.find({"thread_id": {"$in": info.get("tids") or [info["tid"]]}, "pending": {"$ne": True}}).to_list():
         if u["_id"] == info["who"]:
@@ -3386,12 +3389,140 @@ async def scheduled_view(page: int = 0):
     return text, markup
 
 
+REMIND_DAYS = 3  # one gentle reminder if nobody in the family has opened the app this long after the "new photos" message
+
+
+def as_utc(dt):
+    return dt if dt is None or dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def ago_text(dt) -> str:
+    if not dt:
+        return "never"
+    secs = max(0, (datetime.now(timezone.utc) - as_utc(dt)).total_seconds())
+    if secs < 3600:
+        return "just now" if secs < 120 else f"{int(secs // 60)} min ago"
+    if secs < 86400:
+        return f"{int(secs // 3600)} h ago"
+    d = int(secs // 86400)
+    return f"{d} day{'s' if d != 1 else ''} ago"
+
+
+async def family_activity(tid: int) -> dict:
+    """When somebody in the family last opened the app, whether they have seen the newest photos, and their hearts."""
+    people = await db.users.find({"thread_id": tid, "pending": {"$ne": True}}).to_list()
+    opens = [as_utc(u["last_open"]) for u in people if u.get("last_open")]
+    last = max(opens) if opens else None
+    newest = await db.photos.find({"thread_id": tid, "sug": {"$ne": True}, "added": {"$exists": True}}).sort([("added", -1)]).limit(1).to_list()
+    newest_at = as_utc(newest[0]["added"]) if newest else None
+    saw = None if newest_at is None else bool(last and last >= newest_at)
+    return {"last": last, "saw": saw, "favs": await db.favs.count_documents({"tid": tid})}
+
+
+def activity_line(a: dict) -> str:
+    saw = "" if a["saw"] is None else (" · saw the newest photos: yes" if a["saw"] else " · saw the newest photos: NO")
+    return f"👀 Last opened the app: {ago_text(a['last'])}{saw}\n♥ Favorites: {a['favs']}"
+
+
+async def remind_unopened(bot) -> None:
+    """Once per "new photos" message: if nobody in the family opened the app within REMIND_DAYS, send each person one reminder."""
+    cutoff = datetime.now(timezone.utc) - timedelta(days=REMIND_DAYS)
+    for fam in await db.families.find({"notified_at": {"$lte": cutoff}, "reminded": False}).to_list():
+        tid, notified = fam["thread_id"], as_utc(fam["notified_at"])
+        r = await db.families.update_one({"thread_id": tid, "reminded": False}, {"$set": {"reminded": True}})  # (claimed first, so a restart can't send it twice)
+        if not getattr(r, "modified_count", 1):
+            continue
+        people = [u for u in await db.users.find({"thread_id": tid, "pending": {"$ne": True}}).to_list() if u["_id"] != OWNER_ID]
+        if not people or any(u.get("last_open") and as_utc(u["last_open"]) >= notified for u in people):
+            continue
+        await send_reminders(bot, people)
+
+
+async def send_reminders(bot, people: list[dict]) -> int:
+    """The gentle "new photos are waiting" message to each person. Returns how many it reached."""
+    text = f"👋 {OWNER_NAME} added new photos, and they're waiting for you!"
+    markup = InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Open the gallery", callback_data="menu")]])
+    sent = 0
+    for u in people:
+        try:
+            await send_with_retry(lambda: bot.send_message(u["_id"], text, reply_markup=markup), retry_timeouts=True)
+            sent += 1
+        except (TelegramError, RuntimeError):
+            pass  # (e.g. they blocked the bot)
+        await asyncio.sleep(0.05)
+    return sent
+
+
+MANUAL_REMIND_GAP = timedelta(hours=6)  # (so a family can't be nagged again and again)
+
+
+async def not_opened_data() -> list[dict]:
+    """Families where nobody has opened the app since the newest photos arrived: who, and how many of the new photos were seen."""
+    out = []
+    for fam in await db.families.find({}).to_list():
+        tid = fam["thread_id"]
+        people = [u for u in await db.users.find({"thread_id": tid, "pending": {"$ne": True}}).to_list() if u["_id"] != OWNER_ID]
+        if not people:
+            continue
+        notified = as_utc(fam.get("notified_at"))
+        q = await scope(tid, sug={"$ne": True}, added={"$exists": True})
+        if notified:
+            q["added"] = {"$gte": notified}
+        newest = await db.photos.find(q).sort([("added", -1)]).limit(300).to_list()
+        if not notified:
+            newest = newest[:10]
+        if not newest:
+            continue
+        newest_at = as_utc(newest[0]["added"])
+        if any(u.get("last_open") and as_utc(u["last_open"]) >= newest_at for u in people):
+            continue  # somebody has already opened the app since they arrived
+        mids = [p["message_id"] for p in newest]
+        seen = await db.seen.find({"mid": {"$in": mids}, "uid": {"$in": [u["_id"] for u in people]}}).to_list()
+        per: dict = {}
+        for x in seen:
+            per[x["uid"]] = per.get(x["uid"], 0) + 1
+        opens = [as_utc(u["last_open"]) for u in people if u.get("last_open")]
+        last = max(opens) if opens else None
+        out.append({
+            "tid": tid, "name": fam["name"], "total": len(mids), "seen": len({x["mid"] for x in seen}),
+            "last": ago_text(last), "_last": last, "reminded": ago_text(fam.get("manual_reminded")) if fam.get("manual_reminded") else "",
+            "people": [{"id": u["_id"], "name": u.get("first_name") or "(no name)", "opened": ago_text(u.get("last_open")), "saw": per.get(u["_id"], 0)} for u in people],
+        })
+    out.sort(key=lambda f: (f["_last"] is not None, f["_last"] or datetime.min.replace(tzinfo=timezone.utc)))  # never opened first
+    for f in out:
+        f.pop("_last")
+    return out
+
+
+async def remind_family(bot, tid: int) -> tuple[bool, str]:
+    """The owner's own "remind them" button. Returns (ok, message)."""
+    fam = await db.families.find_one({"thread_id": tid})
+    if not fam:
+        return False, "That family no longer exists."
+    last = as_utc(fam.get("manual_reminded"))
+    if last and datetime.now(timezone.utc) - last < MANUAL_REMIND_GAP:
+        return False, f"You reminded them {ago_text(last)}. Please wait a bit before sending another."
+    people = [u for u in await db.users.find({"thread_id": tid, "pending": {"$ne": True}}).to_list() if u["_id"] != OWNER_ID]
+    if not people:
+        return False, "Nobody has linked in that family yet."
+    await db.families.update_one({"thread_id": tid}, {"$set": {"manual_reminded": datetime.now(timezone.utc)}})  # (claimed first, so a double tap can't send twice)
+    sent = await send_reminders(bot, people)
+    return True, f"🔔 Reminded {sent} {'person' if sent == 1 else 'people'} in the {fam['name']} family."
+
+
 async def scheduler_loop(app: Application) -> None:
     """Every 30 seconds: send announcements whose time has come. They live in Mongo, so a restart
     doesn't lose them (if the bot was asleep, they go out as soon as it wakes up)."""
+    last_remind = 0.0
     while True:
         try:
             await asyncio.sleep(30)
+            if time.time() - last_remind > 1800:
+                last_remind = time.time()
+                try:
+                    await remind_unopened(app.bot)
+                except Exception:
+                    log.exception("Couldn't send the 'not opened yet' reminders")
             while True:
                 now = datetime.now(timezone.utc)
                 # "Claim" it (not delete) so a crash or restart mid-send doesn't lose it: an unfinished
@@ -4566,6 +4697,27 @@ async def upline_view(page: int):
     return text, InlineKeyboardMarkup(kb + ([nav] if nav else []) + [[_btn("⬅️ Admin panel", "a:home")]])
 
 
+async def not_opened_view(page: int, note: str = ""):
+    rows = await not_opened_data()
+    per = 4
+    page = max(0, min(page, max(0, (len(rows) - 1) // per)))
+    chunk = rows[page * per:(page + 1) * per]
+    if not rows:
+        return "👀 Not opened yet\n\n" + (note + "\n\n" if note else "") + "Every family has opened the app since their newest photos arrived. 🎉", InlineKeyboardMarkup([[_btn("⬅️ Admin panel", "a:home")]])
+    lines = ["👀 Not opened yet", ""] + ([note, ""] if note else []) + [f"{len(rows)} {'family hasn' if len(rows) == 1 else 'families haven'}'t opened the app since their newest photos arrived.", ""]
+    for f in chunk:
+        lines.append(f"🏠 {f['name']} — last opened: {f['last']} · saw {f['seen']} of {f['total']} new photos" + (f" · reminded {f['reminded']}" if f["reminded"] else ""))
+        for p in f["people"][:6]:
+            lines.append(f"   • {p['name']}: last opened {p['opened']}, saw {p['saw']} of {f['total']}")
+    kb = [[_btn(f"🔔 Remind {f['name']}"[:40], f"a:nr:{f['tid']}:{page}")] for f in chunk]
+    nav = []
+    if page > 0:
+        nav.append(_btn("⬅️ Back", f"a:no:{page - 1}"))
+    if (page + 1) * per < len(rows):
+        nav.append(_btn("More ➡️", f"a:no:{page + 1}"))
+    return "\n".join(lines), InlineKeyboardMarkup(kb + ([nav] if nav else []) + [[_btn("⬅️ Admin panel", "a:home")]])
+
+
 def admin_home_markup() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
@@ -4575,7 +4727,8 @@ def admin_home_markup() -> InlineKeyboardMarkup:
             [_btn("📣 Announce", "a:an:0"), _btn("🕒 Scheduled", "a:sc:0")],
             [_btn("💬 Messages", "a:ms:0"), _btn("📝 Feedback", "a:fb:0")],
             [_btn("🏷 Groups", "a:gr:0"), _btn("👥 Users", "a:us:0")],
-            [_btn("📸 Photographers", "a:lv:0"), _btn("📊 Stats", "a:stats")],
+            [_btn("👀 Not opened yet", "a:no:0"), _btn("📸 Photographers", "a:lv:0")],
+            [_btn("📊 Stats", "a:stats")],
         ]
     )
 
@@ -4673,7 +4826,8 @@ async def family_page(tid: int):
     text = (
         f"🏠 {fam['name']} family\n"
         f"Code: {fam['code']}\n"
-        f"Photos: {photos} · People linked: {people} · ⭐ Best shots: {best}"
+        f"Photos: {photos} · People linked: {people} · ⭐ Best shots: {best}\n"
+        + activity_line(await family_activity(tid))
     )
     markup = InlineKeyboardMarkup(
         [
@@ -4966,6 +5120,15 @@ async def on_admin_button(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await delete_feedback(context.bot, None, parts[2])
         await show(*await feedback_view(0))
 
+
+    elif action == "no":  # families that haven't opened the newest photos
+        context.user_data.pop("adm", None)
+        await show(*await not_opened_view(int(parts[2])))
+
+    elif action == "nr":  # remind one of them
+        context.user_data.pop("adm", None)
+        ok, note = await remind_family(context.bot, int(parts[2]))
+        await show(*await not_opened_view(int(parts[3]), note))
 
     elif action == "lv":  # the upload line: who is on it
         context.user_data.pop("adm", None)
@@ -5462,6 +5625,8 @@ async def on_admin_button(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     elif action == "ul":
         tid, uid = int(parts[2]), int(parts[3])
         r = await db.users.delete_one({"_id": uid, "thread_id": tid})
+        await db.favs.delete_many({"uid": uid})
+        await db.seen.delete_many({"uid": uid})
         if getattr(r, "deleted_count", 1):
             await purge_person(context.bot, uid)
         view = await members_view(tid)
@@ -5515,6 +5680,8 @@ async def on_admin_button(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await purge_person(context.bot, _u["_id"])
         await drop_scheduled_for([], tid)
         await db.users.delete_many({"thread_id": tid})
+        await db.favs.delete_many({"tid": tid})
+        await db.seen.delete_many({"tid": tid})
         await db.photos.delete_many({"thread_id": tid})
         await db.suggestions.delete_many({"thread_id": tid})
         await db.comments.delete_many({"tid": tid})
@@ -5553,7 +5720,7 @@ ADMIN_ACTIONS = {
     "overview", "family", "photo_best", "photo_remove", "photo_edit", "photo_vis", "sugs", "sug_act",
     "ann_preview", "ann_send", "ann_schedule", "scheduled", "sched_cancel",
     "tries", "try_add", "try_dismiss", "try_unlock", "tries_clear",
-    "fam_add", "fam_code", "people", "users", "upline", "upline_set", "groups", "group_save", "group_delete", "group_member", "comments", "thread", "chat_send", "chat_clear", "chat_msg_delete", "feedback", "feedback_read", "feedback_delete", "invite", "invite_send", "fam_delete", "member_unlink", "person_add", "best_clear",
+    "fam_add", "fam_code", "people", "users", "upline", "upline_set", "not_opened", "remind", "groups", "group_save", "group_delete", "group_member", "comments", "thread", "chat_send", "chat_clear", "chat_msg_delete", "feedback", "feedback_read", "feedback_delete", "invite", "invite_send", "fam_delete", "member_unlink", "person_add", "best_clear",
 }
 
 
@@ -5719,8 +5886,10 @@ async def _admin_api(bot, action: str, req: dict) -> tuple[int, dict]:
             "groups": [{"id": g["id"], "name": g["name"], "on": tid in g["tids"]} for g in await groups_list()],
             "photos": await db.photos.count_documents({"thread_id": tid}),
             "best": await db.photos.count_documents({"thread_id": tid, "best": True}),
+            "activity": activity_line(await family_activity(tid)),
             "people": [{"id": p["_id"], "first": p.get("first_name") or "", "username": p.get("username") or "",
-                        "by": p.get("added_by") or "", "pending": bool(p.get("pending"))} for p in people[:60]],
+                        "by": p.get("added_by") or "", "pending": bool(p.get("pending")),
+                        "opened": "" if p.get("pending") else "Opened the app: " + ago_text(p.get("last_open"))} for p in people[:60]],
         }
 
     if action == "photo_vis":  # which families of a group are left out of one group file
@@ -5876,6 +6045,16 @@ async def _admin_api(bot, action: str, req: dict) -> tuple[int, dict]:
         if not (isinstance(gid, str) and re.fullmatch(r"[0-9a-f]{6}", gid)) or tid is None or not isinstance(req.get("on"), bool):
             return bad
         return await group_member(gid, tid, req["on"])
+
+    if action == "not_opened":
+        return 200, {"families": (await not_opened_data())[:100]}
+
+    if action == "remind":
+        tid = _int(req.get("tid"))
+        if tid is None:
+            return bad
+        ok, note = await remind_family(bot, tid)
+        return (200, {"ok": True, "note": note}) if ok else (400, {"error": note})
 
     if action == "upline":
         d = await upline_data()
@@ -6049,6 +6228,8 @@ async def _admin_api(bot, action: str, req: dict) -> tuple[int, dict]:
             if uid is None:
                 return bad
             r = await db.users.delete_one({"_id": uid, "thread_id": tid})
+            await db.favs.delete_many({"uid": uid})
+            await db.seen.delete_many({"uid": uid})
             if getattr(r, "deleted_count", 1):
                 await purge_person(bot, uid)
             return 200, {"ok": True}
@@ -6090,6 +6271,8 @@ async def _admin_api(bot, action: str, req: dict) -> tuple[int, dict]:
         for _u in await db.users.find({"thread_id": tid}).to_list():
             await purge_person(bot, _u["_id"])
         await db.users.delete_many({"thread_id": tid})
+        await db.favs.delete_many({"tid": tid})
+        await db.seen.delete_many({"tid": tid})
         await db.photos.delete_many({"thread_id": tid})
         await db.suggestions.delete_many({"thread_id": tid})
         await db.comments.delete_many({"tid": tid})
@@ -6320,6 +6503,11 @@ async def post_init(app: Application) -> None:
     await safe_index(lambda: db.photos.create_index([("thread_id", 1), ("best", 1)]))
     await safe_index(lambda: db.photos.create_index([("thread_id", 1), ("added", -1)]))
     await safe_index(lambda: db.users.create_index("thread_id"))
+    await safe_index(lambda: db.favs.create_index("uid"))
+    await safe_index(lambda: db.favs.create_index("tid"))
+    await safe_index(lambda: db.seen.create_index("uid"))
+    await safe_index(lambda: db.seen.create_index("mid"))
+    await safe_index(lambda: db.seen.create_index("tid"))
     await safe_index(lambda: db.tries.create_index("at", expireAfterSeconds=2592000))  # forget login attempts after 30 days
     await safe_index(lambda: db.starters.create_index("seen", expireAfterSeconds=180 * 86400))  # forget old Start presses after ~6 months
     await safe_index(lambda: db.uitr.create_index("at", expireAfterSeconds=180 * 86400))  # (saved UI translations)

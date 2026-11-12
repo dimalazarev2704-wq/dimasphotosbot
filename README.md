@@ -361,3 +361,17 @@ In either topic:
 
 (The old way, one Suggestions topic per family with Approve / Reject buttons, is still in the code behind
 `LEGACY_SUGGESTIONS`. Batches that were already waiting there can still be approved.)
+
+## Favorites (♥) and "not opened yet"
+
+- In the app's photo viewer, clients tap **♡ Favorite** to heart a photo. Once someone has a heart, a **♥ Favorites** tab appears
+  with their own list (nobody else sees it). On a family's page in /admin (and the app's Admin tab) you see the family's total
+  number of hearts. Your own preview never saves hearts.
+- The app records when each person last opened it. A family's page shows "Last opened the app: 2 days ago · saw the newest
+  photos: yes/NO", and each member's last open.
+- After you send a "new photos" message to a family, if nobody in the family has opened the app 3 days later, each confirmed person
+  gets **one** gentle reminder with an Open button (never more than one per "new photos" message).
+
+## Not opened yet
+- When someone opens a photo full-screen, the app records it (`db.seen`). Owner views are never recorded.
+- Admin → "👀 Not opened yet" (bot /admin and the app) lists families where nobody opened the app since their newest photos arrived, with how many new photos each person saw, and a "🔔 Remind" button (the same gentle message with an Open button; one manual reminder per family per 6 hours).
