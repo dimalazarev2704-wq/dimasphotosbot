@@ -382,3 +382,9 @@ Set `HELPER_PIN` (4–8 digits, your own secret) in Render. At the login's code 
 
 ## Trying the login yourself
 As the owner, send `/testlogin` in the bot: for 30 minutes you are treated like a new client (send /start and log in with a code or the "I have Dima with me" button). `/exittest` gives your owner powers back and removes the test login.
+
+## Web link (no Telegram needed)
+Admin → a family → "🌐 Web link" (bot `/admin` and the app) makes a private link like `https://<your-app>/w/<secret>`. Anyone with it can browse that family's photos in any browser (an iPad), download them and ♥ favorites. They cannot message, send feedback, suggest photos or reach any other family. Each browser is remembered as a "guest" (max 40 per link). "New link" or "Turn it off" cuts every device off at once. The link itself is the secret, so send it only to the family.
+
+### Letting parents manage web access (named people)
+In the family's Web link screen, "Parents can manage it" switches a "🌐 Web access" button on in that family's app. The parents add people (a child, a grandparent...). Each person gets their own private link and their own favorites, and the parents choose per person: link on/off, downloads on/off, and which photos they see (all, Best shots only, or chosen days). They can also make a new link or remove the person. Up to 10 people per family. Switching the option off for a family removes the button and every one of their web links.

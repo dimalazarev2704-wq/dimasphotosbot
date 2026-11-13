@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import time
 from datetime import datetime, timedelta, timezone
 from urllib.parse import parse_qsl, urlsplit
@@ -222,6 +223,86 @@ class WebApp:
         exp = (int(time.time()) // URL_LIFETIME + 2) * URL_LIFETIME
         return f"/img/{mid}?s={size}&u={uid}&e={exp}&sig={self.sign(mid, size, uid, exp)}"
 
+    # ---------- web-link visitors ("guests": no Telegram account) ----------
+
+    GUEST_PATHS = {"/api/home", "/api/dates", "/api/places", "/api/photos", "/api/fav", "/api/seen"}
+    GUEST_MAX = 40  # browsers per family link
+
+    def guest_key(self, gid: int, gen: int | None = None) -> str:
+        what = f"guest:{gid}" if gen is None else f"guest:{gid}:{gen}"
+        return f"{gid}." + hmac.new(self.url_secret, what.encode(), hashlib.sha256).hexdigest()[:32]
+
+    async def person_of(self, uid: int) -> dict | None:
+        """The named web person (a child, a grandparent ...) this guest id stands for, if switched on."""
+        if not isinstance(uid, int) or uid >= 0:
+            return None
+        p = await self.d.db().webpeople.find_one({"_id": uid})
+        if not p or not p.get("on", True):
+            return None
+        if not await self.d.db().families.find_one({"thread_id": p["tid"], "child_ok": True}):
+            return None  # (the photographer took this option away from the family)
+        return p
+
+    async def guest_from(self, key: str) -> dict | None:
+        """The guest this key belongs to. Turning a link off, replacing it or removing the person cuts it off."""
+        gid_s, _, sig = (key or "").rpartition(".")
+        try:
+            gid = int(gid_s)
+        except ValueError:
+            return None
+        if gid >= 0 or not re.fullmatch(r"[0-9a-f]{32}", sig):
+            return None
+        db = self.d.db()
+        person = await db.webpeople.find_one({"_id": gid})
+        if person:  # a named person: one identity on every device, so hearts follow them
+            if not hmac.compare_digest(self.guest_key(gid, person.get("gen", 0)), f"{gid}.{sig}") or not await self.person_of(gid):
+                return None
+            return {"_id": gid, "tid": person["tid"], "person": person}
+        if not hmac.compare_digest(self.guest_key(gid), f"{gid}.{sig}"):
+            return None
+        g = await db.guests.find_one({"_id": gid})
+        if not g or not await db.families.find_one({"thread_id": g["tid"], "web": {"$exists": True}}):
+            return None
+        return {**g, "person": None}
+
+    async def guest_join(self, body: bytes) -> Resp:
+        try:
+            req = json.loads(body.decode() or "{}")
+            if not isinstance(req, dict):
+                raise ValueError
+        except (ValueError, RecursionError):
+            return err(400, "Bad request")
+        tok = req.get("token")
+        if not isinstance(tok, str) or not re.fullmatch(r"[A-Za-z0-9_-]{10,60}", tok):
+            return err(404, "This link doesn't work.")
+        db = self.d.db()
+        p = await db.webpeople.find_one({"token": tok})
+        if p:
+            if not await self.person_of(p["_id"]):
+                return err(404, "This link is switched off. Please ask for a new one.")
+            return jresp({"key": self.guest_key(p["_id"], p.get("gen", 0)), "family": (await self.d.family_name(p["tid"])) or "", "name": p["name"]})
+        fam = await db.families.find_one({"web": tok})
+        if not fam:
+            return err(404, "This link isn't active any more. Please ask for a new one.")
+        old = await self.guest_from(str(req.get("key") or ""))
+        if old and old["tid"] == fam["thread_id"] and not old["person"]:  # (this browser has been here before)
+            return jresp({"key": req["key"], "family": fam["name"]})
+        if await db.guests.count_documents({"tid": fam["thread_id"]}) >= self.GUEST_MAX:
+            return err(429, "This link has been opened on too many devices. Please ask for a new one.")
+        gid = -(10 ** 9 + secrets.randbelow(10 ** 12))
+        await db.guests.insert_one({"_id": gid, "tid": fam["thread_id"], "at": datetime.now(timezone.utc)})
+        return jresp({"key": self.guest_key(gid), "family": fam["name"]})
+
+    async def vis(self, tid: int, uid: int) -> dict:
+        """The photos this person may see: the family's, narrowed for a web person the parents limited."""
+        q = await self.d.vis_q(tid)
+        p = await self.person_of(uid) if uid < 0 else None
+        if p and p.get("scope") == "best":
+            q["best"] = True
+        elif p and p.get("scope") == "dates":
+            q["date"] = {"$in": list(p.get("dates") or [])[:400]}
+        return q
+
     async def family_of(self, uid: int) -> int | None:
         """The family this person may browse. Unconfirmed people get None. The owner gets only the family
         they picked with /connect (kept in memory by the bot, never saved), so nothing about them is stored."""
@@ -230,6 +311,14 @@ class WebApp:
             if tid and not await self.d.db().families.find_one({"thread_id": tid}):
                 return None  # that family was deleted
             return tid
+        if uid < 0:  # a web-link visitor
+            p = await self.person_of(uid)
+            if p:
+                return p["tid"]
+            g = await self.d.db().guests.find_one({"_id": uid})
+            if not g or not await self.d.db().families.find_one({"thread_id": g["tid"], "web": {"$exists": True}}):
+                return None
+            return g["tid"]
         doc = await self.d.db().users.find_one({"_id": uid})
         if not doc or doc.get("pending"):
             return None
@@ -257,6 +346,10 @@ class WebApp:
                 return Resp(200, b"ok", "text/plain")
             if path == "/app" and method == "GET":
                 return self.page()
+            if path.startswith("/w/") and method == "GET":  # a family's web link: the same app page
+                return self.page({"Referrer-Policy": "no-referrer", "X-Robots-Tag": "noindex"})
+            if path.startswith("/dl/") and method == "GET":
+                return await self.image(path[4:], query, download=True)
             if path.startswith("/img/") and method == "GET":
                 return await self.image(path[5:], query)
             if path.startswith("/simg/") and method == "GET":
@@ -270,13 +363,13 @@ class WebApp:
             log.exception("Web request failed: %s %s", method, path)
             return err(500, "Something went wrong. Please try again.")
 
-    def page(self) -> Resp:
+    def page(self, extra: dict | None = None) -> Resp:
         try:
             with open(self.html_path, "rb") as f:
                 html = f.read()
         except OSError:
             return Resp(500, b"The app page is missing on the server.", "text/plain")
-        return Resp(200, html, "text/html; charset=utf-8", {"Cache-Control": "no-store"})
+        return Resp(200, html, "text/html; charset=utf-8", {"Cache-Control": "no-store", **(extra or {})})
 
     # ---------- uploads (owner only) ----------
 
@@ -397,10 +490,10 @@ class WebApp:
         Opening the app with the "new" welcome is what counts as having seen it."""
         db = self.d.db()
         cutoff = datetime.now(timezone.utc) - timedelta(days=NEW_DAYS)
-        vq = await self.d.vis_q(tid)  # (the family's own photos + its groups' shared ones, minus files that leave it out)
+        vq = await self.vis(tid, uid)  # (the family's own photos + its groups' shared ones, minus files that leave it out)
         new_q = {**vq, "sug": {"$ne": True}, "added": {"$gte": cutoff}}
         n_new = await db.photos.count_documents(new_q)
-        best = await self.d.has_best(tid)
+        best = (await db.photos.count_documents({**vq, "best": True}) > 0) if uid < 0 else await self.d.has_best(tid)  # (a limited web person only counts what they may see)
         total = await db.photos.count_documents(vq)
         mode = "latest"
         if n_new >= NEW_MIN:
@@ -431,9 +524,19 @@ class WebApp:
                 "items": await self.cards(docs, uid)}
 
     async def api(self, path: str, headers: dict, body: bytes) -> Resp:
+        if path == "/api/guest_join":
+            return await self.guest_join(body)
         user = validate_init_data(headers.get("x-init-data", ""), self.d.token)
+        guest = False
+        if not user and headers.get("x-guest-key"):
+            g = await self.guest_from(headers["x-guest-key"])
+            if not g:
+                return err(401, "This link isn't active any more. Please ask for a new one.")
+            user, guest = {"id": g["_id"], "first_name": (g["person"] or {}).get("name", "")}, True
         if not user:
             return err(401, "Please close this and open the app again from Telegram.")
+        if guest and path not in self.GUEST_PATHS:
+            return err(403, "Not available on the web link.")
         uid = user["id"]
         owner = self.d.is_owner(uid)
         db = self.d.db()
@@ -468,6 +571,11 @@ class WebApp:
             tid = await self.family_of(uid)
             if not tid:
                 return err(403, "Please send /start to the bot and link your account first.")
+        if path == "/api/child":  # the parents' own "Child access" screen
+            if owner:
+                return err(403, "This is for clients.")
+            status, data = await self.d.child(tid, req)
+            return jresp(data, status)
         if path == "/api/chat":
             if owner:
                 return err(403, "This is for clients.")
@@ -535,25 +643,31 @@ class WebApp:
 
         if path == "/api/home":
             lang = await self.d.get_lang(uid)
-            if not owner:
-                await self.d.db().users.update_one({"_id": uid}, {"$set": {"last_open": datetime.now(timezone.utc)}})  # (so the photographer can tell who has opened the app)
+            if not owner and not guest:
+                await self.d.db().users.update_one({"_id": uid}, {"$set": {"last_open": datetime.now(timezone.utc)}})
+            gp = await self.person_of(uid) if guest else None
+            if gp:
+                await self.d.db().webpeople.update_one({"_id": uid}, {"$set": {"last_open": datetime.now(timezone.utc)}})  # (so the photographer can tell who has opened the app)
             return jresp({
                 "favs": 0 if owner else await self.fav_count(uid, tid),
                 "family": await self.d.family_name(tid) or "",
                 "first": user.get("first_name") or "",
-                "best": await self.d.has_best(tid),
+                "best": (await db.photos.count_documents({**await self.vis(tid, uid), "best": True}) > 0) if guest else await self.d.has_best(tid),
                 "admin": owner,
                 "help": (await self.d.for_reader(self.d.help_text(), lang))[0] if (not owner and lang != "en") else self.d.help_text(),
                 "copyright": self.d.copyright,
                 "owner": self.d.owner_name,
                 "lang": lang if owner is False else "en",
-                "lang_set": True if owner else await self.d.lang_chosen(uid),
+                "lang_set": True if (owner or guest) else await self.d.lang_chosen(uid),
+                "guest": guest,
+                "dl": gp.get("dl") is not False if gp else True,
+                "child": False if (owner or guest) else bool((await db.families.find_one({"thread_id": tid}) or {}).get("child_ok")),
                 "welcome": await self.welcome(uid, tid),
             })
 
         if path == "/api/dates":
             cur = await db.photos.aggregate([
-                {"$match": {**await self.d.vis_q(tid), "date": {"$type": "string"}}},
+                {"$match": {"date": {"$type": "string"}, **await self.vis(tid, uid)}},
                 {"$group": {"_id": "$date", "n": {"$sum": 1}, "cover": {"$min": "$message_id"}}},
                 {"$sort": {"_id": -1}},
             ])
@@ -564,7 +678,7 @@ class WebApp:
 
         if path == "/api/places":
             cur = await db.photos.aggregate([
-                {"$match": await self.d.vis_q(tid)},
+                {"$match": await self.vis(tid, uid)},
                 {"$group": {"_id": {"$ifNull": ["$loc_id", "none"]}, "loc": {"$first": "$location"}, "n": {"$sum": 1},
                             "cover": {"$min": "$message_id"}}},
             ])
@@ -576,11 +690,13 @@ class WebApp:
 
         if path == "/api/photos":
             mode, value = req.get("mode"), req.get("value")
-            q = await self.d.vis_q(tid)  # (always the caller's own family + its groups)
+            q = await self.vis(tid, uid)  # (always the caller's own family + its groups)
             sort = [("date", 1), ("message_id", 1)]
             if mode == "date":
                 if not isinstance(value, str) or len(value) != 10:
                     return err(400, "Bad request")
+                if isinstance(q.get("date"), dict) and value not in q["date"].get("$in", []):
+                    return jresp({"items": [], "more": False})  # (a day this person isn't allowed to see)
                 q["date"] = value
             elif mode == "loc":
                 if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{10}|none", value):
@@ -613,7 +729,7 @@ class WebApp:
 
         if path == "/api/fav":
             on = req.get("on")
-            doc = await self.my_photo(req.get("id"), tid)
+            doc = await self.my_photo(req.get("id"), tid, uid)
             if not doc or not isinstance(on, bool):
                 return err(404, "Photo not found")
             if owner:  # (the owner's preview never saves anything about them)
@@ -629,7 +745,7 @@ class WebApp:
             return jresp({"ok": True, "fav": on, "favs": await self.fav_count(uid, tid)})
 
         if path == "/api/seen":  # a photo was opened full-screen (so the photographer can see what was looked at)
-            doc = await self.my_photo(req.get("id"), tid)
+            doc = await self.my_photo(req.get("id"), tid, uid)
             if not doc or owner or doc.get("sug"):
                 return jresp({"ok": True})
             await self.d.db().seen.update_one({"_id": f"{uid}:{doc['message_id']}"}, {"$set": {"uid": uid, "mid": doc["message_id"], "tid": tid, "at": datetime.now(timezone.utc)}}, upsert=True)
@@ -656,15 +772,19 @@ class WebApp:
         mine = [f["mid"] for f in await db.favs.find({"uid": uid}).limit(FAV_MAX).to_list()]
         if not mine:
             return 0
-        q = await self.d.vis_q(tid)
+        q = await self.vis(tid, uid)
         q["message_id"] = {"$in": mine}
         return await db.photos.count_documents(q)
 
-    async def my_photo(self, mid, tid: int):
+    async def my_photo(self, mid, tid: int, uid: int | None = None):
         if not isinstance(mid, int) or isinstance(mid, bool) or abs(mid) > 2**53:
             return None
         doc = await self.d.db().photos.find_one({"message_id": mid})
         ok = doc and doc.get("thread_id") in await self.d.visible_tids(tid) and tid not in (doc.get("skip") or [])
+        if ok and uid is not None and uid < 0:  # a web person the parents limited to Best shots or some days
+            p = await self.person_of(uid)
+            if p and ((p.get("scope") == "best" and not doc.get("best")) or (p.get("scope") == "dates" and doc.get("date") not in (p.get("dates") or []))):
+                ok = False
         return doc if ok else None
 
     def sug_card(self, row: dict, sid: str, i: int, uid: int) -> dict:
@@ -710,7 +830,7 @@ class WebApp:
 
     # ---------- images ----------
 
-    async def image(self, mid_s: str, q: dict) -> Resp:
+    async def image(self, mid_s: str, q: dict, download: bool = False) -> Resp:
         try:
             mid, uid, exp = int(mid_s), int(q.get("u", "")), int(q.get("e", ""))
         except ValueError:
@@ -728,9 +848,13 @@ class WebApp:
                 doc = None
         else:
             tid = await self.family_of(uid)  # (checked every time, so removing someone cuts them off)
-            doc = await self.my_photo(mid, tid) if tid else None
-        if not doc:
+            doc = await self.my_photo(mid, tid, uid) if tid else None
+        if not doc or (download and (size != "full" or doc.get("kind") == "video")):
             return err(404, "Not found")
+        if download and uid < 0:
+            p = await self.person_of(uid)
+            if p and p.get("dl") is False:
+                return err(403, "Downloads are switched off for this link.")
         hit = self.cache.get((mid, size))
         good = True
         if hit is None:
@@ -739,6 +863,10 @@ class WebApp:
                 return err(404, "Couldn't load this photo")
             hit, good = made[:2], made[2]
         ctype, data = hit
+        if download:
+            ext = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "image/gif": "gif"}.get(ctype, "jpg")
+            return Resp(200, data, ctype, {"Cache-Control": "private, max-age=3600",
+                                            "Content-Disposition": f'attachment; filename="photo-{mid}.{ext}"'})
         # a blurry stand-in (Telegram was slow) must not be kept by the phone, so the sharp one can load next time
         return Resp(200, data, ctype, {"Cache-Control": "private, max-age=86400" if good else "no-store"})
 

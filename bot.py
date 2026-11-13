@@ -3553,6 +3553,150 @@ async def send_reminders(bot, people: list[dict]) -> int:
 MANUAL_REMIND_GAP = timedelta(hours=6)  # (so a family can't be nagged again and again)
 
 
+def web_link_url(fam: dict) -> str:
+    return f"{WEBAPP_URL}/w/{fam['web']}" if WEBAPP_URL and fam.get("web") else ""
+
+
+async def drop_guests(tid: int) -> int:
+    """Forget every browser that opened this family's web link (and the hearts/views they left)."""
+    ids = [g["_id"] for g in await db.guests.find({"tid": tid}).to_list()]
+    if ids:
+        await db.favs.delete_many({"uid": {"$in": ids}})
+        await db.seen.delete_many({"uid": {"$in": ids}})
+        await db.guests.delete_many({"tid": tid})
+    return len(ids)
+
+
+async def web_link_change(tid: int, mode: str) -> tuple[bool, str, str]:
+    """mode: "make" (a new link; the old one and every device on it stop working) or "off". -> (ok, note, url)"""
+    fam = await db.families.find_one({"thread_id": tid})
+    if not fam:
+        return False, "That family no longer exists.", ""
+    if mode == "make":
+        if not WEBAPP_URL:
+            return False, "The web address isn't set up (WEBAPP_URL), so I can't make a link.", ""
+        tok = secrets.token_urlsafe(18)
+        await db.families.update_one({"thread_id": tid}, {"$set": {"web": tok}})
+        await drop_guests(tid)
+        return True, "🌐 New link made. The old one stopped working.", web_link_url({"web": tok})
+    await db.families.update_one({"thread_id": tid}, {"$unset": {"web": ""}})
+    await drop_guests(tid)
+    return True, "🚫 The web link is off. Everyone who used it is cut off.", ""
+
+
+async def child_option(tid: int, on: bool | None) -> tuple[bool, str]:
+    """Switch "parents can manage the child web link" on or off for a family (None = flip). Off also turns the link off."""
+    fam = await db.families.find_one({"thread_id": tid})
+    if not fam:
+        return False, "That family no longer exists."
+    on = (not fam.get("child_ok")) if on is None else on
+    if on:
+        await db.families.update_one({"thread_id": tid}, {"$set": {"child_ok": True}})
+        return True, "🌐 The parents can now add people and manage their web links themselves."
+    await db.families.update_one({"thread_id": tid}, {"$unset": {"child_ok": ""}})
+    await web_link_change(tid, "off")
+    await drop_web_people(tid)
+    return True, "🌐 Removed for this family. Their button is gone and every web link of theirs is off."
+
+
+WEB_PEOPLE_MAX = 10
+
+
+async def drop_web_people(tid: int, pid: int | None = None) -> None:
+    """Remove a family's named web people (or one of them) together with their hearts and views."""
+    q = {"tid": tid} if pid is None else {"tid": tid, "_id": pid}
+    ids = [p["_id"] for p in await db.webpeople.find(q).to_list()]
+    if ids:
+        await db.favs.delete_many({"uid": {"$in": ids}})
+        await db.seen.delete_many({"uid": {"$in": ids}})
+        await db.webpeople.delete_many({"_id": {"$in": ids}})
+
+
+def web_person_row(p: dict) -> dict:
+    return {"id": p["_id"], "name": p["name"], "url": f"{WEBAPP_URL}/w/{p['token']}" if WEBAPP_URL else "",
+            "on": p.get("on", True), "dl": p.get("dl", True) is not False, "scope": p.get("scope") or "all",
+            "dates": list(p.get("dates") or []), "opened": ago_text(p.get("last_open")) if p.get("last_open") else "never"}
+
+
+async def child_api(tid: int, req: dict) -> tuple[int, dict]:
+    """What the PARENTS see and do in their own app (only where the photographer switched it on):
+    named people (a child, a grandparent ...) who each get their own private web link."""
+    fam = await db.families.find_one({"thread_id": tid})
+    if not fam or not fam.get("child_ok"):
+        return 403, {"error": "Not available."}
+    action = req.get("action")
+    if not WEBAPP_URL:
+        return 400, {"error": "The web address isn't set up yet."}
+    if action in ("set", "newlink", "remove"):
+        pid = req.get("id")
+        p = await db.webpeople.find_one({"_id": pid, "tid": tid}) if isinstance(pid, int) and not isinstance(pid, bool) else None
+        if not p:
+            return 404, {"error": "That person no longer exists."}
+        if action == "remove":
+            await drop_web_people(tid, p["_id"])
+        elif action == "newlink":  # a new secret: the old link stops working on every device
+            await db.webpeople.update_one({"_id": p["_id"]}, {"$set": {"token": secrets.token_urlsafe(18)}, "$inc": {"gen": 1}})
+        else:
+            upd = {}
+            for k in ("on", "dl"):
+                if k in req:
+                    if not isinstance(req[k], bool):
+                        return 400, {"error": "Bad request"}
+                    upd[k] = req[k]
+            if "scope" in req:
+                if req["scope"] not in ("all", "best", "dates"):
+                    return 400, {"error": "Bad request"}
+                upd["scope"] = req["scope"]
+            if "dates" in req:
+                ds = req["dates"]
+                if not isinstance(ds, list) or len(ds) > 400 or not all(isinstance(x, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", x) for x in ds):
+                    return 400, {"error": "Bad request"}
+                upd["dates"] = sorted(set(ds))
+            if upd:
+                await db.webpeople.update_one({"_id": p["_id"]}, {"$set": upd})
+    elif action == "add":
+        name = " ".join(str(req.get("name") or "").split())[:30]
+        if not name:
+            return 400, {"error": "Please type a name."}
+        existing = await db.webpeople.find({"tid": tid}).to_list()
+        if len(existing) >= WEB_PEOPLE_MAX:
+            return 400, {"error": f"That's the most people I can add ({WEB_PEOPLE_MAX}). Please remove someone first."}
+        if any(x["name"].casefold() == name.casefold() for x in existing):
+            return 400, {"error": f"You already have a {name}."}
+        pid = -(10 ** 9 + secrets.randbelow(10 ** 12))
+        await db.webpeople.insert_one({"_id": pid, "tid": tid, "name": name, "token": secrets.token_urlsafe(18), "gen": 0,
+                                       "on": True, "dl": True, "scope": "all", "dates": [], "created": datetime.now(timezone.utc)})
+        return 200, {"id": pid, "people": [web_person_row(p) for p in await db.webpeople.find({"tid": tid}).sort("created", 1).to_list()]}
+    elif action != "list":
+        return 400, {"error": "Bad request"}
+    return 200, {"people": [web_person_row(p) for p in await db.webpeople.find({"tid": tid}).sort("created", 1).to_list()]}
+
+
+async def web_link_view(tid: int, note: str = ""):
+    fam = await db.families.find_one({"thread_id": tid})
+    if not fam:
+        return "That family no longer exists.", InlineKeyboardMarkup([[_btn("⬅️ Families", "a:fl:0")]])
+    url = web_link_url(fam)
+    devices = await db.guests.count_documents({"tid": tid}) if url else 0
+    lines = [f"🌐 Web link — {fam['name']} family", ""] + ([note, ""] if note else [])
+    if url:
+        lines += ["Anyone with this link can look at the family's photos in a browser (an iPad, no Telegram needed), download them and ♥ favorites. They can't message or change anything.", "",
+                  url, "", f"{devices} {'device has' if devices == 1 else 'devices have'} opened it."]
+    else:
+        lines += ["No web link yet. Make one to let someone look at the photos in a browser, with no Telegram account."]
+    rows = [[_btn("🔄 New link (old one stops)" if url else "🌐 Make a web link", f"a:wm:{tid}")]]
+    if url:
+        rows.append([_btn("🚫 Turn it off", f"a:wo:{tid}")])
+    rows.append([_btn(f"👨‍👧 Parents can manage it: {'ON' if fam.get('child_ok') else 'off'}", f"a:wc:{tid}")])
+    ppl = await db.webpeople.find({"tid": tid}).sort("created", 1).to_list()
+    if ppl:
+        lines += ["", "👥 Their web people:"] + [f"• {p['name']} — {'on' if p.get('on', True) else 'off'}, last opened: {ago_text(p.get('last_open')) if p.get('last_open') else 'never'}" for p in ppl]
+    lines.append("")
+    lines.append("With “Parents can manage it” ON, the family sees a “Web access” button in their app, adds people (a child, a grandparent...) and gives each their own link. Turning it off removes that button and every one of those links.")
+    rows.append([_btn("⬅️ Back", f"a:f:{tid}")])
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
 async def not_opened_data() -> list[dict]:
     """Families where nobody has opened the app since the newest photos arrived: who, and how many of the new photos were seen."""
     out = []
@@ -4931,6 +5075,7 @@ async def family_page(tid: int):
             [_btn("📤 Add photos", f"a:phf:{tid}"), _btn("🗑 Remove photos", f"a:rmf:{tid}:0")],
             [_btn("👥 Members", f"a:mem:{tid}"), _btn("🔄 New code", f"a:nc:{tid}")],
             [_btn("➕ Add person by ID", f"a:ap:{tid}"), _btn("💬 Welcome message", f"a:inv:{tid}")],
+            [_btn("🌐 Web link", f"a:wl:{tid}")],
             [_btn("👁 Browse as this family", f"a:cnf:{tid}"), _btn("❌ Delete family", f"a:df:{tid}")],
             *([[_btn(f"⭐ Clear best shots ({best})", f"a:bsx:{tid}")]] if best else []),
             [_btn("⬅️ Families", "a:fl:0")],
@@ -5248,6 +5393,20 @@ async def on_admin_button(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await delete_feedback(context.bot, None, parts[2])
         await show(*await feedback_view(0))
 
+
+    elif action == "wl":  # the family's web link
+        context.user_data.pop("adm", None)
+        await show(*await web_link_view(int(parts[2])))
+
+    elif action == "wc":  # let this family's parents manage the web link themselves (or take that away)
+        context.user_data.pop("adm", None)
+        ok, note = await child_option(int(parts[2]), None)
+        await show(*await web_link_view(int(parts[2]), note))
+
+    elif action in ("wm", "wo"):
+        context.user_data.pop("adm", None)
+        ok, note, _url = await web_link_change(int(parts[2]), "make" if action == "wm" else "off")
+        await show(*await web_link_view(int(parts[2]), note))
 
     elif action == "no":  # families that haven't opened the newest photos
         context.user_data.pop("adm", None)
@@ -5810,6 +5969,8 @@ async def on_admin_button(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await db.users.delete_many({"thread_id": tid})
         await db.favs.delete_many({"tid": tid})
         await db.seen.delete_many({"tid": tid})
+        await drop_guests(tid)
+        await drop_web_people(tid)
         await db.photos.delete_many({"thread_id": tid})
         await db.suggestions.delete_many({"thread_id": tid})
         await db.comments.delete_many({"tid": tid})
@@ -5848,7 +6009,7 @@ ADMIN_ACTIONS = {
     "overview", "family", "photo_best", "photo_remove", "photo_edit", "photo_vis", "sugs", "sug_act",
     "ann_preview", "ann_send", "ann_schedule", "scheduled", "sched_cancel",
     "tries", "try_add", "try_dismiss", "try_unlock", "tries_clear",
-    "fam_add", "fam_code", "people", "users", "upline", "upline_set", "not_opened", "remind", "groups", "group_save", "group_delete", "group_member", "comments", "thread", "chat_send", "chat_clear", "chat_msg_delete", "feedback", "feedback_read", "feedback_delete", "invite", "invite_send", "fam_delete", "member_unlink", "person_add", "best_clear",
+    "fam_add", "fam_code", "people", "users", "upline", "upline_set", "not_opened", "remind", "web_link", "web_make", "web_off", "web_child", "groups", "group_save", "group_delete", "group_member", "comments", "thread", "chat_send", "chat_clear", "chat_msg_delete", "feedback", "feedback_read", "feedback_delete", "invite", "invite_send", "fam_delete", "member_unlink", "person_add", "best_clear",
 }
 
 
@@ -6174,6 +6335,28 @@ async def _admin_api(bot, action: str, req: dict) -> tuple[int, dict]:
             return bad
         return await group_member(gid, tid, req["on"])
 
+    if action == "web_child":
+        tid = _int(req.get("tid"))
+        if tid is None or not isinstance(req.get("on"), bool):
+            return bad
+        ok, note = await child_option(tid, req["on"])
+        return (200, {"note": note}) if ok else (404, {"error": note})
+
+    if action in ("web_link", "web_make", "web_off"):
+        tid = _int(req.get("tid"))
+        fam = await db.families.find_one({"thread_id": tid}) if tid is not None else None
+        if not fam:
+            return 404, {"error": "That family no longer exists."}
+        note = ""
+        if action != "web_link":
+            ok, note, _u = await web_link_change(tid, "make" if action == "web_make" else "off")
+            if not ok:
+                return 400, {"error": note}
+            fam = await db.families.find_one({"thread_id": tid})
+        url = web_link_url(fam)
+        return 200, {"url": url, "devices": await db.guests.count_documents({"tid": tid}) if url else 0, "note": note, "child_ok": bool(fam.get("child_ok")),
+                     "people": [{"name": p["name"], "opened": ago_text(p.get("last_open")) if p.get("last_open") else "never", "on": p.get("on", True)} for p in await db.webpeople.find({"tid": tid}).sort("created", 1).to_list()]}
+
     if action == "not_opened":
         return 200, {"families": (await not_opened_data())[:100]}
 
@@ -6401,6 +6584,8 @@ async def _admin_api(bot, action: str, req: dict) -> tuple[int, dict]:
         await db.users.delete_many({"thread_id": tid})
         await db.favs.delete_many({"tid": tid})
         await db.seen.delete_many({"tid": tid})
+        await drop_guests(tid)
+        await drop_web_people(tid)
         await db.photos.delete_many({"thread_id": tid})
         await db.suggestions.delete_many({"thread_id": tid})
         await db.comments.delete_many({"tid": tid})
@@ -6447,6 +6632,9 @@ class WebDeps:
         return status, data
 
     admin_actions = ADMIN_ACTIONS
+
+    async def child(self, tid: int, req: dict) -> tuple[int, dict]:
+        return await child_api(tid, req)
 
     async def helper(self, uid: int, user: dict, action: str, req: dict) -> tuple[int, dict]:
         return await helper_api(self.app.bot, uid, user, action, req)
@@ -6639,6 +6827,9 @@ async def post_init(app: Application) -> None:
     await safe_index(lambda: db.seen.create_index("uid"))
     await safe_index(lambda: db.seen.create_index("mid"))
     await safe_index(lambda: db.seen.create_index("tid"))
+    await safe_index(lambda: db.guests.create_index("tid"))
+    await safe_index(lambda: db.webpeople.create_index("tid"))
+    await safe_index(lambda: db.webpeople.create_index("token"))
     await safe_index(lambda: db.tries.create_index("at", expireAfterSeconds=2592000))  # forget login attempts after 30 days
     await safe_index(lambda: db.starters.create_index("seen", expireAfterSeconds=180 * 86400))  # forget old Start presses after ~6 months
     await safe_index(lambda: db.uitr.create_index("at", expireAfterSeconds=180 * 86400))  # (saved UI translations)

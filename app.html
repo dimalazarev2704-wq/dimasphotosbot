@@ -121,6 +121,11 @@ textarea{min-height:140px}
 const tg = window.Telegram && Telegram.WebApp;
 if (tg) { try { tg.ready(); tg.expand(); } catch (e) {} }
 const initData = (tg && tg.initData) || "";
+// A family's web link (/w/<token>): the same app in any browser, no Telegram. The browser keeps its own key.
+const GUEST_TOKEN = initData ? "" : ((location.pathname.match(/^\/w\/([A-Za-z0-9_-]{10,60})\/?$/) || [])[1] || "");
+let guestKey = "";
+try { if (GUEST_TOKEN) guestKey = localStorage.getItem("gk:" + GUEST_TOKEN) || ""; } catch (e) {}
+const IS_GUEST = !!GUEST_TOKEN;
 const $main = document.getElementById("main"), $tabs = document.getElementById("tabs");
 let HOME = null, tab = "home", stack = [];
 let IS_ADMIN = false, adminFam = null, adminFamName = "", dirty = false;  // (the owner's pick lives only in this open app)
@@ -142,7 +147,7 @@ async function api(path, body) {
   if (IS_ADMIN && !path.startsWith("/api/admin/")) body = Object.assign({}, body, { fam: adminFam });
   const ctl = new AbortController(), timer = setTimeout(() => ctl.abort(), 60000);  // (a sleeping server can take a while to wake)
   try {
-    res = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json", "X-Init-Data": initData }, body: JSON.stringify(body || {}), signal: ctl.signal });
+    res = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json", "X-Init-Data": initData, "X-Guest-Key": guestKey }, body: JSON.stringify(body || {}), signal: ctl.signal });
   } catch (e) { throw new Error("No connection, or the server is still waking up. Please wait a moment and try again."); }
   finally { clearTimeout(timer); }
   let data = {};
@@ -232,6 +237,20 @@ const RU_EXACT = {
   "✅ Sent to your chat": "✅ Отправлено в ваш чат", "⚠️ Please type your message.": "⚠️ Пожалуйста, введите сообщение.",
   "⚠️ Please type your feedback.": "⚠️ Пожалуйста, введите отзыв.",
   "📥 Send me the photo in chat": "📥 Отправить фото мне в чат",
+  "🌐 Web access": "🌐 Доступ через браузер", "📋 Copy link": "📋 Скопировать ссылку",
+  "Give someone their own private link to look at your family's photos in a web browser, with no Telegram account. You choose what each person can do.": "Дайте человеку личную ссылку, чтобы он смотрел фото вашей семьи в браузере без аккаунта Telegram. Вы выбираете, что он может делать.",
+  "Nobody yet. Add a child, a grandparent or anyone you trust.": "Пока никого. Добавьте ребёнка, бабушку или любого, кому доверяете.",
+  "➕ Add a person": "➕ Добавить человека", "Create their link": "Создать ссылку", "Who is this link for?": "Для кого эта ссылка?",
+  "Their link": "Их ссылка", "Only send it to this person. Anyone with the link can open it.": "Отправьте её только этому человеку. Любой, у кого есть ссылка, может её открыть.",
+  "What they can do": "Что можно делать", "Link is on": "Ссылка включена", "Can download photos": "Можно скачивать фото",
+  "Which photos can they see?": "Какие фото можно смотреть?", "⭐ Best shots only": "⭐ Только лучшие кадры", "📅 Chosen days…": "📅 Выбранные дни…",
+  "More": "Ещё", "📅 Chosen days": "📅 Выбранные дни", "Select all": "Выбрать все", "Clear": "Сбросить", "Save": "Сохранить",
+  "Please tick at least one day.": "Отметьте хотя бы один день.", "No photos yet.": "Фото пока нет.",
+  "Link copied.": "Ссылка скопирована.", "Press and hold the link above to copy it.": "Нажмите и удерживайте ссылку выше, чтобы скопировать.",
+  "🔄 New link (old one stops)": "🔄 Новая ссылка (старая перестанет работать)", "🚫 Turn it off": "🚫 Отключить",
+  "Make a private link so anyone you trust (a child, a grandparent, a relative) can look at your family's photos in a web browser, with no Telegram account. They can view, download and ♥ photos, but can't message anyone or change anything. Only send it to people you trust: anyone with the link can open it.": "Создайте личную ссылку, чтобы любой, кому вы доверяете (ребёнок, бабушка, родственник), мог смотреть фото вашей семьи в браузере без аккаунта Telegram. Можно просматривать, скачивать и отмечать ♥ фото, но нельзя никому писать и ничего менять. Отправляйте её только тем, кому доверяете: любой, у кого есть ссылка, может её открыть.",
+  "Make a new link? The old link and every device using it stop working.": "Создать новую ссылку? Старая ссылка и все устройства, которые ею пользуются, перестанут работать.",
+  "Turn the web link off? Every device using it is cut off.": "Отключить веб-ссылку? Все устройства, которые ею пользуются, потеряют доступ.",
   "📥 Send me the video in chat": "📥 Отправить видео мне в чат",
   "Delete this photo from the group and the family's list? This can't be undone.": "Удалить это фото из группы и списка семьи? Это нельзя отменить.",
   "🌐 Русский / English": "🌐 Русский / English",
@@ -254,6 +273,12 @@ const RU_RULES = [
   [/^\((\d+) of (\d+)\)$/, "($1 из $2)"],
   [/^That's too long \((\d+) characters\)\. Please keep it under (\d+)\.$/, "Слишком длинно ($1 симв.). Пожалуйста, не больше $2."],
   [/^✅ Sent to (.+)\. Thank you!$/, "✅ Отправлено: $1. Спасибо!"],
+  [/^(\d+) devices? (?:has|have) opened it\.$/, "Открывали на устройствах: $1."],
+  [/^On · Last opened: (.+)$/, "Включено · Открывали: $1"], [/^Off · Last opened: (.+)$/, "Выключено · Открывали: $1"],
+  [/^Tick the days (.+) may see\.$/, "Отметьте дни, которые может смотреть $1."],
+  [/^📅 Chosen days \((\d+)\)$/, "📅 Выбранные дни ($1)"], [/^🗑 Remove (.+)$/, "🗑 Удалить: $1"],
+  [/^Make a new link for (.+)\? The old link stops working everywhere\.$/, "Создать новую ссылку для $1? Старая перестанет работать везде."],
+  [/^Remove (.+)\? Their link stops working and their ♥ favorites are deleted\.$/, "Удалить $1? Ссылка перестанет работать, а избранное ♥ будет удалено."],
   [/^✅ Thank you! Your feedback was sent to (.+)\.$/, "✅ Спасибо! Ваш отзыв отправлен: $1."],
   [/^You've sent a lot of (messages|feedback) just now\. Please try again in a little while\.$/, "Вы отправили слишком много сообщений. Попробуйте чуть позже."],
 ];
@@ -337,7 +362,7 @@ function drawTabs() {
   if (!IS_ADMIN || adminFam != null) {
     defs.push(["home", "🏠", "Home"], ["dates", "📅", "Dates"], ["places", "📍", "Places"], ["all", "🖼", "All"]);
     if (HOME && HOME.best) defs.push(["best", "⭐", "Best"]);
-    defs.push(["sug", "💡", "Suggested"]);
+    if (!IS_GUEST) defs.push(["sug", "💡", "Suggested"]);
     if (!IS_ADMIN && HOME && HOME.favs > 0) defs.push(["fav", "♥", "Favorites"]);  // (only once they have a heart)
   }
   $tabs.replaceChildren(...defs.map(([k, ic, label]) =>
@@ -348,7 +373,7 @@ function drawTabs() {
 let photos = [], viewList = [], homeAt = 0;
 async function homeScreen() {
   if (!HOME) {  // (asked once per visit, so the welcome can't change while the app is open)
-    if (!initData) { show([h("h1", { text: "Open from Telegram" }), h("div", { class: "msg", text: "Please open this app from the bot in Telegram, using the “📱 Open the photo app” button." })]); return; }
+    if (!initData && !guestKey) { show([h("h1", { text: "Open from Telegram" }), h("div", { class: "msg", text: "Please open this app from the bot in Telegram, using the “📱 Open the photo app” button." })]); return; }
     loading(); const my = navId;
     let got;
     try { got = await api("/api/home"); } catch (e) { if (my === navId) errorScreen(e, homeScreen); return; }
@@ -382,7 +407,8 @@ async function homeScreen() {
       photoGrid(w.items),
       h("button", { class: "cta", on: { click: () => seeAll(w.mode) }, text: w.mode === "new" ? "See all new photos" : "See all photos" })));
   }
-  if (!IS_ADMIN) nodes.push(h("button", { class: "cta alt", text: "💬 Chat with " + (HOME.owner || "the photographer"), on: { click: () => push(commentScreen) } }),
+  if (!IS_ADMIN && !IS_GUEST && HOME.child) nodes.push(h("button", { class: "cta alt", text: "🌐 Web access", on: { click: () => push(childScreen) } }));
+  if (!IS_ADMIN && !IS_GUEST) nodes.push(h("button", { class: "cta alt", text: "💬 Chat with " + (HOME.owner || "the photographer"), on: { click: () => push(commentScreen) } }),
     h("button", { class: "cta alt", text: "📝 Send feedback", on: { click: () => push(feedbackScreen) } }),
     h("button", { class: "cta alt", text: "🌐 Language", on: { click: () => push(() => langScreen(false)) } }));
   nodes.push(footer());
@@ -639,8 +665,9 @@ function showPhoto() {
   const isVid = p.k === "video";
   let pl = document.getElementById("vplay");
   if (!pl) { pl = h("div", { id: "vplay", text: "▶", on: { click: () => document.getElementById("vorig").click() } }); V.querySelector(".stage").append(pl); }
-  pl.style.display = isVid ? "flex" : "none";
-  document.getElementById("vorig").textContent = isVid ? "📥 Send me the video in chat" : "📥 Send me the photo in chat";
+  pl.style.display = isVid && !IS_GUEST ? "flex" : "none";
+  document.getElementById("vorig").textContent = isVid ? "📥 Send me the video in chat" : IS_GUEST ? "⬇️ Download the photo" : "📥 Send me the photo in chat";
+  if (IS_GUEST && (isVid || (HOME && HOME.dl === false))) document.getElementById("vorig").style.display = "none";
   document.getElementById("vcap").textContent = [isVid ? "🎬 Video" + (p.dur ? " " + vlen(p.dur) : "") + (p.mb ? " · " + p.mb + " MB" : "") : "", p.dt, p.loc, p.g ? "👥 " + p.g : "", p.by ? "Added by " + p.by : ""].filter(Boolean).join(" · ") + "   (" + (cur + 1) + " of " + viewList.length + ")";
   document.getElementById("vprev").style.visibility = cur > 0 ? "visible" : "hidden";
   document.getElementById("vnext").style.visibility = cur < viewList.length - 1 ? "visible" : "hidden";
@@ -671,6 +698,11 @@ document.getElementById("vprev").onclick = () => step(-1);
 document.getElementById("vnext").onclick = () => step(1);
 document.getElementById("vclose").onclick = closeViewer;
 document.getElementById("vorig").onclick = async (ev) => {
+  if (IS_GUEST) {  // no Telegram chat to send it to: save the picture from the web link instead
+    const p = viewList[cur]; if (!p || !p.f) return;
+    const a = document.createElement("a"); a.href = p.f.replace("/img/", "/dl/"); a.download = ""; document.body.append(a); a.click(); a.remove();
+    return;
+  }
   const b = ev.currentTarget; b.disabled = true; const old = b.textContent; b.textContent = "Sending…";
   try { await api("/api/send_original", { id: viewList[cur].id }); b.textContent = "✅ Sent to your chat"; }
   catch (e) { b.textContent = "⚠️ " + e.message; }
@@ -785,6 +817,110 @@ async function groupScreen(gid) {
       try { await api("/api/admin/group_delete", { id: g.id }); if (my === navId) back(); } catch (e) { msg.textContent = "⚠️ " + e.message; }
     }) } }) : null, footer()]);
 }
+async function childScreen() {  // the parents' "Web access": named people, each with their own private link
+  const my = navId;
+  let d; try { d = await api("/api/child", { action: "list" }); } catch (e) { if (my === navId) errorScreen(e, childScreen); return; }
+  show([backBtn(), h("h1", { text: "🌐 Web access" }),
+    h("div", { class: "hint", text: "Give someone their own private link to look at your family's photos in a web browser, with no Telegram account. You choose what each person can do." }),
+    d.people.length ? d.people.map(p => h("button", { class: "row", on: { click: () => push(() => personScreen(p.id)) } },
+      h("b", { "data-ugc": "1", text: p.name }),
+      h("div", { class: "hint", text: (p.on ? "On" : "Off") + " · Last opened: " + p.opened }))) : h("div", { class: "msg", text: "Nobody yet. Add a child, a grandparent or anyone you trust." }),
+    h("button", { class: "cta", text: "➕ Add a person", on: { click: () => push(addWebPersonScreen) } }),
+    footer()]);
+}
+function addWebPersonScreen() {
+  const nm = h("input", { type: "text", autocomplete: "off", maxlength: "30", placeholder: "Name, for example Mia" });
+  const msg = h("div", { class: "msg" });
+  const go = h("button", { class: "cta", text: "Create their link", on: { click: () => oneAtATime(async () => {
+    msg.textContent = "";
+    try { const r = await api("/api/child", { action: "add", name: nm.value }); replaceTop(() => personScreen(r.id)); }
+    catch (e) { msg.textContent = e.message; }
+  }) } });
+  show([backBtn(), h("h1", { text: "➕ Add a person" }), h("div", { class: "hint", text: "Who is this link for?" }), nm, msg, go]);
+  setTimeout(() => { try { nm.focus(); } catch (e) {} }, 100);
+}
+async function personScreen(pid) {
+  const my = navId;
+  let p; try { p = (await api("/api/child", { action: "list" })).people.find(x => x.id === pid); } catch (e) { if (my === navId) errorScreen(e, () => personScreen(pid)); return; }
+  if (!p) { back(); return; }
+  const save = async (patch, again) => { try { await api("/api/child", Object.assign({ action: "set", id: pid }, patch)); } catch (e) { await alertMsg("⚠️ " + e.message); } if (again) personScreen(pid); };
+  const toggle = (label, on, key) => { const cb = h("input", { type: "checkbox", style: "width:22px;height:22px;margin:0 12px 0 0;flex:none" }); cb.checked = on;
+    cb.addEventListener("change", () => oneAtATime(async () => { await save({ [key]: cb.checked }, true); })); return h("label", { style: "display:flex;align-items:center;padding:10px 0" }, cb, h("span", { text: label })); };
+  const scopeBtn = (v, label) => h("button", { class: p.scope === v ? "cta" : "cta alt", text: label, on: { click: () => oneAtATime(async () => {
+    if (v === "dates") { push(() => pickDaysScreen(pid)); return; }
+    if (p.scope !== v) await save({ scope: v }, true); }) } });
+  show([backBtn(), h("h1", { "data-ugc": "1", text: p.name }),
+    h("div", { class: "hint", text: (p.on ? "On" : "Off") + " · Last opened: " + p.opened }),
+    h("h2", { text: "Their link" }),
+    h("div", { class: "card", style: "word-break:break-all;user-select:all", text: p.url }),
+    h("button", { class: "cta", text: "📋 Copy link", on: { click: () => oneAtATime(async () => { try { await navigator.clipboard.writeText(p.url); await alertMsg("Link copied."); } catch (e) { await alertMsg("Press and hold the link above to copy it."); } }) } }),
+    h("div", { class: "hint", text: "Only send it to this person. Anyone with the link can open it." }),
+    h("h2", { text: "What they can do" }),
+    toggle("Link is on", p.on, "on"),
+    toggle("Can download photos", p.dl, "dl"),
+    h("h2", { text: "Which photos can they see?" }),
+    scopeBtn("all", "All photos"), scopeBtn("best", "⭐ Best shots only"),
+    scopeBtn("dates", p.scope === "dates" ? "📅 Chosen days (" + p.dates.length + ")" : "📅 Chosen days…"),
+    h("h2", { text: "More" }),
+    h("button", { class: "cta alt", text: "🔄 New link (old one stops)", on: { click: () => oneAtATime(async () => {
+      if (!await confirmAsk("Make a new link for " + p.name + "? The old link stops working everywhere.")) return;
+      try { await api("/api/child", { action: "newlink", id: pid }); } catch (e) { await alertMsg("⚠️ " + e.message); }
+      personScreen(pid); }) } }),
+    h("button", { class: "cta danger", text: "🗑 Remove " + p.name, on: { click: () => oneAtATime(async () => {
+      if (!await confirmAsk("Remove " + p.name + "? Their link stops working and their ♥ favorites are deleted.")) return;
+      try { await api("/api/child", { action: "remove", id: pid }); } catch (e) { await alertMsg("⚠️ " + e.message); return; }
+      back(); }) } }),
+    footer()]);
+}
+async function pickDaysScreen(pid) {
+  const my = navId;
+  let p, days; try {
+    p = (await api("/api/child", { action: "list" })).people.find(x => x.id === pid); days = (await api("/api/dates", {})).rows;
+  } catch (e) { if (my === navId) errorScreen(e, () => pickDaysScreen(pid)); return; }
+  if (!p) { back(); return; }
+  const chosen = new Set(p.dates), boxes = [];
+  const rows = days.map(r => { const cb = h("input", { type: "checkbox", style: "width:22px;height:22px;margin:0 12px 0 0;flex:none" }); cb.checked = chosen.has(r.v); boxes.push([r.v, cb]);
+    return h("label", { style: "display:flex;align-items:center;padding:10px 0;border-bottom:1px solid var(--line,#8883)" }, cb, h("span", { text: r.label + " · " + r.n + (r.n === 1 ? " photo" : " photos") })); });
+  const setAll = on => boxes.forEach(([, cb]) => { cb.checked = on; });
+  show([backBtn(), h("h1", { text: "📅 Chosen days" }), h("div", { class: "hint", text: "Tick the days " + p.name + " may see." }),
+    h("div", { style: "display:flex;gap:10px" }, h("button", { class: "cta alt", style: "flex:1;margin:0", text: "Select all", on: { click: () => setAll(true) } }), h("button", { class: "cta alt", style: "flex:1;margin:0", text: "Clear", on: { click: () => setAll(false) } })),
+    rows.length ? rows : h("div", { class: "msg", text: "No photos yet." }),
+    h("button", { class: "cta", text: "Save", on: { click: () => oneAtATime(async () => {
+      const ds = boxes.filter(([, cb]) => cb.checked).map(([v]) => v);
+      if (!ds.length) { await alertMsg("Please tick at least one day."); return; }
+      try { await api("/api/child", { action: "set", id: pid, scope: "dates", dates: ds }); } catch (e) { await alertMsg("⚠️ " + e.message); return; }
+      back(); }) } }),
+    footer()]);
+}
+async function webLinkScreen(tid, name) {
+  const d = await adminLoad("/api/admin/web_link", { tid }, () => webLinkScreen(tid, name)); if (!d) return;
+  const act = (action, ask) => () => oneAtATime(async () => {
+    if (ask && !await confirmAsk(ask)) return;
+    try { const r = await api("/api/admin/" + action, { tid }); await alertMsg(r.note || "Done."); } catch (e) { await alertMsg("⚠️ " + e.message); }
+    webLinkScreen(tid, name);
+  });
+  show([backBtn(), h("h1", { text: "🌐 Web link — " + name }),
+    d.url ? [
+      h("div", { class: "hint", text: "Anyone with this link can look at the family's photos in a browser (an iPad, no Telegram needed), download them and ♥ favorites. They can't message or change anything." }),
+      h("div", { class: "card", style: "word-break:break-all;user-select:all", text: d.url }),
+      h("div", { class: "hint", text: d.devices + (d.devices === 1 ? " device has" : " devices have") + " opened it." }),
+      h("button", { class: "cta", text: "📋 Copy link", on: { click: () => oneAtATime(async () => { try { await navigator.clipboard.writeText(d.url); await alertMsg("Link copied."); } catch (e) { await alertMsg("Press and hold the link above to copy it."); } }) } }),
+      h("button", { class: "cta alt", text: "🔄 New link (old one stops)", on: { click: act("web_make", "Make a new link? The old link and every device using it stop working.") } }),
+      h("button", { class: "cta danger", text: "🚫 Turn it off", on: { click: act("web_off", "Turn the web link off? Everyone using it is cut off.") } }),
+    ] : [
+      h("div", { class: "msg", text: "No web link yet. Make one to let someone look at the photos in a browser, with no Telegram account." }),
+      h("button", { class: "cta", text: "🌐 Make a web link", on: { click: act("web_make") } }),
+    ],
+    h("button", { class: "cta alt", text: "👨‍👧 Parents can manage it: " + (d.child_ok ? "ON" : "off"),
+      on: { click: () => oneAtATime(async () => {
+        if (d.child_ok && !await confirmAsk("Remove this from the " + name + " family? Their button disappears and their link is turned off.")) return;
+        try { const r = await api("/api/admin/web_child", { tid, on: !d.child_ok }); await alertMsg(r.note); } catch (e) { await alertMsg("⚠️ " + e.message); }
+        webLinkScreen(tid, name);
+      }) } }),
+    d.people && d.people.length ? [h("h2", { text: "👥 Their web people" }), d.people.map(p => h("div", { class: "hint", text: "• " + p.name + " — " + (p.on ? "on" : "off") + ", last opened: " + p.opened }))] : null,
+    h("div", { class: "hint", text: "ON: the family sees a “Web access” button in their app, adds people (a child, a grandparent...) and gives each their own link." }),
+    footer()]);
+}
 async function familyScreen(tid) {
   const d = await adminLoad("/api/admin/family", { tid }, () => familyScreen(tid)); if (!d) return;
   show([backBtn(), h("h1", { text: d.name + " family" }),
@@ -814,6 +950,7 @@ async function familyScreen(tid) {
     }) : null,
     h("h2", { text: "Family settings" }),
     h("button", { class: "cta alt", text: "💬 Welcome message (to send them)", on: { click: () => push(() => inviteScreen(d.tid, d.name)) } }),
+    h("button", { class: "cta alt", text: "🌐 Web link (no Telegram needed)", on: { click: () => push(() => webLinkScreen(d.tid, d.name)) } }),
     h("button", { class: "cta alt", text: "🔄 Make a new code",
       on: { click: () => famAct(d.tid, "fam_code", {}, "Make a new code for the " + d.name + " family? The old code (" + d.code + ") stops working for new sign-ups. People who already linked stay linked.", r => "New code: " + r.code) } }),
     d.best ? h("button", { class: "cta alt", text: "⭐ Clear best shots (" + d.best + ")",
@@ -1370,6 +1507,15 @@ async function helperScreen() {
     }) } }, h("b", { text: f.name + " family" }))) : h("div", { class: "msg", text: "No families yet." })]);
   show([h("h1", { text: "🤝 Photographer's code" }), h("div", { class: "hint", text: "Enter your own code to link this phone without the family's 6-digit code." }), input, msg, go]);
 }
+async function guestStart() {
+  loading();
+  try {
+    const r = await api("/api/guest_join", { token: GUEST_TOKEN, key: guestKey });
+    guestKey = r.key; try { localStorage.setItem("gk:" + GUEST_TOKEN, guestKey); } catch (e) {}
+  } catch (e) { show([h("h1", { text: "This link doesn't work" }), h("div", { class: "msg", text: e.message })]); return; }
+  setTab("home");
+}
+if (IS_GUEST) guestStart(); else
 if (new URLSearchParams(location.search).get("helper") === "1" && initData && !IS_ADMIN) helperScreen(); else
 setTab("home");
 </script>
