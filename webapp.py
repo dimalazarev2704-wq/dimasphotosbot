@@ -339,189 +339,6 @@ class WebApp:
         await db.webcodes.delete_one({"_id": code})  # (one use)
         return jresp({"key": self.guest_key(p["_id"], p.get("gen", 0)), "pid": p["_id"], "name": p["name"], "family": (await self.d.family_name(p["tid"])) or ""})
 
-    # ---------- website accounts for parents (real Telegram accounts; username + password; Telegram confirms each sign-in) ----------
-    USER_RE = re.compile(r"[a-z0-9_.]{3,32}")
-
-    def acct_key(self, uid: int, gen: int) -> str:
-        return f"u{uid}." + hmac.new(self.url_secret, f"wa:{uid}:{gen}".encode(), hashlib.sha256).hexdigest()[:32]
-
-    async def acct_from(self, key: str) -> dict | None:
-        m = re.fullmatch(r"u(\d{1,15})\.([0-9a-f]{32})", key or "")
-        if not m:
-            return None
-        a = await self.d.db().webaccts.find_one({"_id": int(m.group(1))})
-        if not a or not a.get("on", True) or not hmac.compare_digest(self.acct_key(a["_id"], a.get("gen", 0)), key):
-            return None
-        return a
-
-    @staticmethod
-    def pw_hash(password: str, salt: bytes) -> str:
-        return hashlib.scrypt(password.encode(), salt=salt, n=2 ** 14, r=8, p=1, dklen=32).hex()
-
-    @staticmethod
-    def ip_of(headers: dict) -> str:
-        return hashlib.sha256((headers.get("x-forwarded-for", "?").split(",")[0].strip() or "?").encode()).hexdigest()[:16]
-
-    async def throttled(self, keys) -> bool:
-        db = self.d.db()
-        now = time.time()
-        for key, cap in keys:
-            d = await db.attempts.find_one({"_id": key}) or {}
-            if d.get("n", 0) >= cap and now - d.get("first", 0) < 3600:
-                return True
-        return False
-
-    async def strike(self, keys) -> None:
-        db = self.d.db()
-        now = time.time()
-        for key, _ in keys:
-            d = await db.attempts.find_one({"_id": key}) or {}
-            if not d or now - d.get("first", 0) >= 3600:
-                await db.attempts.update_one({"_id": key}, {"$set": {"n": 1, "first": now}}, upsert=True)
-            else:
-                await db.attempts.update_one({"_id": key}, {"$inc": {"n": 1}})
-
-    @staticmethod
-    def jbody(body: bytes) -> dict | None:
-        try:
-            req = json.loads(body.decode() or "{}")
-            return req if isinstance(req, dict) else None
-        except (ValueError, RecursionError):
-            return None
-
-    async def hand_of(self, tok) -> dict | None:
-        """A pass from the Telegram button: one use, 10 minutes."""
-        if not isinstance(tok, str) or not re.fullmatch(r"[A-Za-z0-9_-]{20,60}", tok):
-            return None
-        d = await self.d.db().webhand.find_one({"_id": tok})
-        exp = d and d.get("exp")
-        if exp and exp.tzinfo is None:
-            exp = exp.replace(tzinfo=timezone.utc)
-        return d if d and exp and exp > datetime.now(timezone.utc) else None
-
-    async def username_for(self, d: dict) -> tuple[str, bool]:
-        """(the username this person will have, whether they have to choose one)."""
-        db = self.d.db()
-        a = await db.webaccts.find_one({"_id": d["uid"]})
-        if a:
-            return a["username"], False
-        u = (d.get("username") or "").lower()
-        if self.USER_RE.fullmatch(u):
-            other = await db.webaccts.find_one({"username": u})
-            if not other or other["_id"] == d["uid"]:
-                return u, False
-        return "", True
-
-    async def web_hand_info(self, body: bytes, headers: dict) -> Resp:
-        req = self.jbody(body)
-        if req is None:
-            return err(400, "Bad request")
-        if await self.throttled([(f"hand:{self.ip_of(headers)}", 60)]):
-            return err(429, "Too many tries. Please wait a while.")
-        d = await self.hand_of(req.get("h"))
-        if not d:
-            await self.strike([(f"hand:{self.ip_of(headers)}", 60)])
-            return err(404, "This link has expired. Please tap the website button in Telegram again.")
-        user, choose = await self.username_for(d)
-        return jresp({"username": user, "choose": choose, "name": d.get("name") or "", "has": bool(await self.d.db().webaccts.find_one({"_id": d["uid"]}))})
-
-    async def web_register(self, body: bytes, headers: dict) -> Resp:
-        """Make (or reset) the website password. Only possible with a pass from the Telegram button."""
-        req = self.jbody(body)
-        if req is None:
-            return err(400, "Bad request")
-        db = self.d.db()
-        ip = self.ip_of(headers)
-        if await self.throttled([(f"hand:{ip}", 60)]):
-            return err(429, "Too many tries. Please wait a while.")
-        d = await self.hand_of(req.get("h"))
-        if not d:
-            await self.strike([(f"hand:{ip}", 60)])
-            return err(404, "This link has expired. Please tap the website button in Telegram again.")
-        uid = d["uid"]
-        user, choose = await self.username_for(d)
-        if choose:
-            user = str(req.get("username") or "").strip().lstrip("@").lower()
-            if not self.USER_RE.fullmatch(user):
-                return err(400, "Your username can use letters, numbers, _ and . (3 to 32 characters).")
-            other = await db.webaccts.find_one({"username": user})
-            if other and other["_id"] != uid:
-                return err(400, "That username is taken. Please choose another one.")
-        pw = req.get("password")
-        if not isinstance(pw, str) or not 8 <= len(pw) <= 100:
-            return err(400, "Your password needs at least 8 characters.")
-        if pw.lower() == user or pw.isdigit() and len(set(pw)) == 1:
-            return err(400, "That password is too easy to guess. Please choose another one.")
-        salt = secrets.token_bytes(16)
-        pwh = await asyncio.to_thread(self.pw_hash, pw, salt)
-        old = await db.webaccts.find_one({"_id": uid})
-        gen = (old.get("gen", 0) + 1) if old else 0  # (a new password signs out every other device)
-        doc = {"username": user, "salt": salt.hex(), "pw": pwh, "gen": gen, "on": True}
-        if old:
-            await db.webaccts.update_one({"_id": uid}, {"$set": doc})
-        else:
-            await db.webaccts.insert_one({"_id": uid, **doc, "created": datetime.now(timezone.utc)})
-        await db.webhand.delete_one({"_id": d["_id"]})
-        await db.attempts.delete_one({"_id": f"pw:{user}"})
-        return jresp({"key": self.acct_key(uid, gen), "username": user})
-
-    @staticmethod
-    def device_of(ua: str) -> str:
-        ua = ua or ""
-        os_ = next((n for k, n in (("iPhone", "iPhone"), ("iPad", "iPad"), ("Android", "Android"), ("Windows", "Windows"), ("Macintosh", "Mac"), ("CrOS", "Chromebook"), ("Linux", "Linux")) if k in ua), "unknown device")
-        br = next((n for k, n in (("Edg/", "Edge"), ("OPR/", "Opera"), ("Firefox/", "Firefox"), ("Chrome/", "Chrome"), ("CriOS", "Chrome"), ("Safari/", "Safari")) if k in ua), "a browser")
-        return f"{os_}, {br}"
-
-    async def web_signin(self, body: bytes, headers: dict) -> Resp:
-        """Username + password. The password alone is never enough: the bot asks them in Telegram if it's really them."""
-        req = self.jbody(body)
-        if req is None:
-            return err(400, "Bad request")
-        db = self.d.db()
-        user = str(req.get("username") or "").strip().lstrip("@").lower()[:40]
-        pw = req.get("password")
-        ip = self.ip_of(headers)
-        keys = [(f"pw:{user}", 5), (f"pw:ip:{ip}", 15), ("pw:all", 300)]
-        if await self.throttled(keys):
-            return err(429, "Too many wrong tries. Please wait a while and try again.")
-        a = await db.webaccts.find_one({"username": user}) if self.USER_RE.fullmatch(user) else None
-        salt = bytes.fromhex(a["salt"]) if a and a.get("salt") else b"\0" * 16
-        h = await asyncio.to_thread(self.pw_hash, pw if isinstance(pw, str) and len(pw) <= 100 else "", salt)  # (always hashed, so a missing user takes as long as a real one)
-        if not a or not a.get("pw") or not a.get("on", True) or not hmac.compare_digest(h, a["pw"]):
-            await self.strike(keys)
-            return err(401, "Wrong username or password.")
-        uid = a["_id"]
-        now = datetime.now(timezone.utc)
-        if await db.weblogins.count_documents({"uid": uid, "at": {"$gt": now - timedelta(hours=1)}}) >= 3:
-            return err(429, "Too many sign-in requests. Please wait a while.")
-        lid, poll = secrets.token_hex(12), secrets.token_urlsafe(24)
-        await db.weblogins.insert_one({"_id": lid, "poll": poll, "uid": uid, "status": "wait", "at": now, "exp": now + timedelta(minutes=2)})
-        if not await self.d.web_login_prompt(uid, lid, self.device_of(headers.get("user-agent", ""))):
-            await db.weblogins.delete_one({"_id": lid})
-            return err(503, "I couldn't reach you in Telegram. Please open the bot, send /start, and try again.")
-        await db.attempts.delete_one({"_id": f"pw:{user}"})
-        return jresp({"poll": poll, "seconds": 120})
-
-    async def web_signin_status(self, body: bytes, headers: dict) -> Resp:
-        req = self.jbody(body)
-        poll = req.get("poll") if req else None
-        db = self.d.db()
-        d = await db.weblogins.find_one({"poll": poll}) if isinstance(poll, str) and 10 <= len(poll) <= 60 else None
-        exp = d and d.get("exp")
-        if exp and exp.tzinfo is None:
-            exp = exp.replace(tzinfo=timezone.utc)
-        if not d or d["status"] == "done" or (d["status"] == "wait" and exp < datetime.now(timezone.utc)):
-            return jresp({"status": "expired"})
-        if d["status"] == "no":
-            return jresp({"status": "no"})
-        if d["status"] != "ok":
-            return jresp({"status": "wait"})
-        a = await db.webaccts.find_one({"_id": d["uid"]})
-        await db.weblogins.update_one({"_id": d["_id"]}, {"$set": {"status": "done"}})  # (the key is handed over once)
-        if not a or not a.get("on", True):
-            return jresp({"status": "expired"})
-        return jresp({"status": "ok", "key": self.acct_key(a["_id"], a.get("gen", 0)), "username": a["username"]})
-
     def pin_hash(self, pid: int, pin: str) -> str:
         return hmac.new(self.url_secret, f"pin:{pid}:{pin}".encode(), hashlib.sha256).hexdigest()
 
@@ -841,18 +658,8 @@ class WebApp:
             return await self.web_connect(body, headers)
         if path == "/api/web_login":
             return await self.web_login(body, headers)
-        for route, fn in (("/api/web_hand_info", self.web_hand_info), ("/api/web_register", self.web_register),
-                          ("/api/web_signin", self.web_signin), ("/api/web_signin_status", self.web_signin_status)):
-            if path == route:
-                return await fn(body, headers)
         user = validate_init_data(headers.get("x-init-data", ""), self.d.token)
-        guest = via_web = False
-        if not user and headers.get("x-web-key"):  # a parent on the website (signed in with username + password)
-            a = await self.acct_from(headers["x-web-key"])
-            if not a:
-                return err(401, "You were signed out. Please sign in again.")
-            u = await self.d.db().users.find_one({"_id": a["_id"]}) or {}
-            user, via_web = {"id": a["_id"], "first_name": u.get("first_name") or ""}, True
+        guest = False
         if not user and headers.get("x-guest-key"):
             g = await self.guest_from(headers["x-guest-key"])
             if not g:
@@ -865,8 +672,6 @@ class WebApp:
         uid = user["id"]
         owner = self.d.is_owner(uid)
         db = self.d.db()
-        if via_web and (owner or path.startswith("/api/admin/") or path.startswith("/api/helper/") or path == "/api/web_handoff"):
-            return err(403, "Not available on the website.")
         try:
             req = json.loads(body.decode() or "{}")
             if not isinstance(req, dict):
@@ -904,20 +709,6 @@ class WebApp:
                 await coll.update_one({"_id": uid}, {"$unset": {"a2hs": ""}})
             return jresp({"ok": True})
 
-        if path == "/api/web_handoff":  # "Open on the website" (from Telegram): a one-use pass that opens the website for this person
-            if owner:
-                return err(403, "This is for clients.")
-            status, data = await self.d.web_handoff(uid, user)
-            return jresp(data, status)
-        if path == "/api/web_account":  # sign out the website devices, or delete the website login
-            if guest or owner:
-                return err(403, "Not available.")
-            a = await db.webaccts.find_one({"_id": uid})
-            if req.get("action") == "remove":
-                await db.webaccts.delete_one({"_id": uid})
-            elif a:
-                await db.webaccts.update_one({"_id": uid}, {"$inc": {"gen": 1}})
-            return jresp({"ok": True})
         if path == "/api/web_pin":  # a web person choosing (or removing) their own 4-digit PIN
             if not guest or uid >= 0 or not await self.person_of(uid):
                 return err(403, "Not available.")
@@ -1003,8 +794,6 @@ class WebApp:
             lang = await self.d.get_lang(uid)
             if not owner and not guest:
                 await self.d.db().users.update_one({"_id": uid}, {"$set": {"last_open": datetime.now(timezone.utc)}})
-                if via_web:
-                    await self.d.db().webaccts.update_one({"_id": uid}, {"$set": {"last_open": datetime.now(timezone.utc)}})
             gp = await self.person_of(uid) if guest else None
             if gp:
                 await self.d.db().webpeople.update_one({"_id": uid}, {"$set": {"last_open": datetime.now(timezone.utc)}})  # (so the photographer can tell who has opened the app)
@@ -1022,8 +811,6 @@ class WebApp:
                 "guest": guest,
                 "dl": gp.get("dl") is not False if gp else True,
                 "pin": bool(gp and gp.get("pin")),
-                "site": None if (guest or owner) else ((await db.webaccts.find_one({"_id": uid}) or {}).get("username") or ""),
-                "via_web": via_web,
                 "a2hs": False if owner else (bool(gp and gp.get("a2hs")) if guest else bool((await self.d.db().users.find_one({"_id": uid}) or {}).get("a2hs"))),  # (the photographer asked them to add the app to their home screen)
                 "child": False if (owner or guest) else bool((await db.families.find_one({"thread_id": tid}) or {}).get("child_ok")),
                 "welcome": await self.welcome(uid, tid),
