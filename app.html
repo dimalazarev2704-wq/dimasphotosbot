@@ -122,7 +122,9 @@ const tg = window.Telegram && Telegram.WebApp;
 if (tg) { try { tg.ready(); tg.expand(); } catch (e) {} }
 const initData = (tg && tg.initData) || "";
 // A family's web link (/w/<token>): the same app in any browser, no Telegram. The browser keeps its own key.
-const GUEST_TOKEN = initData ? "" : ((location.pathname.match(/^\/w\/([A-Za-z0-9_-]{10,60})\/?$/) || [])[1] || "");
+// The one web address (/web): a short code from the parents connects this device to one person's account.
+const GUEST_TOKEN = initData ? "" : (/^\/web\/?$/.test(location.pathname) ? "web" : ((location.pathname.match(/^\/w\/([A-Za-z0-9_-]{10,60})\/?$/) || [])[1] || ""));
+if (GUEST_TOKEN === "web") { try { const k = new URLSearchParams(location.search).get("k"); if (k && /^-?\d+\.[0-9a-f]{32}$/.test(k)) { localStorage.setItem("gk:web", k); history.replaceState(null, "", "/web"); } } catch (e) {} }
 let guestKey = "";
 try { if (GUEST_TOKEN) guestKey = localStorage.getItem("gk:" + GUEST_TOKEN) || ""; } catch (e) {}
 const IS_GUEST = !!GUEST_TOKEN;
@@ -152,7 +154,7 @@ async function api(path, body) {
   finally { clearTimeout(timer); }
   let data = {};
   try { data = await res.json(); } catch (e) {}
-  if (!res.ok) { const er = new Error(data.error || "Something went wrong. Please try again."); er.exists = !!data.exists; throw er; }
+  if (!res.ok) { const er = new Error(data.error || "Something went wrong. Please try again."); er.exists = !!data.exists; er.status = res.status; throw er; }
   return data;
 }
 function haptic() { try { tg.HapticFeedback.impactOccurred("light"); } catch (e) {} }
@@ -238,11 +240,17 @@ const RU_EXACT = {
   "⚠️ Please type your feedback.": "⚠️ Пожалуйста, введите отзыв.",
   "📥 Send me the photo in chat": "📥 Отправить фото мне в чат",
   "🌐 Web access": "🌐 Доступ через браузер", "📋 Copy link": "📋 Скопировать ссылку",
-  "Give someone their own private link to look at your family's photos in a web browser, with no Telegram account. You choose what each person can do.": "Дайте человеку личную ссылку, чтобы он смотрел фото вашей семьи в браузере без аккаунта Telegram. Вы выбираете, что он может делать.",
+  "Let someone look at your family's photos in a web browser with no Telegram account. You make them a short code, they type it once on their device. You choose what each person can do.": "Дайте человеку смотреть фото вашей семьи в браузере без Telegram. Вы создаёте короткий код, он вводит его один раз на своём устройстве. Вы выбираете, что он может делать.",
   "Nobody yet. Add a child, a grandparent or anyone you trust.": "Пока никого. Добавьте ребёнка, бабушку или любого, кому доверяете.",
-  "➕ Add a person": "➕ Добавить человека", "Create their link": "Создать ссылку", "Who is this link for?": "Для кого эта ссылка?",
-  "Their link": "Их ссылка", "Only send it to this person. Anyone with the link can open it.": "Отправьте её только этому человеку. Любой, у кого есть ссылка, может её открыть.",
-  "What they can do": "Что можно делать", "Link is on": "Ссылка включена", "Can download photos": "Можно скачивать фото",
+  "🔐 Set a PIN": "🔐 Задать PIN", "🔐 Change or remove my PIN": "🔐 Изменить или удалить PIN", "🚪 Log out of this device": "🚪 Выйти на этом устройстве", "🔐 Welcome back": "🔐 С возвращением", "Log in": "Войти", "Save PIN": "Сохранить PIN", "Remove my PIN": "Удалить мой PIN", "🔐 Your PIN": "🔐 Ваш PIN", "Use a new code instead": "Ввести новый код",
+  "➕ Add a person": "➕ Добавить человека", "Add them": "Добавить", "Who is this for?": "Для кого это?",
+  "Connect a device": "Подключить устройство", "🔑 Make a code": "🔑 Создать код", "📋 Copy address": "📋 Скопировать адрес", "🔄 Disconnect all their devices": "🔄 Отключить все их устройства",
+  "What they can do": "Что можно делать",
+  "📲 Add to home screen": "📲 Добавить на главный экран", "It's already on your home screen.": "Уже есть на вашем главном экране.",
+  "📲 Want this as an app?": "📲 Хотите как приложение?", "Yes, show me how": "Да, покажите как", "No thanks": "Нет, спасибо", "Got it": "Понятно",
+  "📲 Add it in 3 steps": "📲 Добавьте за 3 шага",
+  "You can put these photos on your home screen, next to your other apps, so you can open them in one tap.": "Вы можете добавить эти фото на главный экран, рядом с другими приложениями, и открывать их одним касанием.",
+  "Link expires": "Срок действия ссылки", "Never. Pick a time to switch it off by itself.": "Без срока. Выберите время, чтобы ссылка отключилась сама.", "Never": "Без срока", "1 day": "1 день", "7 days": "7 дней", "30 days": "30 дней", "Link is on": "Ссылка включена", "Can download photos": "Можно скачивать фото",
   "Which photos can they see?": "Какие фото можно смотреть?", "⭐ Best shots only": "⭐ Только лучшие кадры", "📅 Chosen days…": "📅 Выбранные дни…",
   "More": "Ещё", "📅 Chosen days": "📅 Выбранные дни", "Select all": "Выбрать все", "Clear": "Сбросить", "Save": "Сохранить",
   "Please tick at least one day.": "Отметьте хотя бы один день.", "No photos yet.": "Фото пока нет.",
@@ -274,7 +282,9 @@ const RU_RULES = [
   [/^That's too long \((\d+) characters\)\. Please keep it under (\d+)\.$/, "Слишком длинно ($1 симв.). Пожалуйста, не больше $2."],
   [/^✅ Sent to (.+)\. Thank you!$/, "✅ Отправлено: $1. Спасибо!"],
   [/^(\d+) devices? (?:has|have) opened it\.$/, "Открывали на устройствах: $1."],
-  [/^On · Last opened: (.+)$/, "Включено · Открывали: $1"], [/^Off · Last opened: (.+)$/, "Выключено · Открывали: $1"],
+  [/^On · Last opened: (.+)$/, "Включено · Открывали: $1"], [/^Off · Last opened: (.+)$/, "Выключено · Открывали: $1"], [/^Expired · Last opened: (.+)$/, "Срок истёк · Открывали: $1"],
+  [/^👀 Opened (\d+) photos? · ♥ (\d+) favorites?$/, "👀 Открыто фото: $1 · ♥ в избранном: $2"], [/^Switches off on (.+)$/, "Отключится: $1"], [/^Expired on (.+)$/, "Срок истёк: $1"],
+  [/^🔒 (.+) locked this person's settings, so they can't be changed here\.$/, "🔒 $1 заблокировал(а) настройки этого человека, их нельзя менять здесь."],
   [/^Tick the days (.+) may see\.$/, "Отметьте дни, которые может смотреть $1."],
   [/^📅 Chosen days \((\d+)\)$/, "📅 Выбранные дни ($1)"], [/^🗑 Remove (.+)$/, "🗑 Удалить: $1"],
   [/^Make a new link for (.+)\? The old link stops working everywhere\.$/, "Создать новую ссылку для $1? Старая перестанет работать везде."],
@@ -384,6 +394,7 @@ async function homeScreen() {
     LANG = !IS_ADMIN && typeof HOME.lang === "string" && /^[A-Za-z-]{2,5}$/.test(HOME.lang) ? HOME.lang : "en";
     applyLang();
     if (!IS_ADMIN && HOME.lang_set === false) { $tabs.replaceChildren(); langScreen(true); return; }  // (first time here: the language is asked once)
+    if (HOME.a2hs && !IS_ADMIN) setTimeout(offerHomeScreen, 900);  // (the photographer asked: "add this to your home screen")
     if (IS_ADMIN && adminFam == null) { setTab("admin"); return; }
     drawTabs();
   }
@@ -408,6 +419,14 @@ async function homeScreen() {
       h("button", { class: "cta", on: { click: () => seeAll(w.mode) }, text: w.mode === "new" ? "See all new photos" : "See all photos" })));
   }
   if (!IS_ADMIN && !IS_GUEST && HOME.child) nodes.push(h("button", { class: "cta alt", text: "🌐 Web access", on: { click: () => push(childScreen) } }));
+  if (canAddHome()) nodes.push(h("button", { class: "cta alt", text: "📲 Add to home screen", on: { click: () => {
+    if (tgHome() && tg.checkHomeScreenStatus) { try { tg.checkHomeScreenStatus(st => { if (st === "added") alertMsg("It's already on your home screen."); else offerHomeScreen(); }); return; } catch (e) {} }
+    offerHomeScreen(); } } }));
+  if (GUEST_TOKEN === "web") nodes.push(h("button", { class: "cta alt", text: HOME.pin ? "🔐 Change or remove my PIN" : "🔐 Set a PIN", on: { click: () => push(pinSetScreen) } }),
+    h("button", { class: "cta alt", text: "🚪 Log out of this device", on: { click: async () => {
+      if (!await confirmAsk("Log out of this device?" + (HOME.pin ? " You can log back in with your PIN." : " To get back in you will need a new code. You can set a PIN first so you can log back in yourself."))) return;
+      try { if (HOME.pin) localStorage.setItem("who:web", JSON.stringify(Object.assign(JSON.parse(localStorage.getItem("who:web") || "{}"), { pin: true }))); else localStorage.removeItem("who:web"); localStorage.removeItem("gk:web"); } catch (e) {}
+      guestKey = ""; HOME = null; stack = []; connectScreen(); } } }));
   if (!IS_ADMIN && !IS_GUEST) nodes.push(h("button", { class: "cta alt", text: "💬 Chat with " + (HOME.owner || "the photographer"), on: { click: () => push(commentScreen) } }),
     h("button", { class: "cta alt", text: "📝 Send feedback", on: { click: () => push(feedbackScreen) } }),
     h("button", { class: "cta alt", text: "🌐 Language", on: { click: () => push(() => langScreen(false)) } }));
@@ -763,6 +782,9 @@ async function adminHome() {
     bigRow("🕵️", "Login attempts", s.tries, () => push(() => triesScreen())),
     bigRow("👀", "Not opened yet", "", () => push(notOpenedScreen)),
     bigRow("📸", "Photographers", "", () => push(uplineScreen)),
+    bigRow("📲", "Home-screen pop-up for everyone", "", () => oneAtATime(async () => {
+      if (!await confirmAsk("Show the “add to your home screen” pop-up to everyone the next time they open the app?")) return;
+      try { const r = await api("/api/admin/a2hs", {}); await alertMsg(r.note); } catch (e) { await alertMsg("⚠️ " + e.message); } })),
     bigRow("👥", "Users", "", () => push(usersScreen)),
     h("h2", { text: "Families" }), groupChips(d.groups || [], "fams", () => { const y = window.scrollY; adminHome().then(() => window.scrollTo(0, y)); }),
     d.families.length ? d.families.filter(f => !gf.fams || ((d.groups || []).find(g => g.id === gf.fams) || { tids: [] }).tids.includes(f.tid)).map(f => h("button", { class: "row", on: { click: () => push(() => familyScreen(f.tid)) } },
@@ -817,66 +839,92 @@ async function groupScreen(gid) {
       try { await api("/api/admin/group_delete", { id: g.id }); if (my === navId) back(); } catch (e) { msg.textContent = "⚠️ " + e.message; }
     }) } }) : null, footer()]);
 }
-async function childScreen() {  // the parents' "Web access": named people, each with their own private link
+// ----- web people: named people with their own private link. Used by the parents ("Web access") and by the photographer (Admin).
+const PARENT_WP = { owner: false, title: "🌐 Web access", call: b => api("/api/child", b) };
+const ownerWp = (tid, name) => ({ owner: true, title: "👥 Web people", sub: name + " family", call: b => api("/api/admin/web_people", Object.assign({ tid }, b)) });
+async function childScreen() { return peopleScreen(PARENT_WP); }
+function statusLine(p) { return (p.on && !p.expired ? "On" : p.expired ? "Expired" : "Off") + " · Last opened: " + p.opened + (p.locked ? " · 🔒" : ""); }
+async function peopleScreen(wp) {
   const my = navId;
-  let d; try { d = await api("/api/child", { action: "list" }); } catch (e) { if (my === navId) errorScreen(e, childScreen); return; }
-  show([backBtn(), h("h1", { text: "🌐 Web access" }),
-    h("div", { class: "hint", text: "Give someone their own private link to look at your family's photos in a web browser, with no Telegram account. You choose what each person can do." }),
-    d.people.length ? d.people.map(p => h("button", { class: "row", on: { click: () => push(() => personScreen(p.id)) } },
+  let d; try { d = await wp.call({ action: "list" }); } catch (e) { if (my === navId) errorScreen(e, () => peopleScreen(wp)); return; }
+  show([backBtn(), h("h1", { text: wp.title }), wp.sub ? h("div", { class: "hint", text: wp.sub }) : null,
+    h("div", { class: "hint", text: wp.owner ? "Each person connects their own device with a short code and has their own favorites. You can change anything for them, and lock a person so the parents can't." : "Let someone look at your family's photos in a web browser with no Telegram account. You make them a short code, they type it once on their device. You choose what each person can do." }),
+    d.people.length ? d.people.map(p => h("button", { class: "row", on: { click: () => push(() => personScreen(wp, p.id)) } },
       h("b", { "data-ugc": "1", text: p.name }),
-      h("div", { class: "hint", text: (p.on ? "On" : "Off") + " · Last opened: " + p.opened }))) : h("div", { class: "msg", text: "Nobody yet. Add a child, a grandparent or anyone you trust." }),
-    h("button", { class: "cta", text: "➕ Add a person", on: { click: () => push(addWebPersonScreen) } }),
+      h("div", { class: "hint", text: statusLine(p) }))) : h("div", { class: "msg", text: "Nobody yet. Add a child, a grandparent or anyone you trust." }),
+    d.people.length < d.max ? h("button", { class: "cta", text: "➕ Add a person", on: { click: () => push(() => addWebPersonScreen(wp)) } }) : h("div", { class: "hint", text: "That's the most people allowed (" + d.max + ")." }),
+    wp.owner ? h("div", { class: "card" }, h("b", { text: "People allowed for this family: " + d.max }),
+      h("div", { style: "display:flex;gap:10px;margin-top:8px" },
+        h("button", { class: "cta alt", style: "flex:1;margin:0", text: "−", on: { click: () => oneAtATime(async () => { if (d.max > 1) { await wp.call({ action: "limit", max: d.max - 1 }); peopleScreen(wp); } }) } }),
+        h("button", { class: "cta alt", style: "flex:1;margin:0", text: "+", on: { click: () => oneAtATime(async () => { if (d.max < 30) { await wp.call({ action: "limit", max: d.max + 1 }); peopleScreen(wp); } }) } }))) : null,
     footer()]);
 }
-function addWebPersonScreen() {
+function addWebPersonScreen(wp) {
   const nm = h("input", { type: "text", autocomplete: "off", maxlength: "30", placeholder: "Name, for example Mia" });
   const msg = h("div", { class: "msg" });
-  const go = h("button", { class: "cta", text: "Create their link", on: { click: () => oneAtATime(async () => {
+  const go = h("button", { class: "cta", text: "Add them", on: { click: () => oneAtATime(async () => {
     msg.textContent = "";
-    try { const r = await api("/api/child", { action: "add", name: nm.value }); replaceTop(() => personScreen(r.id)); }
+    try { const r = await wp.call({ action: "add", name: nm.value }); replaceTop(() => personScreen(wp, r.id)); }
     catch (e) { msg.textContent = e.message; }
   }) } });
-  show([backBtn(), h("h1", { text: "➕ Add a person" }), h("div", { class: "hint", text: "Who is this link for?" }), nm, msg, go]);
+  show([backBtn(), h("h1", { text: "➕ Add a person" }), h("div", { class: "hint", text: "Who is this for?" }), nm, msg, go]);
   setTimeout(() => { try { nm.focus(); } catch (e) {} }, 100);
 }
-async function personScreen(pid) {
+async function personScreen(wp, pid) {
   const my = navId;
-  let p; try { p = (await api("/api/child", { action: "list" })).people.find(x => x.id === pid); } catch (e) { if (my === navId) errorScreen(e, () => personScreen(pid)); return; }
+  let p; try { p = (await wp.call({ action: "list" })).people.find(x => x.id === pid); } catch (e) { if (my === navId) errorScreen(e, () => personScreen(wp, pid)); return; }
   if (!p) { back(); return; }
-  const save = async (patch, again) => { try { await api("/api/child", Object.assign({ action: "set", id: pid }, patch)); } catch (e) { await alertMsg("⚠️ " + e.message); } if (again) personScreen(pid); };
+  const frozen = p.locked && !wp.owner;  // (the photographer locked this one: the parents can look but not change)
+  const save = async (patch, again) => { try { await wp.call(Object.assign({ action: "set", id: pid }, patch)); } catch (e) { await alertMsg("⚠️ " + e.message); } if (again) personScreen(wp, pid); };
   const toggle = (label, on, key) => { const cb = h("input", { type: "checkbox", style: "width:22px;height:22px;margin:0 12px 0 0;flex:none" }); cb.checked = on;
     cb.addEventListener("change", () => oneAtATime(async () => { await save({ [key]: cb.checked }, true); })); return h("label", { style: "display:flex;align-items:center;padding:10px 0" }, cb, h("span", { text: label })); };
   const scopeBtn = (v, label) => h("button", { class: p.scope === v ? "cta" : "cta alt", text: label, on: { click: () => oneAtATime(async () => {
-    if (v === "dates") { push(() => pickDaysScreen(pid)); return; }
+    if (v === "dates") { push(() => pickDaysScreen(wp, pid)); return; }
     if (p.scope !== v) await save({ scope: v }, true); }) } });
+  const expBtn = (days, label) => h("button", { class: "cta alt", style: "flex:1;margin:0;padding:10px 4px", text: label, on: { click: () => oneAtATime(async () => { await save({ days }, true); }) } });
   show([backBtn(), h("h1", { "data-ugc": "1", text: p.name }),
-    h("div", { class: "hint", text: (p.on ? "On" : "Off") + " · Last opened: " + p.opened }),
-    h("h2", { text: "Their link" }),
-    h("div", { class: "card", style: "word-break:break-all;user-select:all", text: p.url }),
-    h("button", { class: "cta", text: "📋 Copy link", on: { click: () => oneAtATime(async () => { try { await navigator.clipboard.writeText(p.url); await alertMsg("Link copied."); } catch (e) { await alertMsg("Press and hold the link above to copy it."); } }) } }),
-    h("div", { class: "hint", text: "Only send it to this person. Anyone with the link can open it." }),
-    h("h2", { text: "What they can do" }),
-    toggle("Link is on", p.on, "on"),
-    toggle("Can download photos", p.dl, "dl"),
-    h("h2", { text: "Which photos can they see?" }),
-    scopeBtn("all", "All photos"), scopeBtn("best", "⭐ Best shots only"),
-    scopeBtn("dates", p.scope === "dates" ? "📅 Chosen days (" + p.dates.length + ")" : "📅 Chosen days…"),
-    h("h2", { text: "More" }),
-    h("button", { class: "cta alt", text: "🔄 New link (old one stops)", on: { click: () => oneAtATime(async () => {
-      if (!await confirmAsk("Make a new link for " + p.name + "? The old link stops working everywhere.")) return;
-      try { await api("/api/child", { action: "newlink", id: pid }); } catch (e) { await alertMsg("⚠️ " + e.message); }
-      personScreen(pid); }) } }),
-    h("button", { class: "cta danger", text: "🗑 Remove " + p.name, on: { click: () => oneAtATime(async () => {
-      if (!await confirmAsk("Remove " + p.name + "? Their link stops working and their ♥ favorites are deleted.")) return;
-      try { await api("/api/child", { action: "remove", id: pid }); } catch (e) { await alertMsg("⚠️ " + e.message); return; }
-      back(); }) } }),
+    h("div", { class: "hint", text: statusLine(p) }),
+    h("div", { class: "hint", text: "👀 Opened " + p.seen + (p.seen === 1 ? " photo" : " photos") + " · ♥ " + p.favs + (p.favs === 1 ? " favorite" : " favorites") }),
+    h("h2", { text: "Connect a device" }),
+    h("div", { class: "hint", text: "Make a code, then " + p.name + " opens the address below on their phone or tablet and types it in. After that the device stays connected." }),
+    frozen || !p.on || p.expired ? null : h("button", { class: "cta", text: "🔑 Make a code", on: { click: () => oneAtATime(async () => {
+      let r; try { r = await wp.call({ action: "code", id: pid }); } catch (e) { await alertMsg("⚠️ " + e.message); return; }
+      show([backBtn(), h("h1", { text: "Code for " + p.name }),
+        h("div", { class: "card", style: "text-align:center;font-size:38px;font-weight:700;letter-spacing:4px;user-select:all", text: r.code }),
+        h("div", { class: "hint", text: "Valid for " + r.hours + " hours and works once." }),
+        h("h2", { text: "Open this address" }),
+        h("div", { class: "card", style: "word-break:break-all;user-select:all", text: r.address }),
+        h("button", { class: "cta", text: "📋 Copy address", on: { click: () => oneAtATime(async () => { try { await navigator.clipboard.writeText(r.address); await alertMsg("Address copied."); } catch (e) { await alertMsg("Press and hold the address above to copy it."); } }) } }),
+        h("div", { class: "hint", text: "The address is the same for everyone. Only the code is personal, so send the code to " + p.name + " only." })]); }) } }),
+    frozen ? h("div", { class: "msg", text: "🔒 " + (HOME && HOME.owner || "The photographer") + " locked this person's settings, so they can't be changed here." }) : [
+      h("h2", { text: "What they can do" }),
+      toggle("Access is on", p.on, "on"),
+      toggle("Can download photos", p.dl, "dl"),
+      h("h2", { text: "Which photos can they see?" }),
+      scopeBtn("all", "All photos"), scopeBtn("best", "⭐ Best shots only"),
+      scopeBtn("dates", p.scope === "dates" ? "📅 Chosen days (" + p.dates.length + ")" : "📅 Chosen days…"),
+      h("h2", { text: "Access expires" }),
+      h("div", { class: "hint", text: p.until ? (p.expired ? "Expired on " + p.until : "Switches off on " + p.until) : "Never. Pick a time to switch it off by itself." }),
+      h("div", { style: "display:flex;gap:8px" }, expBtn(0, "Never"), expBtn(1, "1 day"), expBtn(7, "7 days"), expBtn(30, "30 days")),
+      ...(wp.owner ? [h("h2", { text: "Photographer only" }), toggle("🔒 Lock (the parents can't change this person)", p.locked, "locked"),
+        h("button", { class: "cta alt", text: "📲 Ask them to add it to the home screen", on: { click: () => oneAtATime(async () => {
+          try { const r = await api("/api/admin/a2hs", { pid }); await alertMsg(r.note); } catch (e) { await alertMsg("⚠️ " + e.message); } }) } })] : []),
+      h("h2", { text: "More" }),
+      h("button", { class: "cta alt", text: "🔄 Disconnect all their devices", on: { click: () => oneAtATime(async () => {
+        if (!await confirmAsk("Disconnect all of " + p.name + "'s devices? They will need a new code.")) return;
+        try { await wp.call({ action: "newlink", id: pid }); } catch (e) { await alertMsg("⚠️ " + e.message); }
+        personScreen(wp, pid); }) } }),
+      h("button", { class: "cta danger", text: "🗑 Remove " + p.name, on: { click: () => oneAtATime(async () => {
+        if (!await confirmAsk("Remove " + p.name + "? Their devices stop working and their ♥ favorites are deleted.")) return;
+        try { await wp.call({ action: "remove", id: pid }); } catch (e) { await alertMsg("⚠️ " + e.message); return; }
+        back(); }) } })],
     footer()]);
 }
-async function pickDaysScreen(pid) {
+async function pickDaysScreen(wp, pid) {
   const my = navId;
   let p, days; try {
-    p = (await api("/api/child", { action: "list" })).people.find(x => x.id === pid); days = (await api("/api/dates", {})).rows;
-  } catch (e) { if (my === navId) errorScreen(e, () => pickDaysScreen(pid)); return; }
+    p = (await wp.call({ action: "list" })).people.find(x => x.id === pid); days = (await api("/api/dates", wp.owner ? { fam: wp.tid } : {})).rows;
+  } catch (e) { if (my === navId) errorScreen(e, () => pickDaysScreen(wp, pid)); return; }
   if (!p) { back(); return; }
   const chosen = new Set(p.dates), boxes = [];
   const rows = days.map(r => { const cb = h("input", { type: "checkbox", style: "width:22px;height:22px;margin:0 12px 0 0;flex:none" }); cb.checked = chosen.has(r.v); boxes.push([r.v, cb]);
@@ -888,7 +936,7 @@ async function pickDaysScreen(pid) {
     h("button", { class: "cta", text: "Save", on: { click: () => oneAtATime(async () => {
       const ds = boxes.filter(([, cb]) => cb.checked).map(([v]) => v);
       if (!ds.length) { await alertMsg("Please tick at least one day."); return; }
-      try { await api("/api/child", { action: "set", id: pid, scope: "dates", dates: ds }); } catch (e) { await alertMsg("⚠️ " + e.message); return; }
+      try { await wp.call({ action: "set", id: pid, scope: "dates", dates: ds }); } catch (e) { await alertMsg("⚠️ " + e.message); return; }
       back(); }) } }),
     footer()]);
 }
@@ -913,12 +961,14 @@ async function webLinkScreen(tid, name) {
     ],
     h("button", { class: "cta alt", text: "👨‍👧 Parents can manage it: " + (d.child_ok ? "ON" : "off"),
       on: { click: () => oneAtATime(async () => {
-        if (d.child_ok && !await confirmAsk("Remove this from the " + name + " family? Their button disappears and their link is turned off.")) return;
+        if (d.child_ok && !await confirmAsk("Stop the " + name + " family from managing web access? Their button disappears. The links they have keep working, and you manage them.")) return;
         try { const r = await api("/api/admin/web_child", { tid, on: !d.child_ok }); await alertMsg(r.note); } catch (e) { await alertMsg("⚠️ " + e.message); }
         webLinkScreen(tid, name);
       }) } }),
-    d.people && d.people.length ? [h("h2", { text: "👥 Their web people" }), d.people.map(p => h("div", { class: "hint", text: "• " + p.name + " — " + (p.on ? "on" : "off") + ", last opened: " + p.opened }))] : null,
-    h("div", { class: "hint", text: "ON: the family sees a “Web access” button in their app, adds people (a child, a grandparent...) and gives each their own link." }),
+    h("button", { class: "cta alt", text: "📲 Ask them to add it to the home screen", on: { click: () => oneAtATime(async () => {
+      try { const r = await api("/api/admin/a2hs", { tid }); await alertMsg(r.note); } catch (e) { await alertMsg("⚠️ " + e.message); } }) } }),
+    h("button", { class: "cta alt", text: "👥 Web people (" + (d.people ? d.people.length : 0) + ")", on: { click: () => push(() => peopleScreen(Object.assign(ownerWp(tid, name), { tid }))) } }),
+    h("div", { class: "hint", text: "ON: the family sees a “Web access” button in their app, adds people (a child, a grandparent...) and gives each a short code to connect their device." }),
     footer()]);
 }
 async function familyScreen(tid) {
@@ -1507,13 +1557,110 @@ async function helperScreen() {
     }) } }, h("b", { text: f.name + " family" }))) : h("div", { class: "msg", text: "No families yet." })]);
   show([h("h1", { text: "🤝 Photographer's code" }), h("div", { class: "hint", text: "Enter your own code to link this phone without the family's 6-digit code." }), input, msg, go]);
 }
+// ----- "put this on your home screen like an app": a pop-up (first visit on the web link, or when the photographer asks)
+// and a button that is always there. Inside Telegram it uses Telegram's own "Add to Home Screen".
+let installEvt = null;
+addEventListener("beforeinstallprompt", e => { e.preventDefault(); installEvt = e; });
+const tgHome = () => !IS_GUEST && tg && typeof tg.addToHomeScreen === "function";
+const isStandalone = () => (window.matchMedia && matchMedia("(display-mode: standalone)").matches) || navigator.standalone === true;
+const canAddHome = () => !IS_ADMIN && (tgHome() || (IS_GUEST && !isStandalone()));
+function maybeOfferApp() {  // the first visit on a web link, phones only
+  if (!IS_GUEST || isStandalone()) return;
+  try { if (localStorage.getItem("a2hs:" + GUEST_TOKEN)) return; } catch (e) {}
+  const ua = navigator.userAgent, ios = /iphone|ipad|ipod/i.test(ua) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+  setTimeout(() => { if (ios || /android/i.test(ua) || installEvt) offerHomeScreen(); }, 1500);
+}
+function offerHomeScreen() {
+  if (!canAddHome() || document.getElementById("a2hsSheet")) return;
+  const ua = navigator.userAgent, ios = /iphone|ipad|ipod/i.test(ua) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1), android = /android/i.test(ua);
+  const done = () => {
+    if (IS_GUEST) { try { localStorage.setItem("a2hs:" + GUEST_TOKEN, "1"); } catch (e) {} }
+    if (GUEST_TOKEN === "web") { try { history.replaceState(null, "", "/web"); } catch (e) {} }  // (the key doesn't stay in the address bar)
+    api("/api/a2hs", {}).catch(() => {});  // (so a pop-up the photographer asked for doesn't come back)
+    if (HOME) HOME.a2hs = false;
+    sheet.remove();
+  };
+  const sheet = h("div", { id: "a2hsSheet", style: "position:fixed;inset:0;z-index:50;background:#0007;display:flex;align-items:flex-end" });
+  const card = h("div", { style: "width:100%;max-height:92vh;overflow:auto;background:var(--bg);color:var(--text);border-radius:22px 22px 0 0;padding:18px 16px calc(18px + env(safe-area-inset-bottom))" });
+  const mock = () => h("div", { style: "margin:14px auto;width:170px;border-radius:26px;border:3px solid var(--hint);padding:14px 10px 10px;background:var(--sec)" },
+    h("div", { style: "display:grid;grid-template-columns:repeat(3,1fr);gap:10px 6px;text-align:center;font-size:10px;color:var(--hint)" },
+      ["✉️", "🗺️", "⚙️", "🎵", "📅"].map(e => h("div", {}, h("div", { style: "font-size:26px;line-height:34px;border-radius:9px;background:var(--bg)", text: e }))),
+      h("div", {}, h("div", { style: "width:34px;height:34px;margin:0 auto;border-radius:9px;background:#1f6fb2;color:#fff;font-size:20px;line-height:34px;box-shadow:0 0 0 3px #1f6fb277", text: "📷" }), h("div", { style: "color:var(--text);font-weight:700;margin-top:2px", text: "Photos" })),
+      ["🌤️", "📞"].map(e => h("div", {}, h("div", { style: "font-size:26px;line-height:34px;border-radius:9px;background:var(--bg)", text: e })))));
+  const how = async () => {
+    if (tgHome()) { try { tg.addToHomeScreen(); } catch (e) {} done(); return; }
+    if (installEvt && !ios) { try { installEvt.prompt(); await installEvt.userChoice; } catch (e) {} done(); return; }
+    if (GUEST_TOKEN === "web" && guestKey) { try { history.replaceState(null, "", "/web?k=" + guestKey); } catch (e) {} }  // (iPhone shortcuts keep their own storage, so the shortcut carries the key)
+    const steps = ios
+      ? ["Tap the Share button (the square with an arrow pointing up) at the bottom or top of Safari.", "Scroll down and tap “Add to Home Screen”.", "Tap “Add”. The 📷 Photos icon appears with your other apps."]
+      : android
+        ? ["Tap the ⋮ menu at the top right of Chrome.", "Tap “Add to Home screen” (or “Install app”).", "Tap “Add”. The 📷 Photos icon appears with your other apps."]
+        : ["In Chrome or Edge, click the install icon at the right of the address bar (or open the ⋮ menu and choose “Install”).", "Confirm “Install”.", "The 📷 Photos icon appears on your computer."];
+    card.replaceChildren(h("h1", { text: "📲 Add it in 3 steps" }), mock(),
+      h("div", {}, steps.map((t, i) => h("div", { style: "display:flex;gap:12px;align-items:flex-start;margin:12px 0" },
+        h("div", { style: "flex:none;width:30px;height:30px;border-radius:50%;background:var(--btn);color:var(--btntext);font-weight:700;text-align:center;line-height:30px", text: String(i + 1) }), h("div", { text: t })))),
+      h("button", { class: "cta", text: "Got it", on: { click: done } }));
+  };
+  card.append(h("h1", { text: "📲 Want this as an app?" }),
+    h("div", { class: "hint", text: "You can put these photos on your home screen, next to your other apps, so you can open them in one tap." }),
+    mock(), h("button", { class: "cta", text: "Yes, show me how", on: { click: how } }), h("button", { class: "cta alt", text: "No thanks", on: { click: done } }));
+  sheet.append(card); document.body.append(sheet);
+}
+function webWho() { try { const w = JSON.parse(localStorage.getItem("who:web") || "null"); return w && w.pin && typeof w.pid === "number" ? w : null; } catch (e) { return null; } }
+function pinLoginScreen(w, note) {  // (this device logged out, and the person set a PIN: they can come back in by themselves)
+  const inp = h("input", { type: "password", inputmode: "numeric", autocomplete: "off", maxlength: "4", placeholder: "••••", style: "width:100%;box-sizing:border-box;font-size:34px;text-align:center;letter-spacing:10px;padding:12px;margin:12px 0" });
+  const go = () => oneAtATime(async () => {
+    if (!/^\d{4}$/.test(inp.value)) { await alertMsg("Please type your 4-digit PIN."); return; }
+    let r; try { r = await api("/api/web_login", { pid: w.pid, pin: inp.value }); } catch (e) { await alertMsg("⚠️ " + e.message); return; }
+    guestKey = r.key; try { localStorage.setItem("gk:web", guestKey); } catch (e) {}
+    HOME = null; guestStart();
+  });
+  inp.addEventListener("keydown", e => { if (e.key === "Enter") go(); });
+  show([h("h1", { text: "🔐 Welcome back" }), h("div", { class: "hint", "data-ugc": "1", text: "Type your 4-digit PIN to open the photos." }),
+    note ? h("div", { class: "msg", text: note }) : null, inp, h("button", { class: "cta", text: "Log in", on: { click: go } }),
+    h("button", { class: "cta alt", text: "Use a new code instead", on: { click: () => { try { localStorage.removeItem("who:web"); } catch (e) {} connectScreen(); } } })]);
+}
+function pinSetScreen() {
+  const inp = h("input", { type: "password", inputmode: "numeric", autocomplete: "off", maxlength: "4", placeholder: "••••", style: "width:100%;box-sizing:border-box;font-size:34px;text-align:center;letter-spacing:10px;padding:12px;margin:12px 0" });
+  const save = pin => oneAtATime(async () => {
+    try { await api("/api/web_pin", { pin }); } catch (e) { await alertMsg("⚠️ " + e.message); return; }
+    if (HOME) HOME.pin = !!pin; await alertMsg(pin ? "PIN saved. If you log out, you can log back in with it." : "PIN removed."); back();
+  });
+  show([backBtn(), h("h1", { text: "🔐 Your PIN" }), h("div", { class: "hint", text: "Choose 4 digits. If you log out on this device you can come back in with your PIN, without asking for a new code. Don't share it." }),
+    inp, h("button", { class: "cta", text: "Save PIN", on: { click: () => { if (!/^\d{4}$/.test(inp.value)) { alertMsg("Please type 4 digits."); return; } save(inp.value); } } }),
+    HOME && HOME.pin ? h("button", { class: "cta alt", text: "Remove my PIN", on: { click: () => save("") } }) : null]);
+}
+function connectScreen(note) {
+  const who = webWho(); if (who && !note) { pinLoginScreen(who); return; }
+  const inp = h("input", { type: "text", inputmode: "numeric", autocomplete: "off", maxlength: "9", placeholder: "0000 0000", style: "width:100%;box-sizing:border-box;font-size:30px;text-align:center;letter-spacing:3px;padding:12px;margin:12px 0" });
+  inp.addEventListener("input", () => { const d = inp.value.replace(/\D/g, "").slice(0, 8); inp.value = d.length > 4 ? d.slice(0, 4) + " " + d.slice(4) : d; });
+  const go = () => oneAtATime(async () => {
+    if (inp.value.replace(/\D/g, "").length !== 8) { await alertMsg("Please type all 8 digits of your code."); return; }
+    let r; try { r = await api("/api/web_connect", { code: inp.value }); } catch (e) { await alertMsg("⚠️ " + e.message); return; }
+    guestKey = r.key; try { localStorage.setItem("gk:web", guestKey); localStorage.setItem("who:web", JSON.stringify({ pid: r.pid, name: r.name })); } catch (e) {}
+    HOME = null; guestStart();
+  });
+  inp.addEventListener("keydown", e => { if (e.key === "Enter") go(); });
+  show([h("h1", { text: "📷 Connect this device" }), h("div", { class: "hint", text: "Type the code you were given. You only have to do this once on this device." }),
+    note ? h("div", { class: "msg", text: note }) : null, inp, h("button", { class: "cta", text: "Connect", on: { click: go } }),
+    h("div", { class: "hint", text: "No code? Ask the person who shared these photos with you to make one." })]);
+}
 async function guestStart() {
+  if (GUEST_TOKEN === "web") {
+    if (!guestKey) { connectScreen(); return; }
+    loading();
+    try { await api("/api/home"); } catch (e) {
+      if (e.status === 401 || e.status === 403) { guestKey = ""; try { localStorage.removeItem("gk:web"); localStorage.removeItem("who:web"); } catch (x) {} connectScreen("This device was disconnected. Please type a new code."); return; }
+      show([h("h1", { text: "Can't open the photos" }), h("div", { class: "msg", text: e.message }), h("button", { class: "cta", text: "Try again", on: { click: guestStart } })]); return;
+    }
+    setTab("home"); maybeOfferApp(); return;
+  }
   loading();
   try {
     const r = await api("/api/guest_join", { token: GUEST_TOKEN, key: guestKey });
     guestKey = r.key; try { localStorage.setItem("gk:" + GUEST_TOKEN, guestKey); } catch (e) {}
   } catch (e) { show([h("h1", { text: "This link doesn't work" }), h("div", { class: "msg", text: e.message })]); return; }
-  setTab("home");
+  setTab("home"); maybeOfferApp();
 }
 if (IS_GUEST) guestStart(); else
 if (new URLSearchParams(location.search).get("helper") === "1" && initData && !IS_ADMIN) helperScreen(); else

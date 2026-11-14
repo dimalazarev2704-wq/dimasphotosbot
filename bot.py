@@ -3593,13 +3593,14 @@ async def child_option(tid: int, on: bool | None) -> tuple[bool, str]:
     if on:
         await db.families.update_one({"thread_id": tid}, {"$set": {"child_ok": True}})
         return True, "🌐 The parents can now add people and manage their web links themselves."
-    await db.families.update_one({"thread_id": tid}, {"$unset": {"child_ok": ""}})
-    await web_link_change(tid, "off")
-    await drop_web_people(tid)
-    return True, "🌐 Removed for this family. Their button is gone and every web link of theirs is off."
+    await db.families.update_one({"thread_id": tid}, {"$unset": {"child_ok": ""}})  # (only the parents' control goes: the links keep working)
+    return True, "🌐 The parents can no longer manage web access. Their button is gone, and the links they already have keep working. You manage them now."
 
 
-WEB_PEOPLE_MAX = 10
+WEB_PEOPLE_MAX = 10      # the default for each family (the photographer can raise or lower it)
+WEB_PEOPLE_CAP = 30
+WEB_EXPIRY_DAYS = (0, 1, 7, 30, 90)  # 0 = never
+WEB_CODE_HOURS = 24
 
 
 async def drop_web_people(tid: int, pid: int | None = None) -> None:
@@ -3610,35 +3611,62 @@ async def drop_web_people(tid: int, pid: int | None = None) -> None:
         await db.favs.delete_many({"uid": {"$in": ids}})
         await db.seen.delete_many({"uid": {"$in": ids}})
         await db.webpeople.delete_many({"_id": {"$in": ids}})
+        await db.webcodes.delete_many({"pid": {"$in": ids}})
 
 
-def web_person_row(p: dict) -> dict:
-    return {"id": p["_id"], "name": p["name"], "url": f"{WEBAPP_URL}/w/{p['token']}" if WEBAPP_URL else "",
+async def web_person_row(p: dict) -> dict:
+    until = as_utc(p.get("until")) if p.get("until") else None
+    return {"id": p["_id"], "name": p["name"], "address": f"{WEBAPP_URL}/web" if WEBAPP_URL else "",
             "on": p.get("on", True), "dl": p.get("dl", True) is not False, "scope": p.get("scope") or "all",
-            "dates": list(p.get("dates") or []), "opened": ago_text(p.get("last_open")) if p.get("last_open") else "never"}
+            "dates": list(p.get("dates") or []), "opened": ago_text(p.get("last_open")) if p.get("last_open") else "never",
+            "locked": bool(p.get("locked")), "until": until.strftime("%b %d, %Y") if until else "",
+            "expired": bool(until and until < datetime.now(timezone.utc)),
+            "seen": await db.seen.count_documents({"uid": p["_id"]}), "favs": await db.favs.count_documents({"uid": p["_id"]})}
 
 
-async def child_api(tid: int, req: dict) -> tuple[int, dict]:
-    """What the PARENTS see and do in their own app (only where the photographer switched it on):
-    named people (a child, a grandparent ...) who each get their own private web link."""
+async def web_people_list(tid: int, fam: dict) -> dict:
+    people = await db.webpeople.find({"tid": tid}).sort("created", 1).to_list()
+    return {"people": [await web_person_row(p) for p in people], "max": fam.get("web_max") or WEB_PEOPLE_MAX}
+
+
+async def web_people_api(tid: int, req: dict, by_owner: bool = False) -> tuple[int, dict]:
+    """Named web people (a child, a grandparent ...), each with a private link. Used by the parents (only where
+    the photographer switched it on) and by the photographer, who can also lock a person so the parents can't change them."""
     fam = await db.families.find_one({"thread_id": tid})
-    if not fam or not fam.get("child_ok"):
-        return 403, {"error": "Not available."}
+    if not fam or (not by_owner and not fam.get("child_ok")):
+        return (404, {"error": "That family no longer exists."}) if not fam else (403, {"error": "Not available."})
     action = req.get("action")
     if not WEBAPP_URL:
         return 400, {"error": "The web address isn't set up yet."}
+    if action == "code":  # a one-use code that connects ONE device to this person's account at the one web address
+        pid = req.get("id")
+        p = await db.webpeople.find_one({"_id": pid, "tid": tid}) if isinstance(pid, int) and not isinstance(pid, bool) else None
+        if not p:
+            return 404, {"error": "That person no longer exists."}
+        if p.get("locked") and not by_owner:
+            return 403, {"error": f"🔒 {OWNER_NAME} locked {p['name']}'s settings. Please ask {OWNER_NAME} to change this."}
+        await db.webcodes.delete_many({"pid": p["_id"]})  # (one code at a time per person)
+        for _ in range(20):
+            code = f"{secrets.randbelow(10 ** 8):08d}"
+            if not await db.webcodes.find_one({"_id": code}):
+                break
+        await db.webcodes.insert_one({"_id": code, "pid": p["_id"], "tid": tid, "exp": datetime.now(timezone.utc) + timedelta(hours=WEB_CODE_HOURS)})
+        return 200, {"code": f"{code[:4]} {code[4:]}", "address": f"{WEBAPP_URL}/web", "hours": WEB_CODE_HOURS}
     if action in ("set", "newlink", "remove"):
         pid = req.get("id")
         p = await db.webpeople.find_one({"_id": pid, "tid": tid}) if isinstance(pid, int) and not isinstance(pid, bool) else None
         if not p:
             return 404, {"error": "That person no longer exists."}
+        if p.get("locked") and not by_owner:
+            return 403, {"error": f"🔒 {OWNER_NAME} locked {p['name']}'s settings. Please ask {OWNER_NAME} to change this."}
         if action == "remove":
             await drop_web_people(tid, p["_id"])
-        elif action == "newlink":  # a new secret: the old link stops working on every device
-            await db.webpeople.update_one({"_id": p["_id"]}, {"$set": {"token": secrets.token_urlsafe(18)}, "$inc": {"gen": 1}})
+        elif action == "newlink":  # disconnect every device of this person (they need a new code to connect again)
+            await db.webpeople.update_one({"_id": p["_id"]}, {"$set": {"token": secrets.token_urlsafe(18)}, "$inc": {"gen": 1}, "$unset": {"pin": ""}})
+            await db.webcodes.delete_many({"pid": p["_id"]})
         else:
             upd = {}
-            for k in ("on", "dl"):
+            for k in ("on", "dl") + (("locked",) if by_owner else ()):
                 if k in req:
                     if not isinstance(req[k], bool):
                         return 400, {"error": "Bad request"}
@@ -3652,24 +3680,68 @@ async def child_api(tid: int, req: dict) -> tuple[int, dict]:
                 if not isinstance(ds, list) or len(ds) > 400 or not all(isinstance(x, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", x) for x in ds):
                     return 400, {"error": "Bad request"}
                 upd["dates"] = sorted(set(ds))
+            unset = {}
+            if "days" in req:  # the link switches itself off after this many days (0 = never)
+                if req["days"] not in WEB_EXPIRY_DAYS or isinstance(req["days"], bool):
+                    return 400, {"error": "Bad request"}
+                if req["days"]:
+                    upd["until"] = datetime.now(timezone.utc) + timedelta(days=req["days"])
+                else:
+                    unset["until"] = ""
+            ops = {}
             if upd:
-                await db.webpeople.update_one({"_id": p["_id"]}, {"$set": upd})
+                ops["$set"] = upd
+            if unset:
+                ops["$unset"] = unset
+            if ops:
+                await db.webpeople.update_one({"_id": p["_id"]}, ops)
     elif action == "add":
         name = " ".join(str(req.get("name") or "").split())[:30]
         if not name:
             return 400, {"error": "Please type a name."}
         existing = await db.webpeople.find({"tid": tid}).to_list()
-        if len(existing) >= WEB_PEOPLE_MAX:
-            return 400, {"error": f"That's the most people I can add ({WEB_PEOPLE_MAX}). Please remove someone first."}
+        most = fam.get("web_max") or WEB_PEOPLE_MAX
+        if len(existing) >= most:
+            return 400, {"error": f"That's the most people allowed ({most}). Please remove someone first."}
         if any(x["name"].casefold() == name.casefold() for x in existing):
-            return 400, {"error": f"You already have a {name}."}
+            return 400, {"error": f"There is already a {name}."}
         pid = -(10 ** 9 + secrets.randbelow(10 ** 12))
         await db.webpeople.insert_one({"_id": pid, "tid": tid, "name": name, "token": secrets.token_urlsafe(18), "gen": 0,
                                        "on": True, "dl": True, "scope": "all", "dates": [], "created": datetime.now(timezone.utc)})
-        return 200, {"id": pid, "people": [web_person_row(p) for p in await db.webpeople.find({"tid": tid}).sort("created", 1).to_list()]}
+        return 200, {"id": pid, **await web_people_list(tid, fam)}
+    elif action == "limit" and by_owner:
+        n = req.get("max")
+        if not isinstance(n, int) or isinstance(n, bool) or not 1 <= n <= WEB_PEOPLE_CAP:
+            return 400, {"error": "Bad request"}
+        await db.families.update_one({"thread_id": tid}, {"$set": {"web_max": n}})
+        fam = await db.families.find_one({"thread_id": tid})
     elif action != "list":
         return 400, {"error": "Bad request"}
-    return 200, {"people": [web_person_row(p) for p in await db.webpeople.find({"tid": tid}).sort("created", 1).to_list()]}
+    return 200, await web_people_list(tid, fam)
+
+
+async def child_api(tid: int, req: dict) -> tuple[int, dict]:
+    return await web_people_api(tid, req, by_owner=False)
+
+
+async def a2hs_ask(tid: int | None = None, pid: int | None = None) -> int:
+    """Make the "add this to your home screen like an app" pop-up appear the next time they open the app.
+    One web person (pid), one family's parents and web people (tid), or everybody. Returns how many people it was set for."""
+    now = {"$set": {"a2hs": True}}
+    if pid is not None:
+        if not await db.webpeople.find_one({"_id": pid}):
+            return 0
+        await db.webpeople.update_one({"_id": pid}, now)
+        return 1
+    n = 0
+    for u in await db.users.find({} if tid is None else {"thread_id": tid}).to_list():
+        if u["_id"] != OWNER_ID and not u.get("pending"):
+            await db.users.update_one({"_id": u["_id"]}, now)
+            n += 1
+    for p in await db.webpeople.find({} if tid is None else {"tid": tid}).to_list():
+        await db.webpeople.update_one({"_id": p["_id"]}, now)
+        n += 1
+    return n
 
 
 async def web_link_view(tid: int, note: str = ""):
@@ -3688,11 +3760,12 @@ async def web_link_view(tid: int, note: str = ""):
     if url:
         rows.append([_btn("🚫 Turn it off", f"a:wo:{tid}")])
     rows.append([_btn(f"👨‍👧 Parents can manage it: {'ON' if fam.get('child_ok') else 'off'}", f"a:wc:{tid}")])
+    rows.append([_btn("📲 Ask them to add it to the home screen", f"a:wa:{tid}")])
     ppl = await db.webpeople.find({"tid": tid}).sort("created", 1).to_list()
     if ppl:
         lines += ["", "👥 Their web people:"] + [f"• {p['name']} — {'on' if p.get('on', True) else 'off'}, last opened: {ago_text(p.get('last_open')) if p.get('last_open') else 'never'}" for p in ppl]
     lines.append("")
-    lines.append("With “Parents can manage it” ON, the family sees a “Web access” button in their app, adds people (a child, a grandparent...) and gives each their own link. Turning it off removes that button and every one of those links.")
+    lines.append("With “Parents can manage it” ON, the family sees a “Web access” button in their app, adds people (a child, a grandparent...) and gives each their own link. Turning it off only removes that button: the links keep working and you manage them (Web people).")
     rows.append([_btn("⬅️ Back", f"a:f:{tid}")])
     return "\n".join(lines), InlineKeyboardMarkup(rows)
 
@@ -4969,6 +5042,7 @@ def admin_home_markup() -> InlineKeyboardMarkup:
             [_btn("💬 Messages", "a:ms:0"), _btn("📝 Feedback", "a:fb:0")],
             [_btn("🏷 Groups", "a:gr:0"), _btn("👥 Users", "a:us:0")],
             [_btn("👀 Not opened yet", "a:no:0"), _btn("📸 Photographers", "a:lv:0")],
+            [_btn("📲 Home-screen pop-up for everyone", "a:wa:0")],
             [_btn("📊 Stats", "a:stats")],
         ]
     )
@@ -5397,6 +5471,16 @@ async def on_admin_button(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     elif action == "wl":  # the family's web link
         context.user_data.pop("adm", None)
         await show(*await web_link_view(int(parts[2])))
+
+    elif action == "wa":  # pop up "add to home screen" for a family (tid 0 = everybody)
+        context.user_data.pop("adm", None)
+        tid = int(parts[2])
+        n = await a2hs_ask(tid or None)
+        note = f"📲 The pop-up will appear the next time {n} {'person opens' if n == 1 else 'people open'} the app."
+        if tid:
+            await show(*await web_link_view(tid, note))
+        else:
+            await show(note, InlineKeyboardMarkup([[_btn("⬅️ Admin panel", "a:home")]]))
 
     elif action == "wc":  # let this family's parents manage the web link themselves (or take that away)
         context.user_data.pop("adm", None)
@@ -6009,7 +6093,7 @@ ADMIN_ACTIONS = {
     "overview", "family", "photo_best", "photo_remove", "photo_edit", "photo_vis", "sugs", "sug_act",
     "ann_preview", "ann_send", "ann_schedule", "scheduled", "sched_cancel",
     "tries", "try_add", "try_dismiss", "try_unlock", "tries_clear",
-    "fam_add", "fam_code", "people", "users", "upline", "upline_set", "not_opened", "remind", "web_link", "web_make", "web_off", "web_child", "groups", "group_save", "group_delete", "group_member", "comments", "thread", "chat_send", "chat_clear", "chat_msg_delete", "feedback", "feedback_read", "feedback_delete", "invite", "invite_send", "fam_delete", "member_unlink", "person_add", "best_clear",
+    "fam_add", "fam_code", "people", "users", "upline", "upline_set", "not_opened", "remind", "web_link", "web_make", "web_off", "web_child", "web_people", "a2hs", "groups", "group_save", "group_delete", "group_member", "comments", "thread", "chat_send", "chat_clear", "chat_msg_delete", "feedback", "feedback_read", "feedback_delete", "invite", "invite_send", "fam_delete", "member_unlink", "person_add", "best_clear",
 }
 
 
@@ -6334,6 +6418,20 @@ async def _admin_api(bot, action: str, req: dict) -> tuple[int, dict]:
         if not (isinstance(gid, str) and re.fullmatch(r"[0-9a-f]{6}", gid)) or tid is None or not isinstance(req.get("on"), bool):
             return bad
         return await group_member(gid, tid, req["on"])
+
+    if action == "a2hs":  # {tid?, pid?}: one person, one family, or everybody
+        tid, pid = req.get("tid"), req.get("pid")
+        for v in (tid, pid):
+            if v is not None and (not isinstance(v, int) or isinstance(v, bool)):
+                return bad
+        n = await a2hs_ask(tid, pid)
+        return 200, {"n": n, "note": f"📲 The pop-up will appear the next time {n} {'person opens' if n == 1 else 'people open'} the app."}
+
+    if action == "web_people":  # the photographer manages any family's web people (add, change, lock, limit, remove)
+        tid = _int(req.get("tid"))
+        if tid is None:
+            return bad
+        return await web_people_api(tid, req, by_owner=True)
 
     if action == "web_child":
         tid = _int(req.get("tid"))
@@ -6830,6 +6928,7 @@ async def post_init(app: Application) -> None:
     await safe_index(lambda: db.guests.create_index("tid"))
     await safe_index(lambda: db.webpeople.create_index("tid"))
     await safe_index(lambda: db.webpeople.create_index("token"))
+    await safe_index(lambda: db.webcodes.create_index("exp", expireAfterSeconds=0))
     await safe_index(lambda: db.tries.create_index("at", expireAfterSeconds=2592000))  # forget login attempts after 30 days
     await safe_index(lambda: db.starters.create_index("seen", expireAfterSeconds=180 * 86400))  # forget old Start presses after ~6 months
     await safe_index(lambda: db.uitr.create_index("at", expireAfterSeconds=180 * 86400))  # (saved UI translations)

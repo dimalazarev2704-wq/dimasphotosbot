@@ -202,6 +202,7 @@ class WebApp:
         self.html_path = html_path or os.path.join(HERE, "app.html")
         self.url_secret = hmac.new(deps.token.encode(), b"photo-urls", hashlib.sha256).digest()
         self.cache = Cache(CACHE_BYTES)
+        self.icons: dict = {}
         self.dl_gate = asyncio.Semaphore(4)
         self.big_gate = asyncio.Semaphore(2)
         self.cpu_gate = asyncio.Semaphore(1)  # (one CPU: more at once only slows the bot down)
@@ -225,7 +226,7 @@ class WebApp:
 
     # ---------- web-link visitors ("guests": no Telegram account) ----------
 
-    GUEST_PATHS = {"/api/home", "/api/dates", "/api/places", "/api/photos", "/api/fav", "/api/seen"}
+    GUEST_PATHS = {"/api/home", "/api/dates", "/api/places", "/api/photos", "/api/fav", "/api/seen", "/api/a2hs", "/api/web_pin"}
     GUEST_MAX = 40  # browsers per family link
 
     def guest_key(self, gid: int, gen: int | None = None) -> str:
@@ -239,8 +240,14 @@ class WebApp:
         p = await self.d.db().webpeople.find_one({"_id": uid})
         if not p or not p.get("on", True):
             return None
-        if not await self.d.db().families.find_one({"thread_id": p["tid"], "child_ok": True}):
-            return None  # (the photographer took this option away from the family)
+        until = p.get("until")
+        if until:  # (the link switches itself off on the chosen day)
+            if until.tzinfo is None:
+                until = until.replace(tzinfo=timezone.utc)
+            if until < datetime.now(timezone.utc):
+                return None
+        if not await self.d.db().families.find_one({"thread_id": p["tid"]}):
+            return None
         return p
 
     async def guest_from(self, key: str) -> dict | None:
@@ -276,11 +283,6 @@ class WebApp:
         if not isinstance(tok, str) or not re.fullmatch(r"[A-Za-z0-9_-]{10,60}", tok):
             return err(404, "This link doesn't work.")
         db = self.d.db()
-        p = await db.webpeople.find_one({"token": tok})
-        if p:
-            if not await self.person_of(p["_id"]):
-                return err(404, "This link is switched off. Please ask for a new one.")
-            return jresp({"key": self.guest_key(p["_id"], p.get("gen", 0)), "family": (await self.d.family_name(p["tid"])) or "", "name": p["name"]})
         fam = await db.families.find_one({"web": tok})
         if not fam:
             return err(404, "This link isn't active any more. Please ask for a new one.")
@@ -292,6 +294,82 @@ class WebApp:
         gid = -(10 ** 9 + secrets.randbelow(10 ** 12))
         await db.guests.insert_one({"_id": gid, "tid": fam["thread_id"], "at": datetime.now(timezone.utc)})
         return jresp({"key": self.guest_key(gid), "family": fam["name"]})
+
+    async def code_blocked(self, ip: str) -> bool:
+        """Too many wrong connection codes from one place (or from everywhere) lately?"""
+        db = self.d.db()
+        now = time.time()
+        for key, cap in ((f"web:ip:{ip}", 8), ("web:all", 200)):
+            d = await db.attempts.find_one({"_id": key}) or {}
+            if d.get("n", 0) >= cap and now - d.get("first", 0) < 3600:
+                return True
+        return False
+
+    async def code_failed(self, ip: str) -> None:
+        db = self.d.db()
+        now = time.time()
+        for key in (f"web:ip:{ip}", "web:all"):
+            d = await db.attempts.find_one({"_id": key}) or {}
+            if not d or now - d.get("first", 0) >= 3600:
+                await db.attempts.update_one({"_id": key}, {"$set": {"n": 1, "first": now}}, upsert=True)
+            else:
+                await db.attempts.update_one({"_id": key}, {"$inc": {"n": 1}})
+
+    async def web_connect(self, body: bytes, headers: dict) -> Resp:
+        """The one web address: a short one-use code connects this device to a person's account for good."""
+        try:
+            req = json.loads(body.decode() or "{}")
+            if not isinstance(req, dict):
+                raise ValueError
+        except (ValueError, RecursionError):
+            return err(400, "Bad request")
+        ip = hashlib.sha256((headers.get("x-forwarded-for", "?").split(",")[0].strip() or "?").encode()).hexdigest()[:16]
+        if await self.code_blocked(ip):
+            return err(429, "Too many wrong codes. Please wait a while and try again.")
+        code = re.sub(r"\D", "", str(req.get("code") or ""))
+        db = self.d.db()
+        doc = await db.webcodes.find_one({"_id": code}) if len(code) == 8 else None
+        exp = doc and doc.get("exp")
+        if exp and exp.tzinfo is None:
+            exp = exp.replace(tzinfo=timezone.utc)
+        p = await self.person_of(doc["pid"]) if doc and exp and exp > datetime.now(timezone.utc) else None
+        if not p:
+            await self.code_failed(ip)
+            return err(404, "That code isn't right, or it has expired. Please ask for a new one.")
+        await db.webcodes.delete_one({"_id": code})  # (one use)
+        return jresp({"key": self.guest_key(p["_id"], p.get("gen", 0)), "pid": p["_id"], "name": p["name"], "family": (await self.d.family_name(p["tid"])) or ""})
+
+    def pin_hash(self, pid: int, pin: str) -> str:
+        return hmac.new(self.url_secret, f"pin:{pid}:{pin}".encode(), hashlib.sha256).hexdigest()
+
+    async def web_login(self, body: bytes, headers: dict) -> Resp:
+        """Log back in on a device that logged out: the person's own 4-digit PIN (they chose it themselves)."""
+        try:
+            req = json.loads(body.decode() or "{}")
+            if not isinstance(req, dict):
+                raise ValueError
+        except (ValueError, RecursionError):
+            return err(400, "Bad request")
+        pid, pin = req.get("pid"), re.sub(r"\D", "", str(req.get("pin") or ""))
+        ip = hashlib.sha256((headers.get("x-forwarded-for", "?").split(",")[0].strip() or "?").encode()).hexdigest()[:16]
+        db = self.d.db()
+        now = time.time()
+        keys = ((f"pin:{pid}", 5), (f"pin:ip:{ip}", 15), ("pin:all", 300))
+        for key, cap in keys:
+            d = await db.attempts.find_one({"_id": key}) or {}
+            if d.get("n", 0) >= cap and now - d.get("first", 0) < 3600:
+                return err(429, "Too many wrong PINs. Please wait a while, or ask for a new code.")
+        p = await self.person_of(pid) if isinstance(pid, int) and not isinstance(pid, bool) and pid < 0 and len(pin) == 4 else None
+        if not p or not p.get("pin") or not hmac.compare_digest(p["pin"], self.pin_hash(p["_id"], pin)):
+            for key, _ in keys:
+                d = await db.attempts.find_one({"_id": key}) or {}
+                if not d or now - d.get("first", 0) >= 3600:
+                    await db.attempts.update_one({"_id": key}, {"$set": {"n": 1, "first": now}}, upsert=True)
+                else:
+                    await db.attempts.update_one({"_id": key}, {"$inc": {"n": 1}})
+            return err(404, "That PIN isn't right. Please try again, or ask for a new code.")
+        await db.attempts.delete_one({"_id": f"pin:{pid}"})
+        return jresp({"key": self.guest_key(p["_id"], p.get("gen", 0)), "pid": p["_id"], "name": p["name"]})
 
     async def vis(self, tid: int, uid: int) -> dict:
         """The photos this person may see: the family's, narrowed for a web person the parents limited."""
@@ -346,8 +424,24 @@ class WebApp:
                 return Resp(200, b"ok", "text/plain")
             if path == "/app" and method == "GET":
                 return self.page()
-            if path.startswith("/w/") and method == "GET":  # a family's web link: the same app page
-                return self.page({"Referrer-Policy": "no-referrer", "X-Robots-Tag": "noindex"})
+            if method == "GET" and (m := re.fullmatch(r"/icon-(180|192|512)\.png", path)):
+                return Resp(200, self.app_icon(int(m.group(1))), "image/png", {"Cache-Control": "public, max-age=86400"})
+            if method == "GET" and (m := re.fullmatch(r"/w/([A-Za-z0-9_-]{10,60})/manifest\.webmanifest", path)):
+                return await self.web_manifest(m.group(1))
+            if method == "GET" and path == "/web/manifest.webmanifest":
+                return await self.web_manifest(None)
+            if method == "GET" and path in ("/web", "/web/"):  # the one web address for everyone
+                head = ('<link rel="manifest" href="/web/manifest.webmanifest"><link rel="apple-touch-icon" href="/icon-180.png">'
+                        '<meta name="apple-mobile-web-app-capable" content="yes"><meta name="mobile-web-app-capable" content="yes">'
+                        '<meta name="apple-mobile-web-app-title" content="Photos"><meta name="theme-color" content="#1f6fb2">')
+                return self.page({"Referrer-Policy": "no-referrer", "X-Robots-Tag": "noindex"}, head)
+            if path.startswith("/w/") and method == "GET":  # a web link: the same app page, set up so it can be put on a home screen
+                m = re.fullmatch(r"/w/([A-Za-z0-9_-]{10,60})/?", path)
+                head = (f'<link rel="manifest" href="/w/{m.group(1)}/manifest.webmanifest">'
+                        '<link rel="apple-touch-icon" href="/icon-180.png"><meta name="apple-mobile-web-app-capable" content="yes">'
+                        '<meta name="mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-title" content="Photos">'
+                        '<meta name="theme-color" content="#1f6fb2">') if m else ""
+                return self.page({"Referrer-Policy": "no-referrer", "X-Robots-Tag": "noindex"}, head)
             if path.startswith("/dl/") and method == "GET":
                 return await self.image(path[4:], query, download=True)
             if path.startswith("/img/") and method == "GET":
@@ -363,13 +457,47 @@ class WebApp:
             log.exception("Web request failed: %s %s", method, path)
             return err(500, "Something went wrong. Please try again.")
 
-    def page(self, extra: dict | None = None) -> Resp:
+    def page(self, extra: dict | None = None, head: str = "") -> Resp:
         try:
             with open(self.html_path, "rb") as f:
                 html = f.read()
         except OSError:
             return Resp(500, b"The app page is missing on the server.", "text/plain")
+        if head:
+            html = html.replace(b"</head>", head.encode() + b"</head>", 1)
         return Resp(200, html, "text/html; charset=utf-8", {"Cache-Control": "no-store", **(extra or {})})
+
+    def app_icon(self, size: int) -> bytes:
+        """The little camera picture for a home screen (drawn here, so there is no file to ship)."""
+        hit = self.icons.get(size)
+        if hit:
+            return hit
+        from PIL import Image, ImageDraw
+        k = size / 512
+        im = Image.new("RGB", (size, size), (31, 111, 178))
+        d = ImageDraw.Draw(im)
+        box = lambda x0, y0, x1, y1: [x0 * k, y0 * k, x1 * k, y1 * k]
+        d.rounded_rectangle(box(196, 150, 316, 200), radius=14 * k, fill=(255, 255, 255))
+        d.rounded_rectangle(box(120, 180, 392, 370), radius=34 * k, fill=(255, 255, 255))
+        d.ellipse(box(196, 211, 316, 331), fill=(31, 111, 178))
+        d.ellipse(box(214, 229, 298, 313), fill=(255, 255, 255))
+        d.ellipse(box(232, 247, 280, 295), fill=(31, 111, 178))
+        d.ellipse(box(340, 200, 366, 226), fill=(31, 111, 178))
+        out = io.BytesIO()
+        im.save(out, "PNG", optimize=True)
+        self.icons[size] = out.getvalue()
+        return self.icons[size]
+
+    async def web_manifest(self, tok: str | None) -> Resp:
+        db = self.d.db()
+        if tok is not None and not await db.families.find_one({"web": tok}):
+            return err(404, "Not found")
+        base = "/web" if tok is None else f"/w/{tok}"
+        data = {"name": f"{self.d.owner_name} · Photos", "short_name": "Photos", "id": base, "start_url": base, "scope": base,
+                "display": "standalone", "background_color": "#ffffff", "theme_color": "#1f6fb2",
+                "icons": [{"src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable"},
+                          {"src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable"}]}
+        return Resp(200, json.dumps(data).encode(), "application/manifest+json", {"Cache-Control": "no-store", "X-Robots-Tag": "noindex"})
 
     # ---------- uploads (owner only) ----------
 
@@ -526,6 +654,10 @@ class WebApp:
     async def api(self, path: str, headers: dict, body: bytes) -> Resp:
         if path == "/api/guest_join":
             return await self.guest_join(body)
+        if path == "/api/web_connect":
+            return await self.web_connect(body, headers)
+        if path == "/api/web_login":
+            return await self.web_login(body, headers)
         user = validate_init_data(headers.get("x-init-data", ""), self.d.token)
         guest = False
         if not user and headers.get("x-guest-key"):
@@ -571,7 +703,24 @@ class WebApp:
             tid = await self.family_of(uid)
             if not tid:
                 return err(403, "Please send /start to the bot and link your account first.")
-        if path == "/api/child":  # the parents' own "Child access" screen
+        if path == "/api/a2hs":  # they've seen the "add to home screen" pop-up the photographer asked for
+            if not owner:
+                coll = self.d.db().webpeople if guest else self.d.db().users
+                await coll.update_one({"_id": uid}, {"$unset": {"a2hs": ""}})
+            return jresp({"ok": True})
+
+        if path == "/api/web_pin":  # a web person choosing (or removing) their own 4-digit PIN
+            if not guest or uid >= 0 or not await self.person_of(uid):
+                return err(403, "Not available.")
+            pin = re.sub(r"\D", "", str(req.get("pin") or ""))
+            if req.get("pin") in (None, ""):
+                await db.webpeople.update_one({"_id": uid}, {"$unset": {"pin": ""}})
+            elif len(pin) != 4 or len(set(pin)) == 1:
+                return err(400, "Please choose 4 different-looking digits (not 1111).")
+            else:
+                await db.webpeople.update_one({"_id": uid}, {"$set": {"pin": self.pin_hash(uid, pin)}})
+            return jresp({"ok": True})
+        if path == "/api/child":  # the parents' own "Web access" screen
             if owner:
                 return err(403, "This is for clients.")
             status, data = await self.d.child(tid, req)
@@ -661,6 +810,8 @@ class WebApp:
                 "lang_set": True if (owner or guest) else await self.d.lang_chosen(uid),
                 "guest": guest,
                 "dl": gp.get("dl") is not False if gp else True,
+                "pin": bool(gp and gp.get("pin")),
+                "a2hs": False if owner else (bool(gp and gp.get("a2hs")) if guest else bool((await self.d.db().users.find_one({"_id": uid}) or {}).get("a2hs"))),  # (the photographer asked them to add the app to their home screen)
                 "child": False if (owner or guest) else bool((await db.families.find_one({"thread_id": tid}) or {}).get("child_ok")),
                 "welcome": await self.welcome(uid, tid),
             })
