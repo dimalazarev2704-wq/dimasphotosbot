@@ -3617,7 +3617,7 @@ async def drop_web_people(tid: int, pid: int | None = None) -> None:
 async def web_person_row(p: dict) -> dict:
     until = as_utc(p.get("until")) if p.get("until") else None
     return {"id": p["_id"], "name": p["name"], "address": f"{WEBAPP_URL}/web" if WEBAPP_URL else "",
-            "on": p.get("on", True), "dl": p.get("dl", True) is not False, "scope": p.get("scope") or "all",
+            "on": p.get("on", True), "dl": p.get("dl", True) is not False, "pinany": p.get("pinany", True) is not False, "scope": p.get("scope") or "all",
             "dates": list(p.get("dates") or []), "opened": ago_text(p.get("last_open")) if p.get("last_open") else "never",
             "locked": bool(p.get("locked")), "until": until.strftime("%b %d, %Y") if until else "",
             "expired": bool(until and until < datetime.now(timezone.utc)),
@@ -3669,7 +3669,7 @@ async def web_people_api(tid: int, req: dict, by_owner: bool = False) -> tuple[i
             await db.webcodes.delete_many({"pid": p["_id"]})
         else:
             upd = {}
-            for k in ("on", "dl") + (("locked",) if by_owner else ()):
+            for k in ("on", "dl", "pinany") + (("locked",) if by_owner else ()):
                 if k in req:
                     if not isinstance(req[k], bool):
                         return 400, {"error": "Bad request"}

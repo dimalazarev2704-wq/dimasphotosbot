@@ -900,6 +900,7 @@ async function personScreen(wp, pid) {
       h("h2", { text: "What they can do" }),
       toggle("Access is on", p.on, "on"),
       toggle("Can download photos", p.dl, "dl"),
+      toggle("Can log in with their own PIN on a new device (no parent needed)", p.pinany, "pinany"),
       h("h2", { text: "Which photos can they see?" }),
       scopeBtn("all", "All photos"), scopeBtn("best", "⭐ Best shots only"),
       scopeBtn("dates", p.scope === "dates" ? "📅 Chosen days (" + p.dates.length + ")" : "📅 Chosen days…"),
@@ -1624,6 +1625,22 @@ function pinLoginScreen(w, note) {  // (this device logged out, and the person s
     note ? h("div", { class: "msg", text: note }) : null, inp, h("button", { class: "cta", text: "Log in", on: { click: go } }),
     h("button", { class: "cta alt", text: "Use a new code instead", on: { click: () => { try { localStorage.removeItem("who:web"); } catch (e) {} connectScreen(); } } })]);
 }
+function pinNewScreen(note) {  // (a new device: no parent needed, just the family, their name and their own PIN)
+  const fam = h("input", { type: "text", autocomplete: "off", autocapitalize: "words", placeholder: "Family name (like Smith)", style: "width:100%;box-sizing:border-box;font-size:18px;padding:12px;margin:6px 0" });
+  const nm = h("input", { type: "text", autocomplete: "off", autocapitalize: "words", placeholder: "My name", style: "width:100%;box-sizing:border-box;font-size:18px;padding:12px;margin:6px 0" });
+  const pn = h("input", { type: "password", inputmode: "numeric", autocomplete: "off", maxlength: "4", placeholder: "••••", style: "width:100%;box-sizing:border-box;font-size:34px;text-align:center;letter-spacing:10px;padding:12px;margin:6px 0" });
+  const go = () => oneAtATime(async () => {
+    if (!fam.value.trim() || !nm.value.trim() || !/^\d{4}$/.test(pn.value)) { await alertMsg("Please type the family name, your name and your 4-digit PIN."); return; }
+    let r; try { r = await api("/api/web_login", { family: fam.value, name: nm.value, pin: pn.value }); } catch (e) { await alertMsg("⚠️ " + e.message); return; }
+    guestKey = r.key; try { localStorage.setItem("gk:web", guestKey); localStorage.setItem("who:web", JSON.stringify({ pid: r.pid, name: r.name, pin: true })); } catch (e) {}
+    HOME = null; guestStart();
+  });
+  pn.addEventListener("keydown", e => { if (e.key === "Enter") go(); });
+  show([h("h1", { text: "🔐 Log in with my PIN" }), h("div", { class: "hint", text: "Type your family's name, your name and the 4-digit PIN you chose. You'll stay logged in on this device." }),
+    fam, nm, pn, h("button", { class: "cta", text: "Log in", on: { click: go } }),
+    h("button", { class: "cta alt", text: "I have a code instead", on: { click: () => connectScreen(null, true) } }),
+    h("div", { class: "hint", text: "Don't have a PIN yet? Ask a parent for a code. After you connect, you can choose your own PIN on the home page." })]);
+}
 function pinSetScreen() {
   const inp = h("input", { type: "password", inputmode: "numeric", autocomplete: "off", maxlength: "4", placeholder: "••••", style: "width:100%;box-sizing:border-box;font-size:34px;text-align:center;letter-spacing:10px;padding:12px;margin:12px 0" });
   const save = pin => oneAtATime(async () => {
@@ -1634,8 +1651,8 @@ function pinSetScreen() {
     inp, h("button", { class: "cta", text: "Save PIN", on: { click: () => { if (!/^\d{4}$/.test(inp.value)) { alertMsg("Please type 4 digits."); return; } save(inp.value); } } }),
     HOME && HOME.pin ? h("button", { class: "cta alt", text: "Remove my PIN", on: { click: () => save("") } }) : null]);
 }
-function connectScreen(note) {
-  const who = webWho(); if (who && !note) { pinLoginScreen(who); return; }
+function connectScreen(note, force) {
+  const who = webWho(); if (who && !note && !force) { pinLoginScreen(who); return; }
   const inp = h("input", { type: "text", inputmode: "numeric", autocomplete: "off", maxlength: "9", placeholder: "0000 0000", style: "width:100%;box-sizing:border-box;font-size:30px;text-align:center;letter-spacing:3px;padding:12px;margin:12px 0" });
   inp.addEventListener("input", () => { const d = inp.value.replace(/\D/g, "").slice(0, 8); inp.value = d.length > 4 ? d.slice(0, 4) + " " + d.slice(4) : d; });
   const go = () => oneAtATime(async () => {
@@ -1647,6 +1664,7 @@ function connectScreen(note) {
   inp.addEventListener("keydown", e => { if (e.key === "Enter") go(); });
   show([h("h1", { text: "📷 Connect this device" }), h("div", { class: "hint", text: "Type the code you were given. You only have to do this once on this device." }),
     note ? h("div", { class: "msg", text: note }) : null, inp, h("button", { class: "cta", text: "Connect", on: { click: go } }),
+    h("button", { class: "cta alt", text: "🔐 I have my PIN", on: { click: () => pinNewScreen() } }),
     h("div", { class: "hint", text: "No code? Ask the person who shared these photos with you to make one." })]);
 }
 async function guestStart() {

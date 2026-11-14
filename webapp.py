@@ -295,6 +295,26 @@ class WebApp:
         await db.guests.insert_one({"_id": gid, "tid": fam["thread_id"], "at": datetime.now(timezone.utc)})
         return jresp({"key": self.guest_key(gid), "family": fam["name"]})
 
+    async def throttled(self, keys) -> bool:
+        """Has any of these guess counters (key, cap per hour) run out?"""
+        db = self.d.db()
+        now = time.time()
+        for key, cap in keys:
+            d = await db.attempts.find_one({"_id": key}) or {}
+            if d.get("n", 0) >= cap and now - d.get("first", 0) < 3600:
+                return True
+        return False
+
+    async def strike(self, keys) -> None:
+        db = self.d.db()
+        now = time.time()
+        for key, _ in keys:
+            d = await db.attempts.find_one({"_id": key}) or {}
+            if not d or now - d.get("first", 0) >= 3600:
+                await db.attempts.update_one({"_id": key}, {"$set": {"n": 1, "first": now, "at": datetime.now(timezone.utc)}}, upsert=True)
+            else:
+                await db.attempts.update_one({"_id": key}, {"$inc": {"n": 1}})
+
     async def code_blocked(self, ip: str) -> bool:
         """Too many wrong connection codes from one place (or from everywhere) lately?"""
         db = self.d.db()
@@ -339,6 +359,13 @@ class WebApp:
         await db.webcodes.delete_one({"_id": code})  # (one use)
         return jresp({"key": self.guest_key(p["_id"], p.get("gen", 0)), "pid": p["_id"], "name": p["name"], "family": (await self.d.family_name(p["tid"])) or ""})
 
+    @staticmethod
+    def weak_pin(pin: str) -> bool:
+        """The PINs a classmate would try first: repeats, runs (1234, 4321), pairs (1212) and a few famous ones."""
+        d = [int(c) for c in pin]
+        steps = {d[i + 1] - d[i] for i in range(3)}
+        return (len(set(pin)) == 1 or steps in ({1}, {-1}) or (pin[:2] == pin[2:] ) or pin in {"1004", "2000", "2001", "6969", "1122", "1313", "2580", "0852", "1230", "9876", "1357", "2468", "4200", "0420", "1337", "0069", "5683"})
+
     def pin_hash(self, pid: int, pin: str) -> str:
         return hmac.new(self.url_secret, f"pin:{pid}:{pin}".encode(), hashlib.sha256).hexdigest()
 
@@ -354,23 +381,40 @@ class WebApp:
         ip = hashlib.sha256((headers.get("x-forwarded-for", "?").split(",")[0].strip() or "?").encode()).hexdigest()[:16]
         db = self.d.db()
         now = time.time()
-        who = pid if isinstance(pid, int) and not isinstance(pid, bool) and pid < 0 else "x"  # (never build a key from whatever was sent)
-        keys = ((f"pinlogin:{who}", 5), (f"pinlogin:ip:{ip}", 15), ("pinlogin:all", 1000))
-        for key, cap in keys:
-            d = await db.attempts.find_one({"_id": key}) or {}
-            if d.get("n", 0) >= cap and now - d.get("first", 0) < 3600:
-                return err(429, "Too many wrong PINs. Please wait a while, or ask for a new code.")
-        p = await self.person_of(pid) if isinstance(pid, int) and not isinstance(pid, bool) and pid < 0 and len(pin) == 4 else None
-        if not p or not p.get("pin") or not hmac.compare_digest(p["pin"], self.pin_hash(p["_id"], pin)):
-            for key, _ in keys:
-                d = await db.attempts.find_one({"_id": key}) or {}
-                if not d or now - d.get("first", 0) >= 3600:
-                    await db.attempts.update_one({"_id": key}, {"$set": {"n": 1, "first": now, "at": datetime.now(timezone.utc)}}, upsert=True)
-                else:
-                    await db.attempts.update_one({"_id": key}, {"$inc": {"n": 1}})
-            return err(404, "That PIN isn't right. Please try again, or ask for a new code.")
-        await db.attempts.delete_one({"_id": f"pinlogin:{pid}"})
-        return jresp({"key": self.guest_key(p["_id"], p.get("gen", 0)), "pid": p["_id"], "name": p["name"]})
+        norm = lambda s: " ".join(str(s).split()).casefold()[:60]
+        famn = lambda s: " ".join(re.sub(r"\b(the|family)\b", " ", norm(s)).split())  # ("Smith", "the Smith family" and "SMITH family" are the same)
+        fam_s, name_s = req.get("family"), req.get("name")
+        cands = []
+        if isinstance(fam_s, str) and isinstance(name_s, str) and famn(fam_s) and norm(name_s):  # a new device: family + their name + their PIN
+            nk = "pinlogin:n:" + hashlib.sha256(f"{famn(fam_s)}|{norm(name_s)}".encode()).hexdigest()[:20]
+            keys = [(nk, 5), (f"pinlogin:ip:{ip}", 15), ("pinlogin:all", 1000)]
+            if len(pin) == 4 and not await self.throttled(keys):
+                fams = {f["thread_id"] for f in await db.families.find().to_list() if famn(f.get("name", "")) == famn(fam_s)}
+                for p in await db.webpeople.find({"tid": {"$in": list(fams)}}).to_list():
+                    if norm(p["name"]) == norm(name_s) and p.get("pinany", True) is not False and await self.person_of(p["_id"]):
+                        cands.append(p)
+            who_keys = [(f"pinlogin:{p['_id']}", 5) for p in cands]
+            keys += who_keys
+        else:
+            who = pid if isinstance(pid, int) and not isinstance(pid, bool) and pid < 0 else "x"  # (never build a key from whatever was sent)
+            keys = [(f"pinlogin:{who}", 5), (f"pinlogin:ip:{ip}", 15), ("pinlogin:all", 1000)]
+            who_keys = []
+            p = await self.person_of(pid) if who != "x" and len(pin) == 4 else None
+            cands = [p] if p else []
+        if await self.throttled(keys[:3]) or (who_keys and all([await self.throttled([k]) for k in who_keys])):
+            return err(429, "Too many wrong PINs. Please wait a while, or ask for a new code.")
+        hit = None
+        for p in cands:
+            if p.get("pin") and hmac.compare_digest(p["pin"], self.pin_hash(p["_id"], pin)) and not await self.throttled([(f"pinlogin:{p['_id']}", 5)]):
+                hit = p
+                break
+        if not hit:
+            await self.strike(keys)
+            return err(404, "That PIN isn't right." if "family" not in req else "That family, name or PIN isn't right. Please try again, or ask for a new code.")
+        for k, _ in keys[:1] + who_keys:
+            await db.attempts.delete_one({"_id": k})
+        await db.attempts.delete_one({"_id": f"pinlogin:{hit['_id']}"})
+        return jresp({"key": self.guest_key(hit["_id"], hit.get("gen", 0)), "pid": hit["_id"], "name": hit["name"]})
 
     async def vis(self, tid: int, uid: int) -> dict:
         """The photos this person may see: the family's, narrowed for a web person the parents limited."""
@@ -716,8 +760,8 @@ class WebApp:
             pin = re.sub(r"\D", "", str(req.get("pin") or ""))
             if req.get("pin") in (None, ""):
                 await db.webpeople.update_one({"_id": uid}, {"$unset": {"pin": ""}})
-            elif len(pin) != 4 or len(set(pin)) == 1:
-                return err(400, "Please choose 4 different-looking digits (not 1111).")
+            elif len(pin) != 4 or self.weak_pin(pin):
+                return err(400, "That PIN is too easy to guess (like 1111, 1234 or 2580). Please choose another one.")
             else:
                 await db.webpeople.update_one({"_id": uid}, {"$set": {"pin": self.pin_hash(uid, pin)}})
             return jresp({"ok": True})
