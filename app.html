@@ -124,10 +124,21 @@ const initData = (tg && tg.initData) || "";
 // A family's web link (/w/<token>): the same app in any browser, no Telegram. The browser keeps its own key.
 // The one web address (/web): a short code from the parents connects this device to one person's account.
 const GUEST_TOKEN = initData ? "" : (/^\/web\/?$/.test(location.pathname) ? "web" : ((location.pathname.match(/^\/w\/([A-Za-z0-9_-]{10,60})\/?$/) || [])[1] || ""));
-if (GUEST_TOKEN === "web") { try { const k = new URLSearchParams(location.search).get("k"); if (k && /^-?\d+\.[0-9a-f]{32}$/.test(k)) { localStorage.setItem("gk:web", k); history.replaceState(null, "", "/web"); } } catch (e) {} }
+let HAND = "";  // (a one-use pass from the Telegram "Open on the website" button: the page where a parent makes their password)
+if (GUEST_TOKEN === "web") { try {
+  const sp = new URLSearchParams(location.search), k = sp.get("k"), w = sp.get("w"), hd = sp.get("h");
+  if (k && /^-?\d+\.[0-9a-f]{32}$/.test(k)) localStorage.setItem("gk:web", k);
+  if (w && /^u\d+\.[0-9a-f]{32}$/.test(w)) localStorage.setItem("wk:web", w);
+  if (hd && /^[A-Za-z0-9_-]{20,60}$/.test(hd)) HAND = hd;
+  if (k || w || hd) history.replaceState(null, "", "/web");
+} catch (e) {} }
 let guestKey = "";
 try { if (GUEST_TOKEN) guestKey = localStorage.getItem("gk:" + GUEST_TOKEN) || ""; } catch (e) {}
-const IS_GUEST = !!GUEST_TOKEN;
+const ON_WEB = GUEST_TOKEN === "web";
+let WEBKEY = "";  // (a parent signed in on the website with username + password: the real account, not a web person)
+try { if (ON_WEB) WEBKEY = localStorage.getItem("wk:web") || ""; } catch (e) {}
+const IS_GUEST = !!GUEST_TOKEN && !(ON_WEB && WEBKEY);
+const NO_TG = !!GUEST_TOKEN;  // (in a plain browser: no Telegram chat to send things to)
 const $main = document.getElementById("main"), $tabs = document.getElementById("tabs");
 let HOME = null, tab = "home", stack = [];
 let IS_ADMIN = false, adminFam = null, adminFamName = "", dirty = false;  // (the owner's pick lives only in this open app)
@@ -149,7 +160,7 @@ async function api(path, body) {
   if (IS_ADMIN && !path.startsWith("/api/admin/")) body = Object.assign({}, body, { fam: adminFam });
   const ctl = new AbortController(), timer = setTimeout(() => ctl.abort(), 60000);  // (a sleeping server can take a while to wake)
   try {
-    res = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json", "X-Init-Data": initData, "X-Guest-Key": guestKey }, body: JSON.stringify(body || {}), signal: ctl.signal });
+    res = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json", "X-Init-Data": initData, "X-Guest-Key": guestKey, "X-Web-Key": WEBKEY }, body: JSON.stringify(body || {}), signal: ctl.signal });
   } catch (e) { throw new Error("No connection, or the server is still waking up. Please wait a moment and try again."); }
   finally { clearTimeout(timer); }
   let data = {};
@@ -242,7 +253,13 @@ const RU_EXACT = {
   "🌐 Web access": "🌐 Доступ через браузер", "📋 Copy link": "📋 Скопировать ссылку",
   "Let someone look at your family's photos in a web browser with no Telegram account. You make them a short code, they type it once on their device. You choose what each person can do.": "Дайте человеку смотреть фото вашей семьи в браузере без Telegram. Вы создаёте короткий код, он вводит его один раз на своём устройстве. Вы выбираете, что он может делать.",
   "Nobody yet. Add a child, a grandparent or anyone you trust.": "Пока никого. Добавьте ребёнка, бабушку или любого, кому доверяете.",
-  "🔐 Set a PIN": "🔐 Задать PIN", "🔐 Change or remove my PIN": "🔐 Изменить или удалить PIN", "🚪 Log out of this device": "🚪 Выйти на этом устройстве", "🔐 Welcome back": "🔐 С возвращением", "Log in": "Войти", "Save PIN": "Сохранить PIN", "Remove my PIN": "Удалить мой PIN", "🔐 Your PIN": "🔐 Ваш PIN", "Use a new code instead": "Ввести новый код",
+  "🔐 Set a PIN": "🔐 Задать PIN", "🔐 Change or remove my PIN": "🔐 Изменить или удалить PIN", "🚪 Log out of this device": "🚪 Выйти на этом устройстве", "🔐 Welcome back": "🔐 С возвращением", "Log in": "Войти", "Save PIN": "Сохранить PIN", "Remove my PIN": "Удалить мой PIN", "🔐 Your PIN": "🔐 Ваш PIN", "Use a new code instead": "Ввести новый код", "I'm a parent: sign in with my username": "Я родитель: войти по логину",
+  "🌐 Website": "🌐 Сайт", "Look at your photos on a computer or tablet, in any browser, without Telegram. Open this address and sign in:": "Смотрите фото на компьютере или планшете, в любом браузере, без Telegram. Откройте этот адрес и войдите:",
+  "Your username": "Ваш логин", "First, make a password. Your username will be your Telegram username (or you can choose one).": "Сначала придумайте пароль. Логином будет ваше имя в Telegram (или вы можете выбрать своё).",
+  "🔑 Change my website password": "🔑 Сменить пароль для сайта", "🌐 Open the website and make a password": "🌐 Открыть сайт и придумать пароль",
+  "🚪 Sign out all my website devices": "🚪 Выйти на всех моих устройствах на сайте", "🗑 Delete my website login": "🗑 Удалить мой вход на сайт",
+  "Sign out every device where you are signed in on the website?": "Выйти на всех устройствах, где вы вошли на сайте?", "Delete your website username and password? You can make a new one later.": "Удалить ваш логин и пароль для сайта? Позже можно создать новые.",
+  "Every time you sign in on the website, the bot asks you in Telegram to confirm it's you.": "Каждый раз, когда вы входите на сайт, бот спрашивает в Telegram, вы ли это.",
   "➕ Add a person": "➕ Добавить человека", "Add them": "Добавить", "Who is this for?": "Для кого это?",
   "Connect a device": "Подключить устройство", "🔑 Make a code": "🔑 Создать код", "📋 Copy address": "📋 Скопировать адрес", "🔄 Disconnect all their devices": "🔄 Отключить все их устройства",
   "What they can do": "Что можно делать",
@@ -383,7 +400,7 @@ function drawTabs() {
 let photos = [], viewList = [], homeAt = 0;
 async function homeScreen() {
   if (!HOME) {  // (asked once per visit, so the welcome can't change while the app is open)
-    if (!initData && !guestKey) { show([h("h1", { text: "Open from Telegram" }), h("div", { class: "msg", text: "Please open this app from the bot in Telegram, using the “📱 Open the photo app” button." })]); return; }
+    if (!initData && !guestKey && !WEBKEY) { show([h("h1", { text: "Open from Telegram" }), h("div", { class: "msg", text: "Please open this app from the bot in Telegram, using the “📱 Open the photo app” button." })]); return; }
     loading(); const my = navId;
     let got;
     try { got = await api("/api/home"); } catch (e) { if (my === navId) errorScreen(e, homeScreen); return; }
@@ -422,7 +439,12 @@ async function homeScreen() {
   if (canAddHome()) nodes.push(h("button", { class: "cta alt", text: "📲 Add to home screen", on: { click: () => {
     if (tgHome() && tg.checkHomeScreenStatus) { try { tg.checkHomeScreenStatus(st => { if (st === "added") alertMsg("It's already on your home screen."); else offerHomeScreen(); }); return; } catch (e) {} }
     offerHomeScreen(); } } }));
-  if (GUEST_TOKEN === "web") nodes.push(h("button", { class: "cta alt", text: HOME.pin ? "🔐 Change or remove my PIN" : "🔐 Set a PIN", on: { click: () => push(pinSetScreen) } }),
+  if (initData && !IS_ADMIN && HOME.site != null) nodes.push(h("button", { class: "cta alt", text: "🌐 Website", on: { click: () => push(siteScreen) } }));
+  if (ON_WEB && WEBKEY) nodes.push(h("button", { class: "cta alt", text: "🚪 Log out of this device", on: { click: async () => {
+      if (!await confirmAsk("Log out of this device? You can sign in again with your username and password.")) return;
+      try { localStorage.removeItem("wk:web"); } catch (e) {}
+      location.replace("/web"); } } }));
+  else if (ON_WEB) nodes.push(h("button", { class: "cta alt", text: HOME.pin ? "🔐 Change or remove my PIN" : "🔐 Set a PIN", on: { click: () => push(pinSetScreen) } }),
     h("button", { class: "cta alt", text: "🚪 Log out of this device", on: { click: async () => {
       if (!await confirmAsk("Log out of this device?" + (HOME.pin ? " You can log back in with your PIN." : " To get back in you will need a new code. You can set a PIN first so you can log back in yourself."))) return;
       try { if (HOME.pin) localStorage.setItem("who:web", JSON.stringify(Object.assign(JSON.parse(localStorage.getItem("who:web") || "{}"), { pin: true }))); else localStorage.removeItem("who:web"); localStorage.removeItem("gk:web"); } catch (e) {}
@@ -684,9 +706,9 @@ function showPhoto() {
   const isVid = p.k === "video";
   let pl = document.getElementById("vplay");
   if (!pl) { pl = h("div", { id: "vplay", text: "▶", on: { click: () => document.getElementById("vorig").click() } }); V.querySelector(".stage").append(pl); }
-  pl.style.display = isVid && !IS_GUEST ? "flex" : "none";
-  document.getElementById("vorig").textContent = isVid ? "📥 Send me the video in chat" : IS_GUEST ? "⬇️ Download the photo" : "📥 Send me the photo in chat";
-  if (IS_GUEST && (isVid || (HOME && HOME.dl === false))) document.getElementById("vorig").style.display = "none";
+  pl.style.display = isVid && !NO_TG ? "flex" : "none";
+  document.getElementById("vorig").textContent = isVid ? "📥 Send me the video in chat" : NO_TG ? "⬇️ Download the photo" : "📥 Send me the photo in chat";
+  if (NO_TG && (isVid || (HOME && HOME.dl === false))) document.getElementById("vorig").style.display = "none";
   document.getElementById("vcap").textContent = [isVid ? "🎬 Video" + (p.dur ? " " + vlen(p.dur) : "") + (p.mb ? " · " + p.mb + " MB" : "") : "", p.dt, p.loc, p.g ? "👥 " + p.g : "", p.by ? "Added by " + p.by : ""].filter(Boolean).join(" · ") + "   (" + (cur + 1) + " of " + viewList.length + ")";
   document.getElementById("vprev").style.visibility = cur > 0 ? "visible" : "hidden";
   document.getElementById("vnext").style.visibility = cur < viewList.length - 1 ? "visible" : "hidden";
@@ -717,7 +739,7 @@ document.getElementById("vprev").onclick = () => step(-1);
 document.getElementById("vnext").onclick = () => step(1);
 document.getElementById("vclose").onclick = closeViewer;
 document.getElementById("vorig").onclick = async (ev) => {
-  if (IS_GUEST) {  // no Telegram chat to send it to: save the picture from the web link instead
+  if (NO_TG) {  // no Telegram chat to send it to: save the picture from the web link instead
     const p = viewList[cur]; if (!p || !p.f) return;
     const a = document.createElement("a"); a.href = p.f.replace("/img/", "/dl/"); a.download = ""; document.body.append(a); a.click(); a.remove();
     return;
@@ -1343,7 +1365,10 @@ async function usersScreen() {
       h("b", { text: p.name || "(no name)" }), p.username ? " @" + p.username : "",
       h("div", { class: "hint", text: p.status }),
       h("div", { class: "hint", text: "ID " + p.id + (p.at ? " · started " + p.at : "") }),
-      p.tid ? h("div", { class: "btns" }, h("button", { class: "alt", text: "🌐 Web access for this family", on: { click: () => openWeb(p.tid, p.fam) } })) : null))]
+      p.site ? h("div", { class: "hint", text: "🌐 Website login: @" + p.site + (p.siteOpened ? " · opened " + p.siteOpened : "") }) : null,
+      p.tid ? h("div", { class: "btns" }, h("button", { class: "alt", text: "🌐 Web access for this family", on: { click: () => openWeb(p.tid, p.fam) } }),
+        p.site ? [h("button", { class: "alt", text: "🚪 Sign out their website devices", on: { click: () => oneAtATime(async () => { if (!await confirmAsk("Sign out every website device of " + (p.name || "this person") + "?")) return; try { await api("/api/admin/web_acct", { uid: p.id, do: "logout" }); } catch (e) { await alertMsg("⚠️ " + e.message); return; } await alertMsg("Done."); }) } }),
+          h("button", { class: "alt", text: "🗑 Remove their website login", on: { click: () => oneAtATime(async () => { if (!await confirmAsk("Remove the website username and password of " + (p.name || "this person") + "? They can make a new one.")) return; try { await api("/api/admin/web_acct", { uid: p.id, do: "remove" }); } catch (e) { await alertMsg("⚠️ " + e.message); return; } replaceTop(usersScreen); }) } })] : null) : null))]
       : [h("div", { class: "msg", text: gf.users ? "Nobody in this group yet." : "Nobody has started the bot yet." })])]);
 }
 async function uplineScreen() {
@@ -1567,9 +1592,9 @@ let installEvt = null;
 addEventListener("beforeinstallprompt", e => { e.preventDefault(); installEvt = e; });
 const tgHome = () => !IS_GUEST && tg && typeof tg.addToHomeScreen === "function";
 const isStandalone = () => (window.matchMedia && matchMedia("(display-mode: standalone)").matches) || navigator.standalone === true;
-const canAddHome = () => !IS_ADMIN && (tgHome() || (IS_GUEST && !isStandalone()));
+const canAddHome = () => !IS_ADMIN && (tgHome() || (NO_TG && !isStandalone()));
 function maybeOfferApp() {  // the first visit on a web link, phones only
-  if (!IS_GUEST || isStandalone()) return;
+  if (!NO_TG || isStandalone()) return;
   try { if (localStorage.getItem("a2hs:" + GUEST_TOKEN)) return; } catch (e) {}
   const ua = navigator.userAgent, ios = /iphone|ipad|ipod/i.test(ua) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
   setTimeout(() => { if (ios || /android/i.test(ua) || installEvt) offerHomeScreen(); }, 1500);
@@ -1578,7 +1603,7 @@ function offerHomeScreen() {
   if (!canAddHome() || document.getElementById("a2hsSheet")) return;
   const ua = navigator.userAgent, ios = /iphone|ipad|ipod/i.test(ua) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1), android = /android/i.test(ua);
   const done = () => {
-    if (IS_GUEST) { try { localStorage.setItem("a2hs:" + GUEST_TOKEN, "1"); } catch (e) {} }
+    if (NO_TG) { try { localStorage.setItem("a2hs:" + GUEST_TOKEN, "1"); } catch (e) {} }
     if (GUEST_TOKEN === "web") { try { history.replaceState(null, "", "/web"); } catch (e) {} }  // (the key doesn't stay in the address bar)
     api("/api/a2hs", {}).catch(() => {});  // (so a pop-up the photographer asked for doesn't come back)
     if (HOME) HOME.a2hs = false;
@@ -1594,7 +1619,7 @@ function offerHomeScreen() {
   const how = async () => {
     if (tgHome()) { try { tg.addToHomeScreen(); } catch (e) {} done(); return; }
     if (installEvt && !ios) { try { installEvt.prompt(); await installEvt.userChoice; } catch (e) {} done(); return; }
-    if (GUEST_TOKEN === "web" && guestKey) { try { history.replaceState(null, "", "/web?k=" + guestKey); } catch (e) {} }  // (iPhone shortcuts keep their own storage, so the shortcut carries the key)
+    if (ON_WEB && (WEBKEY || guestKey)) { try { history.replaceState(null, "", WEBKEY ? "/web?w=" + WEBKEY : "/web?k=" + guestKey); } catch (e) {} }  // (iPhone shortcuts keep their own storage, so the shortcut carries the key)
     const steps = ios
       ? ["Tap the Share button (the square with an arrow pointing up) at the bottom or top of Safari.", "Scroll down and tap “Add to Home Screen”.", "Tap “Add”. The 📷 Photos icon appears with your other apps."]
       : android
@@ -1622,7 +1647,8 @@ function pinLoginScreen(w, note) {  // (this device logged out, and the person s
   inp.addEventListener("keydown", e => { if (e.key === "Enter") go(); });
   show([h("h1", { text: "🔐 Welcome back" }), h("div", { class: "hint", "data-ugc": "1", text: "Type your 4-digit PIN to open the photos." }),
     note ? h("div", { class: "msg", text: note }) : null, inp, h("button", { class: "cta", text: "Log in", on: { click: go } }),
-    h("button", { class: "cta alt", text: "Use a new code instead", on: { click: () => { try { localStorage.removeItem("who:web"); } catch (e) {} connectScreen(); } } })]);
+    h("button", { class: "cta alt", text: "Use a new code instead", on: { click: () => { try { localStorage.removeItem("who:web"); } catch (e) {} connectScreen(); } } }),
+    h("button", { class: "cta alt", text: "I'm a parent: sign in with my username", on: { click: () => connectScreen(null, "pw") } })]);
 }
 function pinSetScreen() {
   const inp = h("input", { type: "password", inputmode: "numeric", autocomplete: "off", maxlength: "4", placeholder: "••••", style: "width:100%;box-sizing:border-box;font-size:34px;text-align:center;letter-spacing:10px;padding:12px;margin:12px 0" });
@@ -1634,8 +1660,12 @@ function pinSetScreen() {
     inp, h("button", { class: "cta", text: "Save PIN", on: { click: () => { if (!/^\d{4}$/.test(inp.value)) { alertMsg("Please type 4 digits."); return; } save(inp.value); } } }),
     HOME && HOME.pin ? h("button", { class: "cta alt", text: "Remove my PIN", on: { click: () => save("") } }) : null]);
 }
-function connectScreen(note) {
-  const who = webWho(); if (who && !note) { pinLoginScreen(who); return; }
+function connectScreen(note, mode) {
+  const who = webWho(); if (who && !note && !mode) { pinLoginScreen(who); return; }
+  mode = mode || "code";
+  const tabs = h("div", { class: "btns" }, h("button", { class: mode === "code" ? "" : "alt", text: "🔑 I have a code", on: { click: () => connectScreen(note, "code") } }),
+    h("button", { class: mode === "pw" ? "" : "alt", text: "👤 Username", on: { click: () => connectScreen(note, "pw") } }));
+  if (mode === "pw") { signinScreen(note, tabs); return; }
   const inp = h("input", { type: "text", inputmode: "numeric", autocomplete: "off", maxlength: "9", placeholder: "0000 0000", style: "width:100%;box-sizing:border-box;font-size:30px;text-align:center;letter-spacing:3px;padding:12px;margin:12px 0" });
   inp.addEventListener("input", () => { const d = inp.value.replace(/\D/g, "").slice(0, 8); inp.value = d.length > 4 ? d.slice(0, 4) + " " + d.slice(4) : d; });
   const go = () => oneAtATime(async () => {
@@ -1645,11 +1675,90 @@ function connectScreen(note) {
     HOME = null; guestStart();
   });
   inp.addEventListener("keydown", e => { if (e.key === "Enter") go(); });
-  show([h("h1", { text: "📷 Connect this device" }), h("div", { class: "hint", text: "Type the code you were given. You only have to do this once on this device." }),
+  show([h("h1", { text: "📷 Connect this device" }), tabs, h("div", { class: "hint", text: "Type the code you were given. You only have to do this once on this device." }),
     note ? h("div", { class: "msg", text: note }) : null, inp, h("button", { class: "cta", text: "Connect", on: { click: go } }),
-    h("div", { class: "hint", text: "No code? Ask the person who shared these photos with you to make one." })]);
+    h("div", { class: "hint", text: "No code? Ask the person who shared these photos with you to make one. Parents with Telegram: tap “🌐 Website” in the app to make a username and password." })]);
+}
+const fieldStyle = "width:100%;box-sizing:border-box;font-size:18px;padding:12px;margin:6px 0";
+function signinScreen(note, tabs) {
+  const us = h("input", { type: "text", autocomplete: "username", autocapitalize: "none", autocorrect: "off", placeholder: "Username", style: fieldStyle });
+  const pw = h("input", { type: "password", autocomplete: "current-password", placeholder: "Password", style: fieldStyle });
+  const go = () => oneAtATime(async () => {
+    if (!us.value.trim() || !pw.value) { await alertMsg("Please type your username and password."); return; }
+    let r; try { r = await api("/api/web_signin", { username: us.value, password: pw.value }); } catch (e) { await alertMsg("⚠️ " + e.message); return; }
+    waitScreen(r.poll, r.seconds);
+  });
+  pw.addEventListener("keydown", e => { if (e.key === "Enter") go(); });
+  show([h("h1", { text: "👤 Sign in" }), tabs, h("div", { class: "hint", text: "For parents. Your username is your Telegram username (or the one you chose). After you sign in, the bot asks you in Telegram if it's really you." }),
+    note ? h("div", { class: "msg", text: note }) : null, us, pw, h("button", { class: "cta", text: "Sign in", on: { click: go } }),
+    h("div", { class: "hint", text: "First time, or forgot your password? Open the app in Telegram and tap “🌐 Website”." })]);
+}
+function waitScreen(poll, seconds) {
+  let stop = false; const my = navId;
+  const msg = h("div", { class: "msg", text: "Waiting for you…" });
+  show([h("h1", { text: "📲 Check Telegram" }), h("div", { class: "hint", text: "I sent you a message in Telegram: “Is this you signing in on the website?” Tap ✅ Yes, it's me." }), msg,
+    h("button", { class: "cta alt", text: "Cancel", on: { click: () => { stop = true; connectScreen(null, "pw"); } } })]);
+  const end = Date.now() + (seconds || 120) * 1000 + 5000;
+  const tick = async () => {
+    if (stop || my !== navId) return;
+    let r; try { r = await api("/api/web_signin_status", { poll }); } catch (e) { r = { status: "wait" }; }
+    if (stop || my !== navId) return;
+    if (r.status === "ok") { try { localStorage.setItem("wk:web", r.key); } catch (e) {} location.replace("/web"); return; }
+    if (r.status === "no") { connectScreen("🚫 You said it wasn't you, so the sign-in was blocked and your website password was cancelled. To use the website again, tap “🌐 Website” in the Telegram app and make a new password.", "pw"); return; }
+    if (r.status === "expired" || Date.now() > end) { connectScreen("That took too long, so the sign-in expired. Please try again.", "pw"); return; }
+    setTimeout(tick, 2000);
+  };
+  setTimeout(tick, 2000);
+}
+async function handoffScreen(hd) {
+  loading();
+  let d; try { d = await api("/api/web_hand_info", { h: hd }); } catch (e) { show([h("h1", { text: "This link expired" }), h("div", { class: "msg", text: e.message }), h("button", { class: "cta", text: "Sign in instead", on: { click: () => connectScreen(null, "pw") } })]); return; }
+  const us = d.choose ? h("input", { type: "text", autocapitalize: "none", autocorrect: "off", autocomplete: "username", placeholder: "Choose a username", style: fieldStyle }) : null;
+  const p1 = h("input", { type: "password", autocomplete: "new-password", placeholder: "Password (at least 8 characters)", style: fieldStyle });
+  const p2 = h("input", { type: "password", autocomplete: "new-password", placeholder: "Type the password again", style: fieldStyle });
+  const msg = h("div", { class: "msg", style: "display:none" }), say = t => { msg.textContent = t; msg.style.display = t ? "" : "none"; };
+  const go = () => oneAtATime(async () => {
+    say("");
+    if (p1.value !== p2.value) { say("The two passwords are different."); return; }
+    let r; try { r = await api("/api/web_register", { h: hd, username: us ? us.value : "", password: p1.value }); } catch (e) { say(e.message); return; }
+    try { localStorage.setItem("wk:web", r.key); } catch (e) {}
+    location.replace("/web");
+  });
+  p2.addEventListener("keydown", e => { if (e.key === "Enter") go(); });
+  show([h("h1", { text: d.has ? "🔐 Choose a new password" : "🔐 Make your password" }),
+    d.choose ? h("div", { class: "hint", text: "You don't have a Telegram username, so choose one. You'll use it to sign in. Letters, numbers, _ and . (3 to 32 characters)." })
+             : h("div", { class: "card" }, h("div", { class: "hint", text: "Your username is" }), h("b", { style: "font-size:20px", "data-ugc": "1", text: "@" + d.username }), h("div", { class: "hint", text: d.has ? "Same as before." : "It's your Telegram username." })),
+    us, p1, p2, msg, h("button", { class: "cta", text: "Save and open my photos", on: { click: go } }),
+    d.has ? h("div", { class: "hint", text: "A new password signs out your other devices." }) : h("div", { class: "hint", text: "Next time, open this website and sign in with your username and password. The bot will ask you in Telegram to confirm it's you." })]);
+}
+async function siteScreen() {
+  const addr = location.origin + "/web";
+  const msg = h("div", { class: "msg", style: "display:none" }), say = t => { msg.textContent = t; msg.style.display = t ? "" : "none"; };
+  const open = () => oneAtATime(async () => {
+    say("");
+    let r; try { r = await api("/api/web_handoff", {}); } catch (e) { say(e.message); return; }
+    if (tg && tg.openLink) tg.openLink(r.url); else window.open(r.url, "_blank");
+  });
+  const acct = async (action, ask) => { if (!await confirmAsk(ask)) return; try { await api("/api/web_account", { action }); } catch (e) { say(e.message); return; } HOME = null; back(); };
+  show([backBtn(), h("h1", { text: "🌐 Website" }),
+    h("div", { class: "hint", text: "Look at your photos on a computer or tablet, in any browser, without Telegram. Open this address and sign in:" }),
+    h("div", { class: "card", style: "word-break:break-all;user-select:all", text: addr }),
+    HOME.site ? h("div", { class: "card" }, h("div", { class: "hint", text: "Your username" }), h("b", { "data-ugc": "1", text: "@" + HOME.site }))
+              : h("div", { class: "hint", text: "First, make a password. Your username will be your Telegram username (or you can choose one)." }),
+    msg, h("button", { class: "cta", text: HOME.site ? "🔑 Change my website password" : "🌐 Open the website and make a password", on: { click: open } }),
+    HOME.site ? h("button", { class: "cta alt", text: "🚪 Sign out all my website devices", on: { click: () => acct("logout", "Sign out every device where you are signed in on the website?") } }) : null,
+    HOME.site ? h("button", { class: "cta danger", text: "🗑 Delete my website login", on: { click: () => acct("remove", "Delete your website username and password? You can make a new one later.") } }) : null,
+    h("div", { class: "hint", text: "Every time you sign in on the website, the bot asks you in Telegram to confirm it's you." })]);
 }
 async function guestStart() {
+  if (ON_WEB && WEBKEY) {
+    loading();
+    try { await api("/api/home"); } catch (e) {
+      if (e.status === 401 || e.status === 403) { try { localStorage.removeItem("wk:web"); } catch (x) {} connectScreen("You were signed out. Please sign in again.", "pw"); return; }
+      show([h("h1", { text: "Can't open the photos" }), h("div", { class: "msg", text: e.message }), h("button", { class: "cta", text: "Try again", on: { click: guestStart } })]); return;
+    }
+    setTab("home"); maybeOfferApp(); return;
+  }
   if (GUEST_TOKEN === "web") {
     if (!guestKey) { connectScreen(); return; }
     loading();
@@ -1666,7 +1775,7 @@ async function guestStart() {
   } catch (e) { show([h("h1", { text: "This link doesn't work" }), h("div", { class: "msg", text: e.message })]); return; }
   setTab("home"); maybeOfferApp();
 }
-if (IS_GUEST) guestStart(); else
+if (HAND) handoffScreen(HAND); else if (GUEST_TOKEN) guestStart(); else
 if (new URLSearchParams(location.search).get("helper") === "1" && initData && !IS_ADMIN) helperScreen(); else
 setTab("home");
 </script>

@@ -735,6 +735,7 @@ def app_row() -> list:
 def menu_markup(extra: list | None = None) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         app_row()
+        + ([[InlineKeyboardButton("🌐 Open on the website", callback_data="wb:go")]] if WEBAPP_URL else [])
         + (extra or [])
         + [
             [
@@ -6093,7 +6094,7 @@ ADMIN_ACTIONS = {
     "overview", "family", "photo_best", "photo_remove", "photo_edit", "photo_vis", "sugs", "sug_act",
     "ann_preview", "ann_send", "ann_schedule", "scheduled", "sched_cancel",
     "tries", "try_add", "try_dismiss", "try_unlock", "tries_clear",
-    "fam_add", "fam_code", "people", "users", "upline", "upline_set", "not_opened", "remind", "web_link", "web_make", "web_off", "web_child", "web_people", "a2hs", "groups", "group_save", "group_delete", "group_member", "comments", "thread", "chat_send", "chat_clear", "chat_msg_delete", "feedback", "feedback_read", "feedback_delete", "invite", "invite_send", "fam_delete", "member_unlink", "person_add", "best_clear",
+    "fam_add", "fam_code", "people", "users", "web_acct", "upline", "upline_set", "not_opened", "remind", "web_link", "web_make", "web_off", "web_child", "web_people", "a2hs", "groups", "group_save", "group_delete", "group_member", "comments", "thread", "chat_send", "chat_clear", "chat_msg_delete", "feedback", "feedback_read", "feedback_delete", "invite", "invite_send", "fam_delete", "member_unlink", "person_add", "best_clear",
 }
 
 
@@ -6485,6 +6486,7 @@ async def _admin_api(bot, action: str, req: dict) -> tuple[int, dict]:
         rows = await users_rows(gid)
         keep = await filter_tids(gid) if gid else None
         fams = {f["thread_id"]: f.get("name", "?") for f in await db.families.find().to_list()}
+        accts = {a["_id"]: a for a in await db.webaccts.find().to_list()}
         web = []  # (people who use the website, with no Telegram account)
         for wp in await db.webpeople.find().sort("created", -1).to_list():
             if wp["tid"] not in fams or (keep is not None and wp["tid"] not in keep):
@@ -6495,8 +6497,22 @@ async def _admin_api(bot, action: str, req: dict) -> tuple[int, dict]:
                         "status": f"🌐 Web access · {fams[wp['tid']]} family · {state} · opened {row['opened']}", "linked": True, "at": ""})
         return 200, {"total": len(rows), "shown": min(len(rows), 300), "inFamily": sum(1 for p in rows if p["linked"]), "webTotal": len(web),
                      "rows": [{"id": p["id"], "name": p["name"], "username": p["username"], "status": p["status"], "tid": p.get("tid") if p["linked"] else None,
-                               "fam": fams.get(p.get("tid"), ""), "linked": p["linked"], "at": fmt_when(p["at"]) if p.get("at") else ""} for p in rows[:300]],
+                               "fam": fams.get(p.get("tid"), ""), "linked": p["linked"], "at": fmt_when(p["at"]) if p.get("at") else "",
+                               "site": (accts[p["id"]]["username"] if p["id"] in accts and accts[p["id"]].get("pw") else ""),
+                               "siteOpened": ago_text(accts[p["id"]].get("last_open")) if p["id"] in accts and accts[p["id"]].get("last_open") else ""} for p in rows[:300]],
                      "web": web[:300]}
+
+    if action == "web_acct":  # a parent's website login: sign out their devices, or delete the login
+        uid = _int(req.get("uid"), 1)
+        if uid is None or req.get("do") not in ("logout", "remove"):
+            return bad
+        if not await db.webaccts.find_one({"_id": uid}):
+            return gone
+        if req["do"] == "remove":
+            await db.webaccts.delete_one({"_id": uid})
+        else:
+            await db.webaccts.update_one({"_id": uid}, {"$inc": {"gen": 1}})
+        return 200, {"ok": True}
 
     if action == "tries":
         rows = await db.tries.find().sort("at", -1).to_list()
@@ -6713,6 +6729,79 @@ async def _admin_api(bot, action: str, req: dict) -> tuple[int, dict]:
     return 404, {"error": "Not found"}
 
 
+WEB_HAND_MIN = 10
+
+
+async def web_handoff_make(uid: int, tg_user: dict) -> tuple[int, dict]:
+    """A one-use pass (10 minutes) that opens the website for a linked parent: they make their password there."""
+    if not WEBAPP_URL:
+        return 503, {"error": "The website isn't set up yet."}
+    if is_owner(uid):
+        return 403, {"error": "This is for clients."}
+    u = await db.users.find_one({"_id": uid})
+    if not u or u.get("pending") or not await db.families.find_one({"thread_id": u.get("thread_id")}):
+        return 403, {"error": "Please link your account first."}
+    tok = secrets.token_urlsafe(24)
+    await db.webhand.delete_many({"uid": uid})
+    await db.webhand.insert_one({"_id": tok, "uid": uid, "username": (tg_user.get("username") or u.get("username") or "").lower(),
+                                 "name": tg_user.get("first_name") or u.get("first_name") or "",
+                                 "exp": datetime.now(timezone.utc) + timedelta(minutes=WEB_HAND_MIN)})
+    return 200, {"url": f"{WEBAPP_URL}/web?h={tok}", "has": bool(await db.webaccts.find_one({"_id": uid}))}
+
+
+async def on_website_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    await q.answer()
+    status, data = await web_handoff_make(q.from_user.id, {"username": q.from_user.username or "", "first_name": q.from_user.first_name or ""})
+    if status != 200:
+        await q.message.reply_text(data["error"])
+        return
+    await q.message.reply_text(
+        "🌐 Tap the button to open the website. " + ("Choose a new password there." if data["has"] else
+        "You'll make a password there. Your username will be your Telegram username (or you can choose one).") + f"\n\nThe button works once and expires in {WEB_HAND_MIN} minutes.",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🌐 Open the website", url=data["url"])]]))
+
+
+async def web_login_prompt(bot, uid: int, login_id: str, device: str) -> bool:
+    try:
+        await bot.send_message(
+            uid, f"🔐 Is this you signing in on the website?\n\nDevice: {device}\nTime: {fmt_when(datetime.now(timezone.utc))}\n\nOnly tap Yes if you just did this.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✅ Yes, it's me", callback_data=f"wl:y:{login_id}"),
+                                                InlineKeyboardButton("❌ No, it's not me", callback_data=f"wl:n:{login_id}")]]))
+        return True
+    except TelegramError:
+        return False
+
+
+async def on_weblogin_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    _, ans, lid = q.data.split(":")
+    d = await db.weblogins.find_one({"_id": lid})
+
+    async def show(text: str) -> None:
+        try:
+            await q.edit_message_text(text)
+        except TelegramError:
+            pass
+
+    if not d or d["uid"] != q.from_user.id:
+        await q.answer("This isn't yours to answer.", show_alert=True)
+        return
+    await q.answer()
+    exp = as_utc(d.get("exp"))
+    if d["status"] != "wait" or not exp or exp < datetime.now(timezone.utc):
+        await show("⌛ That sign-in request already ended.")
+        return
+    if ans == "y":
+        await db.weblogins.update_one({"_id": lid}, {"$set": {"status": "ok"}})
+        await show("✅ Approved. The website is opening now.")
+        return
+    await db.weblogins.update_one({"_id": lid}, {"$set": {"status": "no"}})
+    await db.webaccts.update_one({"_id": d["uid"]}, {"$unset": {"pw": ""}, "$inc": {"gen": 1}})  # (the password is cancelled and every website device signed out)
+    await show("🚫 Blocked. Your website password was cancelled and any website devices were signed out. "
+               "If you want to use the website again, tap “🌐 Open on the website” to make a new password.")
+
+
 class WebDeps:
     """What the Mini App's web server needs from the bot (see webapp.WebApp)."""
 
@@ -6728,6 +6817,12 @@ class WebDeps:
 
     def bot(self):
         return self.app.bot
+
+    async def web_handoff(self, uid: int, user: dict) -> tuple[int, dict]:
+        return await web_handoff_make(uid, user)
+
+    async def web_login_prompt(self, uid: int, login_id: str, device: str) -> bool:
+        return await web_login_prompt(self.app.bot, uid, login_id, device)
 
     def is_owner(self, uid: int) -> bool:
         return is_owner(uid)
@@ -6941,6 +7036,9 @@ async def post_init(app: Application) -> None:
     await safe_index(lambda: db.webpeople.create_index("tid"))
     await safe_index(lambda: db.webpeople.create_index("token"))
     await safe_index(lambda: db.webcodes.create_index("exp", expireAfterSeconds=0))
+    await safe_index(lambda: db.webhand.create_index("exp", expireAfterSeconds=0))
+    await safe_index(lambda: db.weblogins.create_index("exp", expireAfterSeconds=3600))
+    await safe_index(lambda: db.webaccts.create_index("username"))
     await safe_index(lambda: db.tries.create_index("at", expireAfterSeconds=2592000))  # forget login attempts after 30 days
     await safe_index(lambda: db.starters.create_index("seen", expireAfterSeconds=180 * 86400))  # forget old Start presses after ~6 months
     await safe_index(lambda: db.uitr.create_index("at", expireAfterSeconds=180 * 86400))  # (saved UI translations)
@@ -7032,6 +7130,8 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(on_newfamily_button, pattern=r"^nf:(new|yes|no)$"))
     app.add_handler(CallbackQueryHandler(on_newfamily_owner, pattern=r"^nfa:(c|r|e):[0-9a-f]{8}(:\d+)?$"))
     app.add_handler(CallbackQueryHandler(on_notify_button, pattern=r"^nt:(y|n):[0-9a-f]{8}$"))
+    app.add_handler(CallbackQueryHandler(on_website_button, pattern=r"^wb:go$"))
+    app.add_handler(CallbackQueryHandler(on_weblogin_button, pattern=r"^wl:(y|n):[0-9a-f]{24}$"))
     app.add_handler(CommandHandler("announce", announce_cmd, filters=priv))
     app.add_handler(CommandHandler("unlink", unlink_private, filters=priv))
     app.add_handler(CommandHandler("admin", admin_cmd, filters=priv))
