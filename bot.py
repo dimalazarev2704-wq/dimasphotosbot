@@ -6481,10 +6481,22 @@ async def _admin_api(bot, action: str, req: dict) -> tuple[int, dict]:
         return 200, {"ok": True}
 
     if action == "users":
-        rows = await users_rows(req.get("group") if isinstance(req.get("group"), str) else None)
-        return 200, {"total": len(rows), "shown": min(len(rows), 300), "inFamily": sum(1 for p in rows if p["linked"]),
-                     "rows": [{"id": p["id"], "name": p["name"], "username": p["username"], "status": p["status"],
-                               "linked": p["linked"], "at": fmt_when(p["at"]) if p.get("at") else ""} for p in rows[:300]]}
+        gid = req.get("group") if isinstance(req.get("group"), str) else None
+        rows = await users_rows(gid)
+        keep = await filter_tids(gid) if gid else None
+        fams = {f["thread_id"]: f.get("name", "?") for f in await db.families.find().to_list()}
+        web = []  # (people who use the website, with no Telegram account)
+        for wp in await db.webpeople.find().sort("created", -1).to_list():
+            if wp["tid"] not in fams or (keep is not None and wp["tid"] not in keep):
+                continue
+            row = await web_person_row(wp)
+            state = "switched off" if not row["on"] else ("expired" if row["expired"] else "on")
+            web.append({"id": wp["_id"], "name": wp["name"], "username": "", "web": True, "tid": wp["tid"], "fam": fams[wp["tid"]],
+                        "status": f"🌐 Web access · {fams[wp['tid']]} family · {state} · opened {row['opened']}", "linked": True, "at": ""})
+        return 200, {"total": len(rows), "shown": min(len(rows), 300), "inFamily": sum(1 for p in rows if p["linked"]), "webTotal": len(web),
+                     "rows": [{"id": p["id"], "name": p["name"], "username": p["username"], "status": p["status"], "tid": p.get("tid") if p["linked"] else None,
+                               "fam": fams.get(p.get("tid"), ""), "linked": p["linked"], "at": fmt_when(p["at"]) if p.get("at") else ""} for p in rows[:300]],
+                     "web": web[:300]}
 
     if action == "tries":
         rows = await db.tries.find().sort("at", -1).to_list()

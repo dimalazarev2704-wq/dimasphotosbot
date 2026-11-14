@@ -1334,13 +1334,17 @@ async function usersScreen() {
   loading(); const my0 = navId;
   const gs = await groupList(); if (my0 !== navId) return; groupChips(gs, "users", () => {});
   const d = await adminLoad("/api/admin/users", gf.users ? { group: gf.users } : {}, usersScreen); if (!d) return;
+  const openWeb = (tid, name) => push(() => peopleScreen(Object.assign(ownerWp(tid, name), { tid })));
   show([backBtn(), h("h1", { text: "👥 Users" }), groupChips(gs, "users", usersScreen),
-    h("div", { class: "hint", text: d.total + " in total" + (d.shown < d.total ? " (showing the newest " + d.shown + ")" : "") + " · " + d.inFamily + " in a family · " + (d.total - d.inFamily) + " not yet" }),
-    d.rows.length ? d.rows.map(p => h("div", { class: "card" },
+    h("div", { class: "hint", text: d.total + " in total" + (d.shown < d.total ? " (showing the newest " + d.shown + ")" : "") + " · " + d.inFamily + " in a family · " + (d.total - d.inFamily) + " not yet" + (d.webTotal ? " · " + d.webTotal + " on the website" : "") }),
+    ...(d.web && d.web.length ? [h("h2", { text: "🌐 Web access (no Telegram)" }), ...d.web.map(p => h("div", { class: "card", style: "cursor:pointer", on: { click: () => push(() => personScreen(Object.assign(ownerWp(p.tid, p.fam), { tid: p.tid }), p.id)) } },
+      h("b", { "data-ugc": "1", text: p.name }), h("div", { class: "hint", text: p.status }), h("div", { class: "hint", text: "Tap for their settings ›" })))] : []),
+    ...(d.rows.length ? [h("h2", { text: "Telegram" }), ...d.rows.map(p => h("div", { class: "card" },
       h("b", { text: p.name || "(no name)" }), p.username ? " @" + p.username : "",
       h("div", { class: "hint", text: p.status }),
-      h("div", { class: "hint", text: "ID " + p.id + (p.at ? " · started " + p.at : "") })))
-      : h("div", { class: "msg", text: gf.users ? "Nobody in this group yet." : "Nobody has started the bot yet." })]);
+      h("div", { class: "hint", text: "ID " + p.id + (p.at ? " · started " + p.at : "") }),
+      p.tid ? h("div", { class: "btns" }, h("button", { class: "alt", text: "🌐 Web access for this family", on: { click: () => openWeb(p.tid, p.fam) } })) : null))]
+      : [h("div", { class: "msg", text: gf.users ? "Nobody in this group yet." : "Nobody has started the bot yet." })])]);
 }
 async function uplineScreen() {
   const d = await adminLoad("/api/admin/upline", {}, uplineScreen); if (!d) return;
