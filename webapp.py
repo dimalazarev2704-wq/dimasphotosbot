@@ -299,7 +299,7 @@ class WebApp:
         """Too many wrong connection codes from one place (or from everywhere) lately?"""
         db = self.d.db()
         now = time.time()
-        for key, cap in ((f"web:ip:{ip}", 8), ("web:all", 200)):
+        for key, cap in ((f"web:ip:{ip}", 8), ("web:all", 1000)):
             d = await db.attempts.find_one({"_id": key}) or {}
             if d.get("n", 0) >= cap and now - d.get("first", 0) < 3600:
                 return True
@@ -311,7 +311,7 @@ class WebApp:
         for key in (f"web:ip:{ip}", "web:all"):
             d = await db.attempts.find_one({"_id": key}) or {}
             if not d or now - d.get("first", 0) >= 3600:
-                await db.attempts.update_one({"_id": key}, {"$set": {"n": 1, "first": now}}, upsert=True)
+                await db.attempts.update_one({"_id": key}, {"$set": {"n": 1, "first": now, "at": datetime.now(timezone.utc)}}, upsert=True)
             else:
                 await db.attempts.update_one({"_id": key}, {"$inc": {"n": 1}})
 
@@ -354,7 +354,8 @@ class WebApp:
         ip = hashlib.sha256((headers.get("x-forwarded-for", "?").split(",")[0].strip() or "?").encode()).hexdigest()[:16]
         db = self.d.db()
         now = time.time()
-        keys = ((f"pin:{pid}", 5), (f"pin:ip:{ip}", 15), ("pin:all", 300))
+        who = pid if isinstance(pid, int) and not isinstance(pid, bool) and pid < 0 else "x"  # (never build a key from whatever was sent)
+        keys = ((f"pinlogin:{who}", 5), (f"pinlogin:ip:{ip}", 15), ("pinlogin:all", 1000))
         for key, cap in keys:
             d = await db.attempts.find_one({"_id": key}) or {}
             if d.get("n", 0) >= cap and now - d.get("first", 0) < 3600:
@@ -364,11 +365,11 @@ class WebApp:
             for key, _ in keys:
                 d = await db.attempts.find_one({"_id": key}) or {}
                 if not d or now - d.get("first", 0) >= 3600:
-                    await db.attempts.update_one({"_id": key}, {"$set": {"n": 1, "first": now}}, upsert=True)
+                    await db.attempts.update_one({"_id": key}, {"$set": {"n": 1, "first": now, "at": datetime.now(timezone.utc)}}, upsert=True)
                 else:
                     await db.attempts.update_one({"_id": key}, {"$inc": {"n": 1}})
             return err(404, "That PIN isn't right. Please try again, or ask for a new code.")
-        await db.attempts.delete_one({"_id": f"pin:{pid}"})
+        await db.attempts.delete_one({"_id": f"pinlogin:{pid}"})
         return jresp({"key": self.guest_key(p["_id"], p.get("gen", 0)), "pid": p["_id"], "name": p["name"]})
 
     async def vis(self, tid: int, uid: int) -> dict:

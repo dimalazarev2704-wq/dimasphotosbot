@@ -3645,6 +3645,9 @@ async def web_people_api(tid: int, req: dict, by_owner: bool = False) -> tuple[i
             return 404, {"error": "That person no longer exists."}
         if p.get("locked") and not by_owner:
             return 403, {"error": f"🔒 {OWNER_NAME} locked {p['name']}'s settings. Please ask {OWNER_NAME} to change this."}
+        until = as_utc(p.get("until")) if p.get("until") else None
+        if not p.get("on", True) or (until and until < datetime.now(timezone.utc)):
+            return 400, {"error": f"{p['name']}'s access is switched off or has expired. Switch it on (and move the expiry) first, then make a code."}
         await db.webcodes.delete_many({"pid": p["_id"]})  # (one code at a time per person)
         for _ in range(20):
             code = f"{secrets.randbelow(10 ** 8):08d}"
@@ -6941,6 +6944,7 @@ async def post_init(app: Application) -> None:
     await safe_index(lambda: db.webpeople.create_index("tid"))
     await safe_index(lambda: db.webpeople.create_index("token"))
     await safe_index(lambda: db.webcodes.create_index("exp", expireAfterSeconds=0))
+    await safe_index(lambda: db.attempts.create_index("at", expireAfterSeconds=7200))  # (website code/PIN guess counters forget themselves; the helper ones have no "at")
     await safe_index(lambda: db.tries.create_index("at", expireAfterSeconds=2592000))  # forget login attempts after 30 days
     await safe_index(lambda: db.starters.create_index("seen", expireAfterSeconds=180 * 86400))  # forget old Start presses after ~6 months
     await safe_index(lambda: db.uitr.create_index("at", expireAfterSeconds=180 * 86400))  # (saved UI translations)
