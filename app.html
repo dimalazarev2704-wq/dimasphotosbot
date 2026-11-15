@@ -128,6 +128,8 @@ if (GUEST_TOKEN === "web") { try { const k = new URLSearchParams(location.search
 let guestKey = "";
 try { if (GUEST_TOKEN) guestKey = localStorage.getItem("gk:" + GUEST_TOKEN) || ""; } catch (e) {}
 const IS_GUEST = !!GUEST_TOKEN;
+const ON_WEB = GUEST_TOKEN === "web";  // (the one web address, /web)
+const NO_TG = !!GUEST_TOKEN;  // (in a plain browser: no Telegram chat to send things to)
 const $main = document.getElementById("main"), $tabs = document.getElementById("tabs");
 let HOME = null, tab = "home", stack = [];
 let IS_ADMIN = false, adminFam = null, adminFamName = "", dirty = false;  // (the owner's pick lives only in this open app)
@@ -374,6 +376,7 @@ function drawTabs() {
     if (HOME && HOME.best) defs.push(["best", "⭐", "Best"]);
     if (!IS_GUEST) defs.push(["sug", "💡", "Suggested"]);
     if (!IS_ADMIN && HOME && HOME.favs > 0) defs.push(["fav", "♥", "Favorites"]);  // (only once they have a heart)
+    if (GUEST_TOKEN) defs.push(["settings", "⚙️", "Settings"]);  // (on the website: logging in, text size, add to home screen)
   }
   $tabs.replaceChildren(...defs.map(([k, ic, label]) =>
     h("button", { class: k === tab ? "on" : "", on: { click: () => { haptic(); setTab(k); } } }, h("span", { class: "ic", text: ic }), label)));
@@ -419,19 +422,41 @@ async function homeScreen() {
       h("button", { class: "cta", on: { click: () => seeAll(w.mode) }, text: w.mode === "new" ? "See all new photos" : "See all photos" })));
   }
   if (!IS_ADMIN && !IS_GUEST && HOME.child) nodes.push(h("button", { class: "cta alt", text: "🌐 Web access", on: { click: () => push(childScreen) } }));
-  if (canAddHome()) nodes.push(h("button", { class: "cta alt", text: "📲 Add to home screen", on: { click: () => {
+  if (!NO_TG && canAddHome()) nodes.push(h("button", { class: "cta alt", text: "📲 Add to home screen", on: { click: () => {
     if (tgHome() && tg.checkHomeScreenStatus) { try { tg.checkHomeScreenStatus(st => { if (st === "added") alertMsg("It's already on your home screen."); else offerHomeScreen(); }); return; } catch (e) {} }
     offerHomeScreen(); } } }));
-  if (GUEST_TOKEN === "web") nodes.push(h("button", { class: "cta alt", text: HOME.pin ? "🔐 Change or remove my PIN" : "🔐 Set a PIN", on: { click: () => push(pinSetScreen) } }),
-    h("button", { class: "cta alt", text: "🚪 Log out of this device", on: { click: async () => {
-      if (!await confirmAsk("Log out of this device?" + (HOME.pin ? " You can log back in with your PIN." : " To get back in you will need a new code. You can set a PIN first so you can log back in yourself."))) return;
-      try { if (HOME.pin) localStorage.setItem("who:web", JSON.stringify(Object.assign(JSON.parse(localStorage.getItem("who:web") || "{}"), { pin: true }))); else localStorage.removeItem("who:web"); localStorage.removeItem("gk:web"); } catch (e) {}
-      guestKey = ""; HOME = null; stack = []; connectScreen(); } } }));
   if (!IS_ADMIN && !IS_GUEST) nodes.push(h("button", { class: "cta alt", text: "💬 Chat with " + (HOME.owner || "the photographer"), on: { click: () => push(commentScreen) } }),
     h("button", { class: "cta alt", text: "📝 Send feedback", on: { click: () => push(feedbackScreen) } }),
     h("button", { class: "cta alt", text: "🌐 Language", on: { click: () => push(() => langScreen(false)) } }));
   nodes.push(footer());
   show(nodes);
+}
+function settingsScreen() {  // (the website's Settings tab)
+  if (!HOME) { setTab("home"); return; }  // (the welcome loads first, then the tabs know who this is)
+  const mine = ON_WEB ? [
+    h("h2", { text: "Logging in" }),
+    h("div", { class: "hint", text: "Optional. A PIN or a passkey lets you get back in on this or a new device without asking for a code." }),
+    ...settingsLogin()] : [];
+  show([h("h1", { text: "⚙️ Settings" }),
+    h("div", { class: "card" }, h("b", { "data-ugc": "1", text: HOME.first ? HOME.first : "You" }),
+      h("div", { class: "hint", "data-ugc": "1", text: HOME.family ? "The " + HOME.family + " family's photos" : "" }),
+      h("div", { class: "hint", text: HOME.dl === false ? "⬇️ Downloads are off for you" : "⬇️ You can download photos" })),
+    h("h2", { text: "Reading" }),
+    h("div", { style: "display:flex;gap:8px" },
+      h("button", { class: "cta alt", on: { click: () => { size = Math.max(14, size - 2); applySize(); } }, text: "A−  Smaller text" }),
+      h("button", { class: "cta alt", on: { click: () => { size = Math.min(30, size + 2); applySize(); } }, text: "A+  Bigger text" })),
+    ...mine,
+    ...(canAddHome() ? [h("h2", { text: "On this device" }), h("button", { class: "cta alt", text: "📲 Add to home screen", on: { click: offerHomeScreen } })] : []),
+    h("h2", { text: "Help" }), h("button", { class: "cta alt", text: "❓ How this works", on: { click: () => push(helpScreen) } }),
+    footer()]);
+}
+function settingsLogin() {
+  return [h("button", { class: "cta alt", text: HOME.pin ? "🔐 Change or remove my PIN" : "🔐 Set a PIN", on: { click: () => push(pinSetScreen) } }),
+    ...(canPasskey() ? [h("button", { class: "cta alt", text: "🔑 Add a passkey (Face ID or fingerprint)", on: { click: () => oneAtATime(async () => { try { await addPasskey(); } catch (e) { await alertMsg("⚠️ " + passkeyMsg(e)); return; } await alertMsg("Passkey saved. Next time, tap “Log in with a passkey”. No typing needed."); }) } })] : []),
+    h("button", { class: "cta alt", text: "🚪 Log out of this device", on: { click: async () => {
+      if (!await confirmAsk("Log out of this device?" + (HOME.pin ? " You can log back in with your PIN." : " To get back in you will need a new code. You can set a PIN first so you can log back in yourself."))) return;
+      try { if (HOME.pin) localStorage.setItem("who:web", JSON.stringify(Object.assign(JSON.parse(localStorage.getItem("who:web") || "{}"), { pin: true }))); else localStorage.removeItem("who:web"); localStorage.removeItem("gk:web"); } catch (e) {}
+      guestKey = ""; HOME = null; stack = []; connectScreen(); } } })];
 }
 let LANGS_DATA = null;
 async function langScreen(first) {
@@ -584,6 +609,7 @@ const ROOTS = {
   sug: suggestedScreen,
   fav: () => gridScreen("♥ My favorites", { mode: "fav" }),
   admin: () => adminHome(),
+  settings: settingsScreen,
 };
 
 // ---------- full-screen viewer (swipe, pinch, double-tap) ----------
@@ -900,7 +926,7 @@ async function personScreen(wp, pid) {
       h("h2", { text: "What they can do" }),
       toggle("Access is on", p.on, "on"),
       toggle("Can download photos", p.dl, "dl"),
-      toggle("Can log in with their own PIN on a new device (no parent needed)", p.pinany, "pinany"),
+      toggle("Can log in by themselves (PIN or passkey) on a new device, no parent needed", p.pinany, "pinany"),
       h("h2", { text: "Which photos can they see?" }),
       scopeBtn("all", "All photos"), scopeBtn("best", "⭐ Best shots only"),
       scopeBtn("dates", p.scope === "dates" ? "📅 Chosen days (" + p.dates.length + ")" : "📅 Chosen days…"),
@@ -1612,43 +1638,69 @@ function offerHomeScreen() {
   sheet.append(card); document.body.append(sheet);
 }
 function webWho() { try { const w = JSON.parse(localStorage.getItem("who:web") || "null"); return w && w.pin && typeof w.pid === "number" ? w : null; } catch (e) { return null; } }
+const b64u = buf => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+const unb64u = s => Uint8Array.from(atob(s.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(s.length / 4) * 4, "=")), c => c.charCodeAt(0));
+const canPasskey = () => !!(window.PublicKeyCredential && navigator.credentials && window.isSecureContext);
+const passkeyMsg = e => e && (e.name === "NotAllowedError" || e.name === "AbortError") ? "That was cancelled. Please try again." : e && e.name === "InvalidStateError" ? "This device already has a passkey saved." : (e && e.message) || "Something went wrong.";
+async function addPasskey() {  // (Face ID / fingerprint / device PIN: after this, no typing at all)
+  const o = await api("/api/passkey_begin", {});
+  const cred = await navigator.credentials.create({ publicKey: { challenge: unb64u(o.challenge), rp: o.rp, user: { id: unb64u(o.user.id), name: o.user.name, displayName: o.user.displayName },
+    pubKeyCredParams: [{ type: "public-key", alg: -7 }, { type: "public-key", alg: -257 }], authenticatorSelection: { residentKey: "required", requireResidentKey: true, userVerification: "required" },
+    attestation: "none", timeout: 120000, excludeCredentials: o.exclude.map(id => ({ type: "public-key", id: unb64u(id) })) } });
+  await api("/api/passkey_finish", { challenge: o.challenge, clientDataJSON: b64u(cred.response.clientDataJSON), attestationObject: b64u(cred.response.attestationObject) });
+}
+function passkeyButton() {
+  if (!canPasskey()) return null;
+  return h("button", { class: "cta alt", text: "🔑 Log in with a passkey", on: { click: () => oneAtATime(async () => {
+    let r; try {
+      const o = await api("/api/passkey_login_begin", {});
+      const a = await navigator.credentials.get({ publicKey: { challenge: unb64u(o.challenge), rpId: o.rpId, userVerification: "required", timeout: 120000 } });
+      r = await api("/api/passkey_login", { challenge: o.challenge, id: b64u(a.rawId), clientDataJSON: b64u(a.response.clientDataJSON), authenticatorData: b64u(a.response.authenticatorData), signature: b64u(a.response.signature) });
+    } catch (e) { await alertMsg("⚠️ " + passkeyMsg(e)); return; }
+    guestKey = r.key; try { localStorage.setItem("gk:web", guestKey); localStorage.setItem("who:web", JSON.stringify({ pid: r.pid, name: r.name })); } catch (e) {}
+    HOME = null; guestStart();
+  }) } });
+}
+const pinBox = type => h("input", { type, inputmode: "numeric", autocomplete: "off", maxlength: "6", placeholder: "••••••", style: "width:100%;box-sizing:border-box;font-size:30px;text-align:center;letter-spacing:8px;padding:12px;margin:12px 0" });
 function pinLoginScreen(w, note) {  // (this device logged out, and the person set a PIN: they can come back in by themselves)
-  const inp = h("input", { type: "password", inputmode: "numeric", autocomplete: "off", maxlength: "4", placeholder: "••••", style: "width:100%;box-sizing:border-box;font-size:34px;text-align:center;letter-spacing:10px;padding:12px;margin:12px 0" });
+  const inp = pinBox("password");
   const go = () => oneAtATime(async () => {
-    if (!/^\d{4}$/.test(inp.value)) { await alertMsg("Please type your 4-digit PIN."); return; }
+    if (!/^\d{6}$/.test(inp.value)) { await alertMsg("Please type your 6-digit PIN."); return; }
     let r; try { r = await api("/api/web_login", { pid: w.pid, pin: inp.value }); } catch (e) { await alertMsg("⚠️ " + e.message); return; }
     guestKey = r.key; try { localStorage.setItem("gk:web", guestKey); } catch (e) {}
     HOME = null; guestStart();
   });
   inp.addEventListener("keydown", e => { if (e.key === "Enter") go(); });
-  show([h("h1", { text: "🔐 Welcome back" }), h("div", { class: "hint", "data-ugc": "1", text: "Type your 4-digit PIN to open the photos." }),
-    note ? h("div", { class: "msg", text: note }) : null, inp, h("button", { class: "cta", text: "Log in", on: { click: go } }),
+  show([h("h1", { text: "🔐 Welcome back" }), h("div", { class: "hint", "data-ugc": "1", text: "Type your 6-digit PIN to open the photos." }),
+    note ? h("div", { class: "msg", text: note }) : null, inp, h("button", { class: "cta", text: "Log in", on: { click: go } }), passkeyButton(),
     h("button", { class: "cta alt", text: "Use a new code instead", on: { click: () => { try { localStorage.removeItem("who:web"); } catch (e) {} connectScreen(); } } })]);
 }
-function pinNewScreen(note) {  // (a new device: no parent needed, just the family, their name and their own PIN)
-  const fam = h("input", { type: "text", autocomplete: "off", autocapitalize: "words", placeholder: "Family name (like Smith)", style: "width:100%;box-sizing:border-box;font-size:18px;padding:12px;margin:6px 0" });
-  const nm = h("input", { type: "text", autocomplete: "off", autocapitalize: "words", placeholder: "My name", style: "width:100%;box-sizing:border-box;font-size:18px;padding:12px;margin:6px 0" });
-  const pn = h("input", { type: "password", inputmode: "numeric", autocomplete: "off", maxlength: "4", placeholder: "••••", style: "width:100%;box-sizing:border-box;font-size:34px;text-align:center;letter-spacing:10px;padding:12px;margin:6px 0" });
+function pinNewScreen(note) {  // (a new device: no parent needed, just the first letter of their name and their own PIN)
+  const nm = h("input", { type: "text", autocomplete: "off", autocapitalize: "characters", maxlength: "30", placeholder: "First letter of my name", style: "width:100%;box-sizing:border-box;font-size:18px;padding:12px;margin:6px 0" });
+  const pn = pinBox("password");
   const go = () => oneAtATime(async () => {
-    if (!fam.value.trim() || !nm.value.trim() || !/^\d{4}$/.test(pn.value)) { await alertMsg("Please type the family name, your name and your 4-digit PIN."); return; }
-    let r; try { r = await api("/api/web_login", { family: fam.value, name: nm.value, pin: pn.value }); } catch (e) { await alertMsg("⚠️ " + e.message); return; }
+    if (!/\p{L}/u.test(nm.value) || !/^\d{6}$/.test(pn.value)) { await alertMsg("Please type the first letter of your name and your 6-digit PIN."); return; }
+    let r; try { r = await api("/api/web_login", { name: nm.value, pin: pn.value }); } catch (e) { await alertMsg("⚠️ " + e.message); return; }
     guestKey = r.key; try { localStorage.setItem("gk:web", guestKey); localStorage.setItem("who:web", JSON.stringify({ pid: r.pid, name: r.name, pin: true })); } catch (e) {}
     HOME = null; guestStart();
   });
   pn.addEventListener("keydown", e => { if (e.key === "Enter") go(); });
-  show([h("h1", { text: "🔐 Log in with my PIN" }), h("div", { class: "hint", text: "Type your family's name, your name and the 4-digit PIN you chose. You'll stay logged in on this device." }),
-    fam, nm, pn, h("button", { class: "cta", text: "Log in", on: { click: go } }),
+  show([h("h1", { text: "🔐 Log in with my PIN" }), h("div", { class: "hint", text: "Type the first letter of your name and the 6-digit PIN you chose. You'll stay logged in on this device." }),
+    nm, pn, h("button", { class: "cta", text: "Log in", on: { click: go } }),
     h("button", { class: "cta alt", text: "I have a code instead", on: { click: () => connectScreen(null, true) } }),
-    h("div", { class: "hint", text: "Don't have a PIN yet? Ask a parent for a code. After you connect, you can choose your own PIN on the home page." })]);
+    h("div", { class: "hint", text: "Don't have a PIN yet? Ask a parent for a code. After you connect, you can choose your own PIN or add a passkey on the home page." })]);
 }
 function pinSetScreen() {
-  const inp = h("input", { type: "password", inputmode: "numeric", autocomplete: "off", maxlength: "4", placeholder: "••••", style: "width:100%;box-sizing:border-box;font-size:34px;text-align:center;letter-spacing:10px;padding:12px;margin:12px 0" });
+  const inp = pinBox("text");
+  const weak = p => /^(\d)\1+$/.test(p) || "0123456789".includes(p) || "9876543210".includes(p) || p.slice(0, 3) === p.slice(3);
+  const suggest = () => { let p; do { p = Array.from(crypto.getRandomValues(new Uint8Array(6)), b => b % 10).join(""); } while (weak(p)); inp.value = p; };
   const save = pin => oneAtATime(async () => {
     try { await api("/api/web_pin", { pin }); } catch (e) { await alertMsg("⚠️ " + e.message); return; }
-    if (HOME) HOME.pin = !!pin; await alertMsg(pin ? "PIN saved. If you log out, you can log back in with it." : "PIN removed."); back();
+    if (HOME) HOME.pin = !!pin; await alertMsg(pin ? "PIN saved. If you log out, you can log back in with it. Write it down somewhere safe." : "PIN removed."); back();
   });
-  show([backBtn(), h("h1", { text: "🔐 Your PIN" }), h("div", { class: "hint", text: "Choose 4 digits. If you log out on this device you can come back in with your PIN, without asking for a new code. Don't share it." }),
-    inp, h("button", { class: "cta", text: "Save PIN", on: { click: () => { if (!/^\d{4}$/.test(inp.value)) { alertMsg("Please type 4 digits."); return; } save(inp.value); } } }),
+  show([backBtn(), h("h1", { text: "🔐 Your PIN" }), h("div", { class: "hint", text: "Choose 6 digits that are hard to guess (not 123456 or your birthday). You can log in with your PIN on any device, so don't share it." }),
+    inp, h("button", { class: "cta alt", text: "🎲 Suggest one for me", on: { click: suggest } }),
+    h("button", { class: "cta", text: "Save PIN", on: { click: () => { if (!/^\d{6}$/.test(inp.value)) { alertMsg("Please type 6 digits."); return; } save(inp.value); } } }),
     HOME && HOME.pin ? h("button", { class: "cta alt", text: "Remove my PIN", on: { click: () => save("") } }) : null]);
 }
 function connectScreen(note, force) {
@@ -1665,6 +1717,7 @@ function connectScreen(note, force) {
   show([h("h1", { text: "📷 Connect this device" }), h("div", { class: "hint", text: "Type the code you were given. You only have to do this once on this device." }),
     note ? h("div", { class: "msg", text: note }) : null, inp, h("button", { class: "cta", text: "Connect", on: { click: go } }),
     h("button", { class: "cta alt", text: "🔐 I have my PIN", on: { click: () => pinNewScreen() } }),
+    passkeyButton(),
     h("div", { class: "hint", text: "No code? Ask the person who shared these photos with you to make one." })]);
 }
 async function guestStart() {

@@ -3,3 +3,4 @@ python-dotenv>=1.0
 pymongo[srv]>=4.13,<5
 tzdata
 Pillow>=10.3
+cryptography>=42

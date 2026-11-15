@@ -1891,6 +1891,33 @@ def note_batch(up: dict, caption: str | None, sent_at: datetime) -> None:
         places.append(loc)
 
 
+SUG_NOTIFY: dict = {}  # (offers made after approving suggested photos: no chat context is at hand, so they wait here)
+
+
+async def suggestion_notify_offer(bot, doc: dict, tids: list, day: str, place: str | None) -> None:
+    """After suggested photos are published: asks the photographer, in the batch's topic, whether to tell the families."""
+    try:
+        fams = [f for f in await db.families.find({"thread_id": {"$in": tids}}).to_list()]
+        people = [u for u in await db.users.find({"thread_id": {"$in": tids}, "pending": {"$ne": True}}).to_list()
+                  if u["_id"] not in (OWNER_ID, doc["from_id"])]
+        if not fams or not people:
+            return
+        token = secrets.token_hex(4)
+        SUG_NOTIFY[token] = {"tid": tids[0], "tids": tids, "group": False, "who": OWNER_ID, "skip": doc["from_id"],
+                             "name": ", ".join(f["name"] for f in fams[:3]) + ("…" if len(fams) > 3 else ""),
+                             "dates": [day] if day else [], "places": [place] if place else []}
+        while len(SUG_NOTIFY) > 20:
+            SUG_NOTIFY.pop(next(iter(SUG_NOTIFY)))
+        n = len(people)
+        who = "the " + fams[0]["name"] + " family" if len(fams) == 1 else "the " + ", ".join(f["name"] for f in fams[:3]) + (" and others" if len(fams) > 3 else "") + " families"
+        await bot.send_message(
+            GROUP_ID, f"📣 Tell {who} that the suggested photos were added? ({n} {'person' if n == 1 else 'people'}, not counting the one who sent them)",
+            message_thread_id=doc.get("topic"),
+            reply_markup=InlineKeyboardMarkup([[_btn("✅ Yes, tell them", f"nt:y:{token}"), _btn("No thanks", f"nt:n:{token}")]]))
+    except (TelegramError, RuntimeError):
+        log.exception("Couldn't offer to tell the family about suggested photos")
+
+
 async def notify_offer(context: ContextTypes.DEFAULT_TYPE, up: dict, who: int):
     """Returns (extra text, buttons) offering to tell the family, or ("", None) if there's no one to tell."""
     if not up or not up.get("count"):
@@ -1931,7 +1958,7 @@ def notify_message(info: dict) -> tuple[str, InlineKeyboardMarkup]:
 async def on_notify_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     q = update.callback_query
     _, action, token = q.data.split(":")
-    info = context.bot_data.get("notify", {}).get(token)
+    info = context.bot_data.get("notify", {}).get(token) or SUG_NOTIFY.get(token)
     if info and q.from_user.id != info["who"]:
         await q.answer("This isn't yours to answer.", show_alert=True)
         return
@@ -1946,7 +1973,8 @@ async def on_notify_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if not info:
         await show("That was already handled (or the bot restarted). If you need to, you can send a message from /admin → 📣 Announce.")
         return
-    context.bot_data["notify"].pop(token, None)
+    context.bot_data.get("notify", {}).pop(token, None)
+    SUG_NOTIFY.pop(token, None)
     if action == "n":
         await show("OK, I won't message them.")
         return
@@ -1954,7 +1982,7 @@ async def on_notify_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     await db.families.update_many({"thread_id": {"$in": info.get("tids") or [info["tid"]]}}, {"$set": {"notified_at": datetime.now(timezone.utc), "reminded": False}})
     sent = failed = 0
     for u in await db.users.find({"thread_id": {"$in": info.get("tids") or [info["tid"]]}, "pending": {"$ne": True}}).to_list():
-        if u["_id"] == info["who"]:
+        if u["_id"] in (info["who"], info.get("skip")):
             continue
         try:
             await send_with_retry(lambda: context.bot.send_message(u["_id"], text, reply_markup=markup), retry_timeouts=True)
@@ -2299,7 +2327,7 @@ async def _process_suggestion(bot, sid: str, action: str, edit) -> None:
     day, place = doc["date"], doc.get("place")
     caption = pretty_date(day) + (f" · {place}" if place else "") + f" · Added by {name}"
     chunks = kind_chunks(doc["items"])  # albums of up to 10 keep Telegram's per-minute limit happy
-    added_to, failed, timed_out = [], False, False
+    added_to, added_tids, failed, timed_out = [], [], False, False
     for tid in targets:
         fam = await db.families.find_one({"thread_id": tid})
         if not fam:
@@ -2354,6 +2382,7 @@ async def _process_suggestion(bot, sid: str, action: str, edit) -> None:
         if failed:
             break
         added_to.append(fam["name"])
+        added_tids.append(tid)
     if failed:
         await edit(
             f"⚠️ I couldn't add everything from {name}. Nothing was deleted from this topic."
@@ -2371,6 +2400,7 @@ async def _process_suggestion(bot, sid: str, action: str, edit) -> None:
         + "."
     )
     await tell_client("🎉 Your suggested photos were added to the gallery. Thank you!")
+    await suggestion_notify_offer(bot, doc, added_tids, day, place)
 
 
 # ---------- the upload line (people the owner trusts to send lots of photos) ----------
@@ -3612,6 +3642,7 @@ async def drop_web_people(tid: int, pid: int | None = None) -> None:
         await db.seen.delete_many({"uid": {"$in": ids}})
         await db.webpeople.delete_many({"_id": {"$in": ids}})
         await db.webcodes.delete_many({"pid": {"$in": ids}})
+        await db.webpasskeys.delete_many({"pid": {"$in": ids}})
 
 
 async def web_person_row(p: dict) -> dict:
@@ -3667,6 +3698,7 @@ async def web_people_api(tid: int, req: dict, by_owner: bool = False) -> tuple[i
         elif action == "newlink":  # disconnect every device of this person (they need a new code to connect again)
             await db.webpeople.update_one({"_id": p["_id"]}, {"$set": {"token": secrets.token_urlsafe(18)}, "$inc": {"gen": 1}, "$unset": {"pin": ""}})
             await db.webcodes.delete_many({"pid": p["_id"]})
+            await db.webpasskeys.delete_many({"pid": p["_id"]})
         else:
             upd = {}
             for k in ("on", "dl", "pinany") + (("locked",) if by_owner else ()):
@@ -6722,6 +6754,7 @@ class WebDeps:
     token = BOT_TOKEN
     copyright = COPYRIGHT
     owner_name = OWNER_NAME
+    site_url = WEBAPP_URL  # (a passkey belongs to exactly this web address)
 
     def __init__(self, app: Application) -> None:
         self.app = app
@@ -6944,6 +6977,8 @@ async def post_init(app: Application) -> None:
     await safe_index(lambda: db.webpeople.create_index("tid"))
     await safe_index(lambda: db.webpeople.create_index("token"))
     await safe_index(lambda: db.webcodes.create_index("exp", expireAfterSeconds=0))
+    await safe_index(lambda: db.webchal.create_index("exp", expireAfterSeconds=0))
+    await safe_index(lambda: db.webpasskeys.create_index("pid"))
     await safe_index(lambda: db.attempts.create_index("at", expireAfterSeconds=7200))  # (website code/PIN guess counters forget themselves; the helper ones have no "at")
     await safe_index(lambda: db.tries.create_index("at", expireAfterSeconds=2592000))  # forget login attempts after 30 days
     await safe_index(lambda: db.starters.create_index("seen", expireAfterSeconds=180 * 86400))  # forget old Start presses after ~6 months

@@ -21,6 +21,8 @@ import time
 from datetime import datetime, timedelta, timezone
 from urllib.parse import parse_qsl, urlsplit
 
+import passkeys
+
 log = logging.getLogger("photobot.web")
 
 INIT_MAX_AGE = 24 * 3600
@@ -226,7 +228,7 @@ class WebApp:
 
     # ---------- web-link visitors ("guests": no Telegram account) ----------
 
-    GUEST_PATHS = {"/api/home", "/api/dates", "/api/places", "/api/photos", "/api/fav", "/api/seen", "/api/a2hs", "/api/web_pin"}
+    GUEST_PATHS = {"/api/home", "/api/dates", "/api/places", "/api/photos", "/api/fav", "/api/seen", "/api/a2hs", "/api/web_pin", "/api/passkey_begin", "/api/passkey_finish"}
     GUEST_MAX = 40  # browsers per family link
 
     def guest_key(self, gid: int, gen: int | None = None) -> str:
@@ -295,6 +297,18 @@ class WebApp:
         await db.guests.insert_one({"_id": gid, "tid": fam["thread_id"], "at": datetime.now(timezone.utc)})
         return jresp({"key": self.guest_key(gid), "family": fam["name"]})
 
+    @staticmethod
+    def ip_of(headers: dict) -> str:
+        return hashlib.sha256((headers.get("x-forwarded-for", "?").split(",")[0].strip() or "?").encode()).hexdigest()[:16]
+
+    @staticmethod
+    def jbody(body: bytes) -> dict | None:
+        try:
+            req = json.loads(body.decode() or "{}")
+            return req if isinstance(req, dict) else None
+        except (ValueError, RecursionError):
+            return None
+
     async def throttled(self, keys) -> bool:
         """Has any of these guess counters (key, cap per hour) run out?"""
         db = self.d.db()
@@ -361,16 +375,19 @@ class WebApp:
 
     @staticmethod
     def weak_pin(pin: str) -> bool:
-        """The PINs a classmate would try first: repeats, runs (1234, 4321), pairs (1212) and a few famous ones."""
+        """The PINs a classmate would try first: repeats, runs (123456, 654321), repeated chunks (121212, 123123) and some famous ones."""
         d = [int(c) for c in pin]
-        steps = {d[i + 1] - d[i] for i in range(3)}
-        return (len(set(pin)) == 1 or steps in ({1}, {-1}) or (pin[:2] == pin[2:] ) or pin in {"1004", "2000", "2001", "6969", "1122", "1313", "2580", "0852", "1230", "9876", "1357", "2468", "4200", "0420", "1337", "0069", "5683"})
+        steps = {d[i + 1] - d[i] for i in range(len(d) - 1)}
+        return (len(set(pin)) == 1 or steps in ({1}, {-1}) or pin[:3] == pin[3:] or pin[:2] * 3 == pin
+                or pin in {"112233", "111222", "123321", "159753", "147258", "258369", "123654", "696969", "000111", "100000", "200000", "520520",
+                           "789456", "999000", "102030", "112358", "246810", "135790", "142536", "159357", "202020", "101010", "010203", "314159"})
 
     def pin_hash(self, pid: int, pin: str) -> str:
         return hmac.new(self.url_secret, f"pin:{pid}:{pin}".encode(), hashlib.sha256).hexdigest()
 
     async def web_login(self, body: bytes, headers: dict) -> Resp:
-        """Log back in on a device that logged out: the person's own 4-digit PIN (they chose it themselves)."""
+        """Log in with a PIN the person chose themselves (6 digits). Either this device already knows them (their id), or it is a new
+        device and they type only the first letter of their name: the PIN has to be unique among the people with that letter."""
         try:
             req = json.loads(body.decode() or "{}")
             if not isinstance(req, dict):
@@ -380,41 +397,123 @@ class WebApp:
         pid, pin = req.get("pid"), re.sub(r"\D", "", str(req.get("pin") or ""))
         ip = hashlib.sha256((headers.get("x-forwarded-for", "?").split(",")[0].strip() or "?").encode()).hexdigest()[:16]
         db = self.d.db()
-        now = time.time()
-        norm = lambda s: " ".join(str(s).split()).casefold()[:60]
-        famn = lambda s: " ".join(re.sub(r"\b(the|family)\b", " ", norm(s)).split())  # ("Smith", "the Smith family" and "SMITH family" are the same)
-        fam_s, name_s = req.get("family"), req.get("name")
-        cands = []
-        if isinstance(fam_s, str) and isinstance(name_s, str) and famn(fam_s) and norm(name_s):  # a new device: family + their name + their PIN
-            nk = "pinlogin:n:" + hashlib.sha256(f"{famn(fam_s)}|{norm(name_s)}".encode()).hexdigest()[:20]
-            keys = [(nk, 5), (f"pinlogin:ip:{ip}", 15), ("pinlogin:all", 1000)]
-            if len(pin) == 4 and not await self.throttled(keys):
-                fams = {f["thread_id"] for f in await db.families.find().to_list() if famn(f.get("name", "")) == famn(fam_s)}
-                for p in await db.webpeople.find({"tid": {"$in": list(fams)}}).to_list():
-                    if norm(p["name"]) == norm(name_s) and p.get("pinany", True) is not False and await self.person_of(p["_id"]):
-                        cands.append(p)
-            who_keys = [(f"pinlogin:{p['_id']}", 5) for p in cands]
-            keys += who_keys
+        initial = lambda s: next((c for c in " ".join(str(s).split()).casefold() if c.isalpha()), "")  # (only the first letter counts, so a misspelled name still works)
+        name_s = req.get("name")
+        by_letter = isinstance(name_s, str) and bool(initial(name_s))
+        if by_letter:
+            letter = initial(name_s)
+            keys = [("pinlogin:n:" + hashlib.sha256(letter.encode()).hexdigest()[:20], 50), (f"pinlogin:ip:{ip}", 15), ("pinlogin:all", 500)]
         else:
             who = pid if isinstance(pid, int) and not isinstance(pid, bool) and pid < 0 else "x"  # (never build a key from whatever was sent)
-            keys = [(f"pinlogin:{who}", 5), (f"pinlogin:ip:{ip}", 15), ("pinlogin:all", 1000)]
-            who_keys = []
-            p = await self.person_of(pid) if who != "x" and len(pin) == 4 else None
-            cands = [p] if p else []
-        if await self.throttled(keys[:3]) or (who_keys and all([await self.throttled([k]) for k in who_keys])):
+            keys = [(f"pinlogin:{who}", 5), (f"pinlogin:ip:{ip}", 15), ("pinlogin:all", 500)]
+        if await self.throttled(keys):
             return err(429, "Too many wrong PINs. Please wait a while, or ask for a new code.")
-        hit = None
-        for p in cands:
-            if p.get("pin") and hmac.compare_digest(p["pin"], self.pin_hash(p["_id"], pin)) and not await self.throttled([(f"pinlogin:{p['_id']}", 5)]):
-                hit = p
-                break
-        if not hit:
+        hits = []
+        if len(pin) == 6:
+            if by_letter:
+                pool = [p for p in await db.webpeople.find({"pin": {"$exists": True}}).to_list() if initial(p["name"]) == letter and p.get("pinany", True) is not False]
+            else:
+                pool = [p for p in [await self.person_of(pid)] if p] if keys[0][0] != "pinlogin:x" else []
+            for p in pool:
+                if p.get("pin") and hmac.compare_digest(p["pin"], self.pin_hash(p["_id"], pin)) and await self.person_of(p["_id"]):
+                    hits.append(p)
+        if len(hits) != 1:  # (nobody, or two people share the PIN: neither gets in, and the answer is the same)
             await self.strike(keys)
-            return err(404, "That PIN isn't right." if "family" not in req else "That family, name or PIN isn't right. Please try again, or ask for a new code.")
-        for k, _ in keys[:1] + who_keys:
-            await db.attempts.delete_one({"_id": k})
-        await db.attempts.delete_one({"_id": f"pinlogin:{hit['_id']}"})
+            return err(404, "That letter or PIN isn't right. Please try again, or ask for a new code." if by_letter else "That PIN isn't right. Please try again, or ask for a new code.")
+        hit = hits[0]
+        if not by_letter:
+            await db.attempts.delete_one({"_id": keys[0][0]})  # (never reset the guess counter of a shared letter: that would let anyone with an account keep guessing)
         return jresp({"key": self.guest_key(hit["_id"], hit.get("gen", 0)), "pid": hit["_id"], "name": hit["name"]})
+
+    # ---------- passkeys (Face ID / fingerprint / device PIN) ----------
+    def rp(self):
+        site = (getattr(self.d, "site_url", "") or "").rstrip("/")
+        host = urlsplit(site).hostname if site else None
+        return (site, host) if host else (None, None)
+
+    async def passkey_begin(self, uid: int) -> Resp:
+        site, rp_id = self.rp()
+        p = await self.person_of(uid)
+        if not site or not p:
+            return err(503, "Passkeys aren't available here.")
+        db = self.d.db()
+        have = await db.webpasskeys.find({"pid": uid}).to_list()
+        if len(have) >= 5:
+            return err(400, "That's the most passkeys you can have (5).")
+        ch = secrets.token_urlsafe(32)
+        await db.webchal.insert_one({"_id": ch, "kind": "reg", "pid": uid, "exp": datetime.now(timezone.utc) + timedelta(minutes=5)})
+        return jresp({"challenge": ch, "rp": {"id": rp_id, "name": f"{self.d.owner_name} Photos"},
+                      "user": {"id": passkeys.b64u(hashlib.sha256(f"p{uid}".encode()).digest()), "name": p["name"], "displayName": p["name"]},
+                      "exclude": [h["_id"] for h in have]})
+
+    async def take_challenge(self, ch, kind: str, pid: int | None = None) -> bool:
+        db = self.d.db()
+        d = await db.webchal.find_one({"_id": ch}) if isinstance(ch, str) and 20 <= len(ch) <= 100 else None
+        if not d:
+            return False
+        await db.webchal.delete_one({"_id": ch})  # (one use)
+        exp = d.get("exp")
+        if exp and exp.tzinfo is None:
+            exp = exp.replace(tzinfo=timezone.utc)
+        return d.get("kind") == kind and (pid is None or d.get("pid") == pid) and bool(exp and exp > datetime.now(timezone.utc))
+
+    async def passkey_finish(self, uid: int, req: dict) -> Resp:
+        site, rp_id = self.rp()
+        if not site or not await self.person_of(uid):
+            return err(503, "Passkeys aren't available here.")
+        db = self.d.db()
+        ch = req.get("challenge")
+        if not await self.take_challenge(ch, "reg", uid):
+            return err(400, "That took too long. Please try again.")
+        try:
+            res = passkeys.verify_registration(req.get("clientDataJSON"), req.get("attestationObject"), ch, site, rp_id)
+        except passkeys.PasskeyError as e:
+            return err(400, str(e))
+        if await db.webpasskeys.find_one({"_id": res["id"]}):
+            return err(400, "That passkey is already saved.")
+        await db.webpasskeys.insert_one({"_id": res["id"], "pid": uid, "key": res["key"], "count": res["count"], "created": datetime.now(timezone.utc)})
+        return jresp({"ok": True})
+
+    async def passkey_login_begin(self, headers: dict) -> Resp:
+        site, rp_id = self.rp()
+        if not site:
+            return err(503, "Passkeys aren't available here.")
+        keys = [(f"pkbegin:{self.ip_of(headers)}", 60)]
+        if await self.throttled(keys):
+            return err(429, "Too many tries. Please wait a while.")
+        await self.strike(keys)
+        ch = secrets.token_urlsafe(32)
+        await self.d.db().webchal.insert_one({"_id": ch, "kind": "auth", "exp": datetime.now(timezone.utc) + timedelta(minutes=5)})
+        return jresp({"challenge": ch, "rpId": rp_id})
+
+    async def passkey_login(self, body: bytes, headers: dict) -> Resp:
+        req = self.jbody(body)
+        if req is None:
+            return err(400, "Bad request")
+        site, rp_id = self.rp()
+        if not site:
+            return err(503, "Passkeys aren't available here.")
+        db = self.d.db()
+        keys = [(f"pklogin:ip:{self.ip_of(headers)}", 20), ("pklogin:all", 500)]
+        if await self.throttled(keys):
+            return err(429, "Too many tries. Please wait a while.")
+        bad = "That passkey didn't work here. Please try again, or ask for a new code."
+        ch, cid = req.get("challenge"), req.get("id")
+        cred = await db.webpasskeys.find_one({"_id": cid}) if isinstance(cid, str) and len(cid) <= 1400 else None
+        if not await self.take_challenge(ch, "auth") or not cred:
+            await self.strike(keys)
+            return err(404, bad)
+        try:
+            count = passkeys.verify_assertion(cred["key"], cred.get("count", 0), req.get("clientDataJSON"), req.get("authenticatorData"), req.get("signature"), ch, site, rp_id)
+        except passkeys.PasskeyError:
+            await self.strike(keys)
+            return err(404, bad)
+        p = await self.person_of(cred["pid"])
+        if not p or p.get("pinany", True) is False:
+            await self.strike(keys)
+            return err(404, bad)
+        await db.webpasskeys.update_one({"_id": cid}, {"$set": {"count": count, "last": datetime.now(timezone.utc)}})
+        return jresp({"key": self.guest_key(p["_id"], p.get("gen", 0)), "pid": p["_id"], "name": p["name"]})
 
     async def vis(self, tid: int, uid: int) -> dict:
         """The photos this person may see: the family's, narrowed for a web person the parents limited."""
@@ -703,6 +802,10 @@ class WebApp:
             return await self.web_connect(body, headers)
         if path == "/api/web_login":
             return await self.web_login(body, headers)
+        if path == "/api/passkey_login_begin":
+            return await self.passkey_login_begin(headers)
+        if path == "/api/passkey_login":
+            return await self.passkey_login(body, headers)
         user = validate_init_data(headers.get("x-init-data", ""), self.d.token)
         guest = False
         if not user and headers.get("x-guest-key"):
@@ -754,17 +857,21 @@ class WebApp:
                 await coll.update_one({"_id": uid}, {"$unset": {"a2hs": ""}})
             return jresp({"ok": True})
 
-        if path == "/api/web_pin":  # a web person choosing (or removing) their own 4-digit PIN
+        if path == "/api/web_pin":  # a web person choosing (or removing) their own 6-digit PIN
             if not guest or uid >= 0 or not await self.person_of(uid):
                 return err(403, "Not available.")
             pin = re.sub(r"\D", "", str(req.get("pin") or ""))
             if req.get("pin") in (None, ""):
                 await db.webpeople.update_one({"_id": uid}, {"$unset": {"pin": ""}})
-            elif len(pin) != 4 or self.weak_pin(pin):
-                return err(400, "That PIN is too easy to guess (like 1111, 1234 or 2580). Please choose another one.")
+            elif len(pin) != 6 or self.weak_pin(pin):
+                return err(400, "That PIN is too easy to guess (like 111111, 123456 or 121212). Please choose another one.")
             else:
                 await db.webpeople.update_one({"_id": uid}, {"$set": {"pin": self.pin_hash(uid, pin)}})
             return jresp({"ok": True})
+        if path in ("/api/passkey_begin", "/api/passkey_finish"):
+            if not guest or uid >= 0:
+                return err(403, "Not available.")
+            return await (self.passkey_begin(uid) if path == "/api/passkey_begin" else self.passkey_finish(uid, req))
         if path == "/api/child":  # the parents' own "Web access" screen
             if owner:
                 return err(403, "This is for clients.")
