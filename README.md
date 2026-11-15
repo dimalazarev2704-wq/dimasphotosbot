@@ -402,3 +402,9 @@ The first time someone opens a web link on a phone, a sheet asks "Want this as a
 ### Home screen: the button, and asking people
 - Everyone (parents inside Telegram, web visitors in a browser) gets a permanent "📲 Add to home screen" button at the bottom of Home. Inside Telegram it uses Telegram's own "Add to Home Screen" (needs a recent Telegram); on the web it shows the example and the steps.
 - You can make the pop-up appear the next time someone opens the app: for one web person (their page), for a family's parents and web people (the family's Web link screen), or for everybody (Admin tile, or the bot's /admin "📲 Home-screen pop-up for everyone"). It appears once, then is cleared.
+
+## A nicer address with Cloudflare (free, no domain needed)
+
+1. Make a free Cloudflare account, open Workers & Pages, create a Worker, paste in `cloudflare-worker.js` (check `ORIGIN`) and deploy. You get `https://<name>.<account>.workers.dev`.
+2. In the Worker's Settings, add a Cron Trigger `*/5 * * * *` so the free Render service stays awake.
+3. In Render set `WEBAPP_URL=https://<name>.<account>.workers.dev` and `BEHIND_CLOUDFLARE=1`, then deploy. Do this before anyone makes a passkey (a passkey belongs to one address).
