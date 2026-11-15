@@ -299,8 +299,7 @@ class WebApp:
 
     @staticmethod
     def ip_of(headers: dict) -> str:
-        real = headers.get("cf-connecting-ip", "").strip() if os.environ.get("BEHIND_CLOUDFLARE") == "1" else ""  # (only when the site is really behind Cloudflare)
-        return hashlib.sha256((real or headers.get("x-forwarded-for", "?").split(",")[0].strip() or "?").encode()).hexdigest()[:16]
+        return hashlib.sha256((headers.get("x-forwarded-for", "?").split(",")[0].strip() or "?").encode()).hexdigest()[:16]
 
     @staticmethod
     def jbody(body: bytes) -> dict | None:
