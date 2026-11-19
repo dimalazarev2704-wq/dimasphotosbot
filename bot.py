@@ -1242,7 +1242,7 @@ async def handle_upload_step(update: Update, context: ContextTypes.DEFAULT_TYPE,
             "Now send the photos or videos (or send photos as Files to keep the full quality). "
             "A photo with its own caption like “2026-07-04 | Central Park” keeps that instead. "
             "Send /done when you're finished.",
-            reply_markup=one_button("✅ Done", "a:done") if is_owner(user.id) else None,
+            reply_markup=one_button("✅ Done", "a:done") if is_owner(user.id) else one_button("✅ Done", "ad:x") if up.get("pro") else None,
         )
 
     elif up["stage"] == "skip":
@@ -1604,7 +1604,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if data == "menu":
         context.user_data.pop("sug", None)
         context.user_data.pop("cm", None)
-        await show("What would you like to see?", await family_menu(thread_id))
+        await show("What would you like to see?", await family_menu(thread_id, [add_row()] if await add_role(q.from_user.id) and not is_owner(q.from_user.id) else None))
 
     elif data == "bs":  # ⭐ Best shots
         if not await has_best(thread_id):
@@ -1755,7 +1755,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await show("No photos yet. Check back soon!", await family_menu(thread_id))
             return
         items = [(f"{pretty_date(r['_id'])} ({r['n']})", f"D:{r['_id']}") for r in rows]
-        await show("Pick a date:", paged_keyboard(items, int(data[2:]), "d"))
+        await show("Pick a date:", await with_add_row(paged_keyboard(items, int(data[2:]), "d"), q.from_user.id))
 
     elif data.startswith("l:"):
         cur = await db.photos.aggregate(
@@ -1770,7 +1770,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             return
         rows.sort(key=lambda r: (r["_id"] == "none", (r["loc"] or "").casefold()))
         items = [((r["loc"] or "No location")[:40] + f" ({r['n']})", f"L:{r['_id']}") for r in rows]
-        await show("Pick a location:", paged_keyboard(items, int(data[2:]), "l"))
+        await show("Pick a location:", await with_add_row(paged_keyboard(items, int(data[2:]), "l"), q.from_user.id))
 
     elif data.startswith("D:"):
         await start_send(context, chat_id, await scope(thread_id, date=data[2:]))
@@ -1780,6 +1780,184 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     elif data == "all":
         await start_send(context, chat_id, await scope(thread_id))
+
+
+# ---------- "➕ Add to…": the photographer (you), trusted photographers and normal photographers add to a place and date ----------
+
+async def add_role(user_id: int) -> str | None:
+    """'owner', 'trusted' (publishes right away), 'pro' (a photographer whose batch waits for /go), or None."""
+    if is_owner(user_id):
+        return "owner"
+    u = await db.users.find_one({"_id": user_id})
+    if u and u.get("upline") and not u.get("pending") and u.get("thread_id") is not None:
+        return "trusted" if u.get("trusted") else "pro"
+    return None
+
+
+def add_row() -> list:
+    return [InlineKeyboardButton("➕ Add to…", callback_data="ad:go")]
+
+
+async def with_add_row(markup: InlineKeyboardMarkup, user_id: int) -> InlineKeyboardMarkup:
+    if not await add_role(user_id):
+        return markup
+    rows = [list(r) for r in markup.inline_keyboard]
+    return InlineKeyboardMarkup(rows[:-1] + [add_row()] + rows[-1:])  # (above the 🏠 Menu button)
+
+
+async def quick_places(tid: int) -> list[str]:
+    cur = await db.photos.aggregate([
+        {"$match": {"thread_id": tid, "loc_id": {"$ne": "none"}}},
+        {"$group": {"_id": "$loc_id", "loc": {"$first": "$location"}, "n": {"$sum": 1}, "last": {"$max": "$date"}}},
+        {"$sort": {"last": -1}},
+    ])
+    return [r["loc"] for r in (await cur.to_list())[:8] if r.get("loc")]
+
+
+async def quick_dates(tid: int, place: str | None) -> list[str]:
+    cur = await db.photos.aggregate([
+        {"$match": {"thread_id": tid, **({"location": place} if place else {})}},
+        {"$group": {"_id": "$date"}},
+        {"$sort": {"_id": -1}},
+    ])
+    return [r["_id"] for r in (await cur.to_list())[:8] if r.get("_id") and r["_id"] != "unknown" and re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(r["_id"]))]
+
+
+def quick_markup(rows_src: list[tuple[str, str]], cancel: str) -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton(lbl, callback_data=cb) for lbl, cb in rows_src[i:i + 2]] for i in range(0, len(rows_src), 2)]
+    rows.append([InlineKeyboardButton("Cancel", callback_data=cancel)])
+    return InlineKeyboardMarkup(rows)
+
+
+async def ad_place_prompt(sess: dict, ask: str, cancel: str) -> tuple[str, InlineKeyboardMarkup]:
+    sess["pl"] = await quick_places(sess["thread_id"])
+    tip = "\n\nOr tap a place that's already there:" if sess["pl"] else ""
+    return ask + tip, quick_markup([(p[:30], f"ad:p:{i}") for i, p in enumerate(sess["pl"])], cancel)
+
+
+async def ad_date_prompt(sess: dict, cancel: str) -> tuple[str, InlineKeyboardMarkup]:
+    sess["dl"] = await quick_dates(sess["thread_id"], sess.get("place"))
+    src = [("📅 Today", "ad:d:t")] + [(pretty_date(d), f"ad:d:{i}") for i, d in enumerate(sess["dl"])]
+    return ASK_DATE + ("\n\nOr tap a date that's already there:" if sess["dl"] else ""), quick_markup(src, cancel)
+
+
+async def ad_family_picker(page: int) -> InlineKeyboardMarkup:
+    fams = await db.families.find().sort("name", 1).to_list()
+    names = [f["name"] for f in fams]
+    items = []
+    for f in fams:
+        label = f["name"]
+        if names.count(label) > 1:  # (two families with one last name: tell them apart without showing a code)
+            label += f" · {await db.photos.count_documents({'thread_id': f['thread_id']})} photos"
+        items.append((label[:40], f"ad:f:{f['thread_id']}"))
+    return paged_keyboard(items, page, "ad:fl")
+
+
+async def on_add_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    await q.answer()
+    uid = q.from_user.id
+    role = await add_role(uid)
+    chat_id = q.message.chat_id
+    parts = q.data.split(":")
+    act = parts[1]
+
+    async def show(text: str, markup: InlineKeyboardMarkup) -> None:
+        try:
+            await q.edit_message_text(text, reply_markup=markup)
+        except TelegramError as e:
+            if "not modified" not in str(e.message).lower():
+                await context.bot.send_message(chat_id, text, reply_markup=markup)
+
+    if not role:
+        await show("This is only for photographers.", InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu")]]))
+        return
+    if act == "x":  # done / cancel
+        up = context.user_data.pop("up", None)
+        had_sug = context.user_data.pop("sug", None)
+        if up and up.get("stage") == "files":
+            offer, markup = await notify_offer(context, up, uid)
+            await show(f"Done. Added {up.get('count', 0)} file(s). The session is closed." + offer, markup or InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu")]]))
+        else:
+            await show("OK, cancelled.", InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu")]]))
+        return
+    if act == "go":
+        clear_flows(context)
+        if role == "pro":  # a normal photographer: it goes to you for /go, like a suggestion
+            tid = await my_thread(context, uid)
+            context.user_data["sug"] = {"stage": "place", "items": [], "thread_id": tid, "until": time.time() + SESSION_SECONDS, "pro": True}
+            text, markup = await ad_place_prompt(context.user_data["sug"], "➕ Add photos. " + ASK_SUG_PLACE, "ad:x")
+            await show(text, markup)
+            return
+        tid = await my_thread(context, uid) if role == "owner" else None
+        if tid:
+            await ad_start_up(context, show, tid, role)
+        else:
+            await show("📤 Add photos to which family?", await ad_family_picker(0))
+        return
+    if role == "pro":
+        sess = context.user_data.get("sug")
+        if not sess or not sess.get("pro") or sess["until"] < time.time():
+            await show("That timed out. Tap ➕ Add to… to start again.", InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu")]]))
+            return
+        sess["until"] = time.time() + SESSION_SECONDS
+        if act == "p" and sess["stage"] == "place" and parts[2].isdigit() and int(parts[2]) < len(sess.get("pl", [])):
+            sess["place"], sess["stage"] = sess["pl"][int(parts[2])], "date"
+            text, markup = await ad_date_prompt(sess, "ad:x")
+            await show(text, markup)
+        elif act == "d" and sess["stage"] == "date":
+            day = parse_date_answer("today") if parts[2] == "t" else (sess.get("dl", [])[int(parts[2])] if parts[2].isdigit() and int(parts[2]) < len(sess.get("dl", [])) else None)
+            if not day:
+                return
+            sess["date"], sess["stage"] = day, "other"
+            await show(ASK_SUG_OTHER, InlineKeyboardMarkup([[InlineKeyboardButton("Cancel", callback_data="ad:x")]]))
+        return
+    # owner / trusted
+    if act == "fl":
+        await show("📤 Add photos to which family?", await ad_family_picker(int(parts[2]) if parts[2].isdigit() else 0))
+    elif act == "f" and parts[2].lstrip("-").isdigit():
+        fam = await db.families.find_one({"thread_id": int(parts[2])})
+        if not fam:
+            await show("That family no longer exists.", InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu")]]))
+            return
+        clear_flows(context)
+        await ad_start_up(context, show, fam["thread_id"], role)
+    else:
+        up = context.user_data.get("up")
+        if not up or up.get("stage") not in ("place", "date") or up["until"] < time.time():
+            await show("That timed out. Tap ➕ Add to… to start again.", InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu")]]))
+            return
+        up["until"] = time.time() + SESSION_SECONDS
+        if act == "p" and up["stage"] == "place" and parts[2].isdigit() and int(parts[2]) < len(up.get("pl", [])):
+            up.update(place=up["pl"][int(parts[2])], stage="date")
+            text, markup = await ad_date_prompt(up, "ad:x")
+            await show(text, markup)
+        elif act == "d" and up["stage"] == "date":
+            day = parse_date_answer("today") if parts[2] == "t" else (up.get("dl", [])[int(parts[2])] if parts[2].isdigit() and int(parts[2]) < len(up.get("dl", [])) else None)
+            if not day:
+                return
+            up.update(date=day, stage="files")
+            await show(
+                f"Ready: {up_who(up)} · {up['place']} · {pretty_date(day)}.\nNow send the photos or videos (or send photos as Files to keep the full quality). Tap Done when you're finished.",
+                one_button("✅ Done", "ad:x"),
+            )
+
+
+async def ad_start_up(context, show, tid: int, role: str) -> None:
+    fam = await db.families.find_one({"thread_id": tid})
+    if not fam:
+        await show("That family no longer exists.", InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu")]]))
+        return
+    if not GROUP_ID:
+        await show("GROUP_ID isn't set yet, so I can't add photos to the group.", InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu")]]))
+        return
+    up = context.user_data["up"] = {
+        "stage": "place", "thread_id": tid, "name": fam["name"], "count": 0,
+        "last_mg": None, "until": time.time() + SESSION_SECONDS, "pro": role == "trusted",
+    }
+    text, markup = await ad_place_prompt(up, f"📤 {fam['name']} family.\n{ASK_PLACE}", "ad:x")
+    await show(text, markup)
+
 
 
 # ---------- friendly help + pinned button, best shots, "new photos are ready" ----------
@@ -7117,6 +7295,7 @@ def main() -> None:
             on_private_media,
         ))
     app.add_handler(CallbackQueryHandler(on_lang_button, pattern=r"^lg:(s:[A-Za-z-]{2,5}|q|t)$"))
+    app.add_handler(CallbackQueryHandler(on_add_button, pattern=r"^ad:(go|x|fl:\d+|f:-?\d+|p:\d+|d:(t|\d+))$"))
     app.add_handler(CallbackQueryHandler(on_admin_button, pattern=r"^a:"))
     app.add_handler(
         CallbackQueryHandler(on_button, pattern=r"^(menu|all|d:\d+|l:\d+|D:\d{4}-\d{2}-\d{2}|L:[0-9a-f]{10}|L:none|x:\d+|bs|sg:(new|send|gal)|fm:(new|x|ok)|cm:(new|del|delok)|fb:(new|list)|fbd:[0-9a-f]{12})$")

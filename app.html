@@ -560,7 +560,8 @@ async function listScreen(title, path, kind) {
   const rows = data.rows.map(r => h("button", { class: "row", on: { click: () => push(() => gridScreen(r.label, { mode: kind, value: r.v })) } },
     h("img", { src: r.cover, alt: "", loading: "lazy", on: { error: e => { e.target.style.visibility = "hidden"; } } }),
     h("span", {}, h("b", { "data-ugc": "1", text: r.label }), h("span", { class: "hint", text: r.n + (r.n === 1 ? " photo" : " photos") }))));
-  show([banner(), h("h1", { text: title }), rows.length ? rows : h("div", { class: "msg", text: "No photos yet. Check back soon!" }), footer()]);
+  const addTo = IS_ADMIN && typeof adminFam === "number" ? h("button", { class: "cta alt", text: "➕ Add to…", on: { click: () => push(() => uploadScreen(adminFam)) } }) : null;
+  show([banner(), h("h1", { text: title }), addTo, rows.length ? rows : h("div", { class: "msg", text: "No photos yet. Check back soon!" }), footer()]);
 }
 const datesScreen = () => listScreen("📅 Pick a date", "/api/dates", "date");
 const placesScreen = () => listScreen("📍 Pick a place", "/api/places", "loc");
@@ -1470,6 +1471,17 @@ function drawUpload(pre, families, groups) {
   idk.addEventListener("change", () => { day.disabled = idk.checked; });
   const pick = h("input", { type: "file", accept: "image/*,.heic,.heif", multiple: "multiple", style: "display:none" });
   const list = h("div", {}), msg = h("div", { class: "hint", text: "" }), bar = h("i"), summary = h("div", {});
+  const chipBox = { style: "display:flex;flex-wrap:wrap;gap:8px;margin:6px 0" };
+  const placeChips = h("div", chipBox), dateChips = h("div", chipBox);
+  async function loadChips() {  // (the places and dates this family already has: tap one to add to it)
+    placeChips.replaceChildren(); dateChips.replaceChildren();
+    if (typeof adminFam !== "number" || String(adminFam) !== sel.value) return;
+    try {
+      const [pl, dt] = await Promise.all([api("/api/places"), api("/api/dates")]);
+      placeChips.replaceChildren(...pl.rows.filter(r => r.v !== "none").slice(0, 8).map(r => h("button", { class: "cta alt", style: "width:auto;padding:8px 14px", text: r.label, on: { click: () => { place.value = r.label; } } })));
+      dateChips.replaceChildren(...dt.rows.slice(0, 8).map(r => h("button", { class: "cta alt", style: "width:auto;padding:8px 14px", text: r.label, on: { click: () => { day.value = r.v; idk.checked = false; day.disabled = false; } } })));
+    } catch (e) { /* (no shortcuts is fine) */ }
+  }
   const start = h("button", { class: "cta", text: "⬆️ Upload", on: { click: () => run(false) } });
   const stop = h("button", { class: "cta alt", text: "Stop", style: "display:none", on: { click: () => { stopFlag = true; if (ctl) ctl.abort(); } } });
   const leave = h("div", { style: "display:none" });  // (for a whole group: untick the families to leave out)
@@ -1485,7 +1497,7 @@ function drawUpload(pre, families, groups) {
         cb.addEventListener("change", () => { cb.checked ? skip.delete(t) : skip.add(t); });
         return h("label", { style: "display:flex;align-items:center;padding:4px 0" }, cb, (famName_.get(t) || "?") + " family"); }));
   }
-  sel.addEventListener("change", drawLeave);
+  sel.addEventListener("change", () => { drawLeave(); loadChips(); });
   const choose = h("button", { class: "cta alt", text: "📷 Choose photos", on: { click: () => pick.click() } });
   const wait = items_ => items_.filter(i => i.state === "ready" || i.state === "fail");
   function paint() {
@@ -1547,11 +1559,12 @@ function drawUpload(pre, families, groups) {
   }
   show([backBtn(), h("h1", { text: "📤 Add photos" }),
     h("label", { text: "Family or whole group" }), sel, leave,
-    h("label", { text: "📍 Place" }), place,
-    h("label", { text: "📅 Date" }), day, h("label", { class: "chk" }, idk, "I don't know the date"),
+    h("label", { text: "📍 Place" }), place, placeChips,
+    h("label", { text: "📅 Date" }), day, dateChips, h("label", { class: "chk" }, idk, "I don't know the date"),
     h("div", { class: "hint", style: "margin-top:12px", text: "Photos go up as files, so the full quality is kept. Up to 30 MB each. For bigger files, send them through the chat." }),
     choose, pick, list, h("div", { class: "bar" }, bar), msg, start, stop, summary, footer()]);
   drawLeave();
+  loadChips();
   paint();
 }
 

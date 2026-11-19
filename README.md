@@ -351,6 +351,10 @@ Everything people suggest (➕ Suggest photos) goes to you, not to the family's 
 - **📤 Upload line** is one shared topic in the group for everybody's suggestions.
 - **📤 Photographers line** is a separate topic for your top photographers. You pick them in /admin → 📸 Photographers
   (or the Admin tab → Photographers, or Families → Members → "📸 Photographer": tap to go off → ON → ⭐ trusted → off).
+- **➕ Add to…** (bot: on the By date / By location screens and, for photographers, on the main menu; app: owner, on the Dates / Places lists):
+  asks the place and the date, with buttons for the ones that family already has, then you send the photos and they join that
+  place and date. You and ⭐ trusted photographers publish directly: a trusted photographer sees a list of **all families (names
+  only, no codes)** to pick from. A normal ON photographer's batch goes to the Photographers line and waits for your `/go`.
 - **⭐ Trusted** photographers are published right away: their batch still shows in the Photographers line topic, then goes to
   their own family (and the other families they listed) with no `/go` from you, and the bot asks whether to tell the family.
   If it can't finish (a Telegram error), you get a message and the batch waits for `/go` as usual. Normal ON photographers
