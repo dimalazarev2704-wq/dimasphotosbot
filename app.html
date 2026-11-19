@@ -1376,12 +1376,13 @@ async function usersScreen() {
 async function uplineScreen() {
   const d = await adminLoad("/api/admin/upline", {}, uplineScreen); if (!d) return;
   show([backBtn(), h("h1", { text: "📸 Photographers line" }),
-    h("div", { class: "hint", text: "People switched ON are your top photographers: what they send goes to the 📤 Photographers line topic in your group. Everyone else's photos go to the shared 📤 Upload line topic. In either topic, reply /go to publish a batch, /hold to move it to 📋 Photos on review, or /del to drop a photo. Waiting: " + d.waiting + " · On review: " + d.review }),
+    h("div", { class: "hint", text: "People switched ON are your top photographers: what they send goes to the 📤 Photographers line topic in your group. ⭐ Trusted ones are published to their family right away, with no /go from you. Everyone else's photos go to the shared 📤 Upload line topic. In either topic, reply /go to publish a batch, /hold to move it to 📋 Photos on review, or /del to drop a photo. Waiting: " + d.waiting + " · On review: " + d.review }),
     d.rows.length ? d.rows.map(p => h("div", { class: "card" },
       h("b", { text: p.name || "(no name)" }), p.username ? " @" + p.username : "",
       h("div", { class: "hint", text: p.status }),
-      h("div", { class: "btns" }, h("button", { text: p.on ? "✅ ON (tap to turn off)" : "Turn ON",
-        on: { click: () => oneAtATime(async () => { try { await api("/api/admin/upline_set", { uid: p.id, on: !p.on }); } catch (e) { await alertMsg(e.message || "Couldn't change that."); } uplineScreen(); }) } }))))
+      h("div", { class: "btns" },
+        ...[[!p.on, "Off", false, false], [p.on && !p.trusted, "✅ ON", true, false], [p.trusted, "⭐ Trusted: publishes without /go", true, true]].map(([cur, label, on, trusted]) =>
+          h("button", { text: (cur ? "● " : "○ ") + label, on: { click: () => cur || oneAtATime(async () => { try { await api("/api/admin/upline_set", { uid: p.id, on, trusted }); } catch (e) { await alertMsg(e.message || "Couldn't change that."); } uplineScreen(); }) } })))))
       : h("div", { class: "msg", text: "Nobody is in a family yet." })]);
 }
 async function notOpenedScreen() {

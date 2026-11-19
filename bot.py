@@ -2204,7 +2204,10 @@ async def submit_suggestion(context: ContextTypes.DEFAULT_TYPE, user, user_doc, 
     name = sug_name(user_doc, user)
     sid = secrets.token_hex(5)
     if not LEGACY_SUGGESTIONS:  # it goes to the photographer (you): the 📤 Photographers line for the people you picked, else the shared 📤 Upload line
-        return await submit_to_line(context.bot, user, fam, name, sid, sug, "pro" if user_doc and user_doc.get("upline") else "line")
+        err = await submit_to_line(context.bot, user, fam, name, sid, sug, "pro" if user_doc and user_doc.get("upline") else "line")
+        if err is None and user_doc and user_doc.get("upline") and user_doc.get("trusted"):
+            await auto_publish(context.bot, sid)  # (a trusted photographer: no /go needed)
+        return err
     board: list[int] = []
     sug_tid = None
     for attempt in (1, 2):
@@ -2498,6 +2501,32 @@ async def submit_to_line(bot, user, fam: dict, name: str, sid: str, sug: dict, l
         except TelegramError:
             pass
     return None
+
+
+async def auto_publish(bot, sid: str) -> None:
+    """A trusted photographer's batch is published right away (the batch still shows in the topic first). If it can't be finished, it just waits for /go."""
+    async def edit(text: str, markup=None) -> None:
+        pass
+    try:
+        await line_publish(bot, sid, edit)
+        doc = await db.suggestions.find_one({"_id": sid})
+        if doc and doc.get("status") in LINE_STATUSES and OWNER_ID:
+            await bot.send_message(OWNER_ID, "⚠️ I couldn't finish publishing a trusted photographer's batch by itself. It is waiting in the 📤 Photographers line topic: reply /go to try again.")
+    except (TelegramError, RuntimeError):
+        log.exception("Auto-publish for a trusted photographer failed")
+
+
+def next_line_state(u: dict) -> dict:
+    """Off -> ON -> ⭐ trusted (publishes without /go) -> off."""
+    if not u.get("upline"):
+        return {"upline": True, "trusted": False}
+    if not u.get("trusted"):
+        return {"upline": True, "trusted": True}
+    return {"upline": False, "trusted": False}
+
+
+def line_state_label(u: dict) -> str:
+    return "⭐ trusted" if u.get("upline") and u.get("trusted") else ("ON" if u.get("upline") else "off")
 
 
 async def line_refresh(bot, doc: dict) -> None:
@@ -5016,9 +5045,10 @@ async def users_view(page: int, gid: str | None = None):
 async def upline_data() -> dict:
     """Who is in a family (and whether the owner put them on the upload line) + how many batches wait."""
     rows = [p for p in await users_rows() if p["linked"]]
-    on = {u["_id"] for u in await db.users.find({"upline": True}).to_list()}
+    ons = {u["_id"]: bool(u.get("trusted")) for u in await db.users.find({"upline": True}).to_list()}
     for p in rows:
-        p["on"] = p["id"] in on
+        p["on"] = p["id"] in ons
+        p["trusted"] = ons.get(p["id"], False)
     rows.sort(key=lambda p: (not p["on"], (p["name"] or "").casefold(), p["id"]))
     waiting = await db.suggestions.count_documents({"status": "line"})
     review = await db.suggestions.count_documents({"status": "review"})
@@ -5034,9 +5064,9 @@ async def upline_view(page: int):
     text = ("📤 Photographers line\n\nPeople switched ON are your top photographers: what they send goes to the 📤 Photographers line topic "
             "in your group. Everyone else's photos go to the shared 📤 Upload line topic. In either topic reply /go to publish a batch, "
             "/hold to move it to 📋 Photos on review, or /del to drop a photo (or use the buttons under the batch).\n\n"
-            f"Waiting: {d['waiting']} · On review: {d['review']}\n\nTap a person to switch them ON or off:"
+            f"Waiting: {d['waiting']} · On review: {d['review']}\n\nTap a person to change them: off → ✅ ON → ⭐ trusted (their batches are published right away, no /go) → off:"
             if rows else "📤 Photographers line\n\nNobody is in a family yet.")
-    kb = [[_btn(f"{'✅ ON' if p['on'] else '⚪ off'} · {(p['name'] or '(no name)')[:24]} ({p['status'].replace('👪 ', '').replace(' family', '')[:20]})",
+    kb = [[_btn(f"{('⭐ trusted' if p['trusted'] else '✅ ON') if p['on'] else '⚪ off'} · {(p['name'] or '(no name)')[:24]} ({p['status'].replace('👪 ', '').replace(' family', '')[:20]})",
                 f"a:lt:{p['id']}:{page}")] for p in chunk]
     nav = []
     if page > 0:
@@ -5199,7 +5229,7 @@ async def members_view(tid: int):
         return None
     people = await db.users.find({"thread_id": tid}).sort("first_name", 1).to_list()
     rows = [[_btn(f"Unlink {p['first_name']}"[:40], f"a:ul:{tid}:{p['_id']}"),
-             _btn(f"📸 Photographer: {'ON' if p.get('upline') else 'off'} · {p['first_name']}"[:40], f"a:ln:{tid}:{p['_id']}")]
+             _btn(f"📸 Photographer: {line_state_label(p)} · {p['first_name']}"[:40], f"a:ln:{tid}:{p['_id']}")]
             for p in people[:25]]
     rows.append([_btn("⬅️ Back", f"a:f:{tid}")])
     if not people:
@@ -5545,7 +5575,7 @@ async def on_admin_button(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         uid = int(parts[2])
         u = await db.users.find_one({"_id": uid})
         if u:
-            await db.users.update_one({"_id": uid}, {"$set": {"upline": not u.get("upline")}})
+            await db.users.update_one({"_id": uid}, {"$set": next_line_state(u)})
         await show(*await upline_view(int(parts[3])))
 
     elif action == "us":  # everyone who started the bot
@@ -6017,7 +6047,7 @@ async def on_admin_button(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         tid, uid = int(parts[2]), int(parts[3])
         u = await db.users.find_one({"_id": uid, "thread_id": tid})
         if u:
-            await db.users.update_one({"_id": uid}, {"$set": {"upline": not u.get("upline")}})
+            await db.users.update_one({"_id": uid}, {"$set": next_line_state(u)})
         view = await members_view(tid)
         await show(*view) if view else await show("That family no longer exists.", one_button("⬅️ Families", "a:fl:0"))
 
@@ -6503,16 +6533,16 @@ async def _admin_api(bot, action: str, req: dict) -> tuple[int, dict]:
     if action == "upline":
         d = await upline_data()
         return 200, {"waiting": d["waiting"], "review": d["review"],
-                     "rows": [{"id": p["id"], "name": p["name"], "username": p["username"], "status": p["status"], "on": p["on"]} for p in d["rows"][:300]]}
+                     "rows": [{"id": p["id"], "name": p["name"], "username": p["username"], "status": p["status"], "on": p["on"], "trusted": p["trusted"]} for p in d["rows"][:300]]}
 
     if action == "upline_set":
         uid = _int(req.get("uid"), 1)
-        if uid is None or not isinstance(req.get("on"), bool):
+        if uid is None or not isinstance(req.get("on"), bool) or not isinstance(req.get("trusted", False), bool):
             return bad
         u = await db.users.find_one({"_id": uid})
         if not u or u.get("pending") or u.get("thread_id") is None:
             return 404, {"error": "That person isn't in a family."}
-        await db.users.update_one({"_id": uid}, {"$set": {"upline": req["on"]}})
+        await db.users.update_one({"_id": uid}, {"$set": {"upline": req["on"], "trusted": bool(req["on"] and req.get("trusted", False))}})
         return 200, {"ok": True}
 
     if action == "users":
