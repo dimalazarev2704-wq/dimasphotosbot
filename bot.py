@@ -2137,6 +2137,37 @@ def notify_message(info: dict) -> tuple[str, InlineKeyboardMarkup]:
     return "\n".join(lines), InlineKeyboardMarkup(rows)
 
 
+async def on_signout_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """A parent answers a child's "please sign me out" request."""
+    q = update.callback_query
+    _, act, token = q.data.split(":")
+    req = await db.webreq.find_one_and_delete({"_id": token})  # (the first parent to answer decides)
+    if not req:
+        await q.answer("Someone already answered this.", show_alert=True)
+        try:
+            await q.edit_message_reply_markup(reply_markup=None)
+        except TelegramError:
+            pass
+        return
+    member = is_owner(q.from_user.id) or await db.users.find_one({"_id": q.from_user.id, "thread_id": req["tid"]})
+    if not member:
+        await db.webreq.insert_one(req)  # (not theirs to answer: put it back)
+        await q.answer("This isn't for you.", show_alert=True)
+        return
+    await q.answer()
+    p = await db.webpeople.find_one({"_id": req["pid"]})
+    name = p["name"] if p else "They"
+    if act == "y":
+        await db.webdevices.delete_one({"_id": req["dev"], "pid": req["pid"]})
+        text = f"✅ {name} was signed out of that device."
+    else:
+        text = f"👍 OK, {name} stays signed in."
+    try:
+        await q.edit_message_text(text)
+    except TelegramError:
+        pass
+
+
 async def on_notify_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     q = update.callback_query
     _, action, token = q.data.split(":")
@@ -3854,16 +3885,21 @@ async def drop_web_people(tid: int, pid: int | None = None) -> None:
         await db.webpeople.delete_many({"_id": {"$in": ids}})
         await db.webcodes.delete_many({"pid": {"$in": ids}})
         await db.webpasskeys.delete_many({"pid": {"$in": ids}})
+        await db.webdevices.delete_many({"pid": {"$in": ids}})
+        await db.webreq.delete_many({"pid": {"$in": ids}})
 
 
 async def web_person_row(p: dict) -> dict:
     until = as_utc(p.get("until")) if p.get("until") else None
     return {"id": p["_id"], "name": p["name"], "address": f"{WEBAPP_URL}/web" if WEBAPP_URL else "",
-            "on": p.get("on", True), "dl": p.get("dl", True) is not False, "pinany": p.get("pinany", True) is not False, "scope": p.get("scope") or "all",
+            "on": p.get("on", True), "dl": p.get("dl", True) is not False, "pinany": p.get("pinany", True) is not False, "signout": bool(p.get("signout")), "scope": p.get("scope") or "all",
             "dates": list(p.get("dates") or []), "opened": ago_text(p.get("last_open")) if p.get("last_open") else "never",
             "locked": bool(p.get("locked")), "until": until.strftime("%b %d, %Y") if until else "",
             "expired": bool(until and until < datetime.now(timezone.utc)),
             "seen": await db.seen.count_documents({"uid": p["_id"]}), "favs": await db.favs.count_documents({"uid": p["_id"]}),
+            "devices": [{"id": d["_id"], "name": d.get("name") or "A device", "added": as_utc(d["created"]).strftime("%b %d, %Y") if d.get("created") else "",
+                         "used": ago_text(d["last"]) if d.get("last") else "never"}
+                        for d in (await db.webdevices.find({"pid": p["_id"]}).sort("created", 1).to_list())[:10]],
             "passkeys": [{"id": k["_id"], "name": k.get("name") or "A device", "added": as_utc(k["created"]).strftime("%b %d, %Y") if k.get("created") else "",
                           "used": ago_text(k["last"]) if k.get("last") else "never"}
                          for k in (await db.webpasskeys.find({"pid": p["_id"]}).sort("created", 1).to_list())[:10]]}
@@ -3900,7 +3936,7 @@ async def web_people_api(tid: int, req: dict, by_owner: bool = False) -> tuple[i
                 break
         await db.webcodes.insert_one({"_id": code, "pid": p["_id"], "tid": tid, "exp": datetime.now(timezone.utc) + timedelta(hours=WEB_CODE_HOURS)})
         return 200, {"code": f"{code[:4]} {code[4:]}", "address": f"{WEBAPP_URL}/web", "hours": WEB_CODE_HOURS}
-    if action in ("set", "newlink", "remove", "delpk"):
+    if action in ("set", "newlink", "remove", "delpk", "deldev"):
         pid = req.get("id")
         p = await db.webpeople.find_one({"_id": pid, "tid": tid}) if isinstance(pid, int) and not isinstance(pid, bool) else None
         if not p:
@@ -3909,6 +3945,11 @@ async def web_people_api(tid: int, req: dict, by_owner: bool = False) -> tuple[i
             return 403, {"error": f"🔒 {OWNER_NAME} locked {p['name']}'s settings. Please ask {OWNER_NAME} to change this."}
         if action == "remove":
             await drop_web_people(tid, p["_id"])
+        elif action == "deldev":  # sign ONE device out (it has to be connected again with a new code or a PIN)
+            dev = req.get("dev")
+            if not isinstance(dev, str) or not re.fullmatch(r"[0-9a-f]{12}", dev):
+                return 400, {"error": "Bad request"}
+            await db.webdevices.delete_one({"_id": dev, "pid": p["_id"]})
         elif action == "delpk":  # delete ONE passkey (that device can't use it to log in anymore)
             cid = req.get("pk")
             if not isinstance(cid, str) or len(cid) > 1400:
@@ -3918,9 +3959,10 @@ async def web_people_api(tid: int, req: dict, by_owner: bool = False) -> tuple[i
             await db.webpeople.update_one({"_id": p["_id"]}, {"$set": {"token": secrets.token_urlsafe(18)}, "$inc": {"gen": 1}, "$unset": {"pin": ""}})
             await db.webcodes.delete_many({"pid": p["_id"]})
             await db.webpasskeys.delete_many({"pid": p["_id"]})
+            await db.webdevices.delete_many({"pid": p["_id"]})
         else:
             upd = {}
-            for k in ("on", "dl", "pinany") + (("locked",) if by_owner else ()):
+            for k in ("on", "dl", "pinany", "signout") + (("locked",) if by_owner else ()):
                 if k in req:
                     if not isinstance(req[k], bool):
                         return 400, {"error": "Bad request"}
@@ -6999,6 +7041,26 @@ class WebDeps:
 
     admin_actions = ADMIN_ACTIONS
 
+    async def signout_request(self, pid: int, tid: int, dev: str, name: str, device: str, last) -> int:
+        """A child asked to be signed out of one device: tell the family's parents, with Sign out / Don't sign out buttons. Returns how many were told."""
+        people = await db.users.find({"thread_id": tid, "pending": {"$ne": True}}).to_list()
+        if not people:
+            return 0
+        token = secrets.token_hex(6)
+        await db.webreq.insert_one({"_id": token, "pid": pid, "tid": tid, "dev": dev, "exp": datetime.now(timezone.utc) + timedelta(days=2)})
+        text = (f"🚪 {name} asked to be signed out of their {device} on the website"
+                + (f" (last used {ago_text(last)})" if last else "") + ".\nSign them out?")
+        markup = InlineKeyboardMarkup([[InlineKeyboardButton("✅ Sign out", callback_data=f"so:y:{token}"),
+                                        InlineKeyboardButton("❌ Don't sign out", callback_data=f"so:n:{token}")]])
+        told = 0
+        for u in people[:10]:
+            try:
+                await self.app.bot.send_message(u["_id"], text, reply_markup=markup)
+                told += 1
+            except TelegramError:
+                pass
+        return told
+
     async def child(self, tid: int, req: dict) -> tuple[int, dict]:
         return await child_api(tid, req)
 
@@ -7198,6 +7260,8 @@ async def post_init(app: Application) -> None:
     await safe_index(lambda: db.webpeople.create_index("token"))
     await safe_index(lambda: db.webcodes.create_index("exp", expireAfterSeconds=0))
     await safe_index(lambda: db.webchal.create_index("exp", expireAfterSeconds=0))
+    await safe_index(lambda: db.webreq.create_index("exp", expireAfterSeconds=0))
+    await safe_index(lambda: db.webdevices.create_index("pid"))
     await safe_index(lambda: db.webpasskeys.create_index("pid"))
     await safe_index(lambda: db.attempts.create_index("at", expireAfterSeconds=7200))  # (website code/PIN guess counters forget themselves; the helper ones have no "at")
     await safe_index(lambda: db.tries.create_index("at", expireAfterSeconds=2592000))  # forget login attempts after 30 days
@@ -7290,6 +7354,7 @@ def main() -> None:
     app.add_handler(CommandHandler("help", help_cmd, filters=priv))
     app.add_handler(CallbackQueryHandler(on_newfamily_button, pattern=r"^nf:(new|yes|no)$"))
     app.add_handler(CallbackQueryHandler(on_newfamily_owner, pattern=r"^nfa:(c|r|e):[0-9a-f]{8}(:\d+)?$"))
+    app.add_handler(CallbackQueryHandler(on_signout_button, pattern=r"^so:(y|n):[0-9a-f]{12}$"))
     app.add_handler(CallbackQueryHandler(on_notify_button, pattern=r"^nt:(y|n):[0-9a-f]{8}$"))
     app.add_handler(CommandHandler("announce", announce_cmd, filters=priv))
     app.add_handler(CommandHandler("unlink", unlink_private, filters=priv))

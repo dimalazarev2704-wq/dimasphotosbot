@@ -453,10 +453,15 @@ function settingsScreen() {  // (the website's Settings tab)
 function settingsLogin() {
   return [h("button", { class: "cta alt", text: HOME.pin ? "🔐 Change or remove my PIN" : "🔐 Set a PIN", on: { click: () => push(pinSetScreen) } }),
     ...(canPasskey() ? [h("button", { class: "cta alt", text: "🔑 Add a passkey (Face ID or fingerprint)", on: { click: () => oneAtATime(async () => { try { await addPasskey(); } catch (e) { await alertMsg("⚠️ " + passkeyMsg(e)); return; } await alertMsg("Passkey saved. Next time, tap “Log in with a passkey”. No typing needed."); }) } })] : []),
-    h("button", { class: "cta alt", text: "🚪 Log out of this device", on: { click: async () => {
+    HOME.signout ? h("button", { class: "cta alt", text: "🚪 Log out of this device", on: { click: async () => {
       if (!await confirmAsk("Log out of this device?" + (HOME.pin ? " You can log back in with your PIN." : " To get back in you will need a new code. You can set a PIN first so you can log back in yourself."))) return;
+      try { await api("/api/web_logout", {}); } catch (e) { await alertMsg("⚠️ " + e.message); return; }
       try { if (HOME.pin) localStorage.setItem("who:web", JSON.stringify(Object.assign(JSON.parse(localStorage.getItem("who:web") || "{}"), { pin: true }))); else localStorage.removeItem("who:web"); localStorage.removeItem("gk:web"); } catch (e) {}
-      guestKey = ""; HOME = null; stack = []; connectScreen(); } } })];
+      guestKey = ""; HOME = null; stack = []; connectScreen(); } } })
+    : h("button", { class: "cta alt", text: "🚪 Request sign out", on: { click: () => oneAtATime(async () => {
+      if (!await askPopup("Signing out needs a parent", "Your parents will get a notification. They can choose to sign you out.", "Ask")) return;
+      try { await api("/api/web_signout_ask", {}); } catch (e) { await alertMsg("⚠️ " + e.message); return; }
+      await alertMsg("✅ Your parents were told. If they say yes, this device will be signed out."); }) } })];
 }
 let LANGS_DATA = null;
 async function langScreen(first) {
@@ -928,6 +933,15 @@ async function personScreen(wp, pid) {
       toggle("Access is on", p.on, "on"),
       toggle("Can download photos", p.dl, "dl"),
       toggle("Can log in by themselves (PIN or passkey) on a new device, no parent needed", p.pinany, "pinany"),
+      toggle("Can sign out by themselves (when off, they have to ask you)", p.signout, "signout"),
+      ...(p.devices && p.devices.length ? [h("h2", { text: "📱 Connected devices" }),
+        h("div", { class: "hint", text: "Each phone or tablet that is connected. Sign one out and it needs a new code or a PIN to get back in." }),
+        ...p.devices.map(d => h("div", { class: "card", style: "display:flex;align-items:center;gap:10px" },
+          h("div", { style: "flex:1;min-width:0" }, h("b", { "data-ugc": "1", text: d.name }), h("div", { class: "hint", text: "Connected " + d.added + " · last used " + d.used })),
+          h("button", { class: "cta danger", style: "width:auto;margin:0;padding:8px 14px", text: "Sign out", on: { click: () => oneAtATime(async () => {
+            if (!await confirmAsk("Sign " + p.name + " out of " + d.name + "?")) return;
+            try { await wp.call({ action: "deldev", id: pid, dev: d.id }); } catch (e) { await alertMsg("⚠️ " + e.message); }
+            personScreen(wp, pid); }) } })))] : []),
       ...(p.passkeys && p.passkeys.length ? [h("h2", { text: "🔐 Passkeys" }),
         h("div", { class: "hint", text: "Each one is a device that can log in with Face ID, a fingerprint or a screen lock. Delete one if a device is lost or no longer used." }),
         ...p.passkeys.map(k => h("div", { class: "card", style: "display:flex;align-items:center;gap:10px" },
@@ -1221,6 +1235,19 @@ async function sugsScreen() {
           mk("❌ Reject", "danger", () => act(r, "n", btns, "Reject these? They won't be added."))));
     }) : h("div", { class: "msg", text: "Nothing is waiting. 🎉" }),
     footer()]);
+}
+function askPopup(title, text, okLabel) {  // a small popup with a main button and Cancel (resolves true if they tapped the main button)
+  return new Promise(res => {
+    const t = s => (LANG !== "en" && !IS_ADMIN ? ruT(s) : s);
+    const close = v => { box.remove(); res(v); };
+    const box = h("div", { style: "position:fixed;inset:0;z-index:60;background:#0008;display:flex;align-items:center;justify-content:center;padding:24px" },
+      h("div", { style: "background:var(--bg);color:var(--text);border-radius:20px;padding:22px;max-width:340px;width:100%;box-shadow:0 8px 40px #0006" },
+        h("div", { style: "font-size:1.15em;font-weight:700;margin-bottom:8px", text: t(title) }),
+        h("div", { style: "margin-bottom:16px", text: t(text) }),
+        h("button", { class: "cta", text: t(okLabel), on: { click: () => close(true) } }),
+        h("button", { class: "cta alt", text: t("Cancel"), on: { click: () => close(false) } })));
+    document.body.appendChild(box);
+  });
 }
 function alertMsg(text) {
   text = String(text).slice(0, 250);  // (Telegram's popup refuses long text)

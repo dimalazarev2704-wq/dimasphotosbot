@@ -228,12 +228,26 @@ class WebApp:
 
     # ---------- web-link visitors ("guests": no Telegram account) ----------
 
-    GUEST_PATHS = {"/api/home", "/api/dates", "/api/places", "/api/photos", "/api/fav", "/api/seen", "/api/a2hs", "/api/web_pin", "/api/passkey_begin", "/api/passkey_finish"}
+    GUEST_PATHS = {"/api/home", "/api/dates", "/api/places", "/api/photos", "/api/fav", "/api/seen", "/api/a2hs", "/api/web_pin", "/api/passkey_begin", "/api/passkey_finish", "/api/web_logout", "/api/web_signout_ask"}
     GUEST_MAX = 40  # browsers per family link
 
     def guest_key(self, gid: int, gen: int | None = None) -> str:
         what = f"guest:{gid}" if gen is None else f"guest:{gid}:{gen}"
         return f"{gid}." + hmac.new(self.url_secret, what.encode(), hashlib.sha256).hexdigest()[:32]
+
+    def device_key(self, pid: int, gen: int, dev: str) -> str:
+        return f"{pid}.{dev}." + hmac.new(self.url_secret, f"guest:{pid}:{gen}:{dev}".encode(), hashlib.sha256).hexdigest()[:32]
+
+    async def new_key(self, p: dict, headers: dict) -> str:
+        """A new connected device for this person: it is remembered (so the parents can see it and sign it out)."""
+        db = self.d.db()
+        dev = secrets.token_hex(6)
+        now = datetime.now(timezone.utc)
+        await db.webdevices.insert_one({"_id": dev, "pid": p["_id"], "name": self.device_name(headers.get("user-agent", "")), "created": now, "last": now})
+        old = await db.webdevices.find({"pid": p["_id"]}).sort("created", 1).to_list()
+        for d in old[:-10]:  # (at most 10 devices per person: the oldest makes room)
+            await db.webdevices.delete_one({"_id": d["_id"]})
+        return self.device_key(p["_id"], p.get("gen", 0), dev)
 
     async def person_of(self, uid: int) -> dict | None:
         """The named web person (a child, a grandparent ...) this guest id stands for, if switched on."""
@@ -254,7 +268,13 @@ class WebApp:
 
     async def guest_from(self, key: str) -> dict | None:
         """The guest this key belongs to. Turning a link off, replacing it or removing the person cuts it off."""
-        gid_s, _, sig = (key or "").rpartition(".")
+        bits = (key or "").split(".")
+        dev = None
+        if len(bits) == 3 and re.fullmatch(r"[0-9a-f]{12}", bits[1]):  # a named person's device
+            dev = bits[1]
+        elif len(bits) != 2:
+            return None
+        gid_s, sig = bits[0], bits[-1]
         try:
             gid = int(gid_s)
         except ValueError:
@@ -264,10 +284,16 @@ class WebApp:
         db = self.d.db()
         person = await db.webpeople.find_one({"_id": gid})
         if person:  # a named person: one identity on every device, so hearts follow them
-            if not hmac.compare_digest(self.guest_key(gid, person.get("gen", 0)), f"{gid}.{sig}") or not await self.person_of(gid):
+            if not dev or not hmac.compare_digest(self.device_key(gid, person.get("gen", 0), dev), key) or not await self.person_of(gid):
                 return None
-            return {"_id": gid, "tid": person["tid"], "person": person}
-        if not hmac.compare_digest(self.guest_key(gid), f"{gid}.{sig}"):
+            rec = await db.webdevices.find_one({"_id": dev, "pid": gid})
+            if not rec:  # (a parent signed this device out)
+                return None
+            last = rec.get("last")
+            if not last or (datetime.now(timezone.utc) - (last if last.tzinfo else last.replace(tzinfo=timezone.utc))).total_seconds() > 3600:
+                await db.webdevices.update_one({"_id": dev}, {"$set": {"last": datetime.now(timezone.utc)}})
+            return {"_id": gid, "tid": person["tid"], "person": person, "dev": dev}
+        if dev or not hmac.compare_digest(self.guest_key(gid), f"{gid}.{sig}"):
             return None
         g = await db.guests.find_one({"_id": gid})
         if not g or not await db.families.find_one({"thread_id": g["tid"], "web": {"$exists": True}}):
@@ -371,7 +397,7 @@ class WebApp:
             await self.code_failed(ip)
             return err(404, "That code isn't right, or it has expired. Please ask for a new one.")
         await db.webcodes.delete_one({"_id": code})  # (one use)
-        return jresp({"key": self.guest_key(p["_id"], p.get("gen", 0)), "pid": p["_id"], "name": p["name"], "family": (await self.d.family_name(p["tid"])) or ""})
+        return jresp({"key": await self.new_key(p, headers), "pid": p["_id"], "name": p["name"], "family": (await self.d.family_name(p["tid"])) or ""})
 
     @staticmethod
     def weak_pin(pin: str) -> bool:
@@ -423,7 +449,7 @@ class WebApp:
         hit = hits[0]
         if not by_letter:
             await db.attempts.delete_one({"_id": keys[0][0]})  # (never reset the guess counter of a shared letter: that would let anyone with an account keep guessing)
-        return jresp({"key": self.guest_key(hit["_id"], hit.get("gen", 0)), "pid": hit["_id"], "name": hit["name"]})
+        return jresp({"key": await self.new_key(hit, headers), "pid": hit["_id"], "name": hit["name"]})
 
     # ---------- passkeys (Face ID / fingerprint / device PIN) ----------
     def rp(self):
@@ -524,7 +550,7 @@ class WebApp:
             await self.strike(keys)
             return err(404, bad)
         await db.webpasskeys.update_one({"_id": cid}, {"$set": {"count": count, "last": datetime.now(timezone.utc)}})
-        return jresp({"key": self.guest_key(p["_id"], p.get("gen", 0)), "pid": p["_id"], "name": p["name"]})
+        return jresp({"key": await self.new_key(p, headers), "pid": p["_id"], "name": p["name"]})
 
     async def vis(self, tid: int, uid: int) -> dict:
         """The photos this person may see: the family's, narrowed for a web person the parents limited."""
@@ -819,8 +845,10 @@ class WebApp:
             return await self.passkey_login(body, headers)
         user = validate_init_data(headers.get("x-init-data", ""), self.d.token)
         guest = False
+        gdev = None
         if not user and headers.get("x-guest-key"):
             g = await self.guest_from(headers["x-guest-key"])
+            gdev = g.get("dev") if g else None
             if not g:
                 return err(401, "This link isn't active any more. Please ask for a new one.")
             user, guest = {"id": g["_id"], "first_name": (g["person"] or {}).get("name", "")}, True
@@ -878,6 +906,24 @@ class WebApp:
                 return err(400, "That PIN is too easy to guess (like 111111, 123456 or 121212). Please choose another one.")
             else:
                 await db.webpeople.update_one({"_id": uid}, {"$set": {"pin": self.pin_hash(uid, pin)}})
+            return jresp({"ok": True})
+        if path in ("/api/web_logout", "/api/web_signout_ask"):
+            p = await self.person_of(uid) if guest and uid < 0 else None
+            if not p or not gdev:
+                return err(403, "Not available.")
+            if path == "/api/web_logout":  # only if the parents allowed it
+                if not p.get("signout"):
+                    return err(403, "Please ask your parents to sign you out.")
+                await db.webdevices.delete_one({"_id": gdev, "pid": uid})
+                return jresp({"ok": True})
+            keys = [(f"soask:{uid}", 3)]  # 3 requests an hour for this person
+            if await self.throttled(keys):
+                return err(429, "You already asked 3 times this hour. Please try again a little later.")
+            await self.strike(keys)
+            rec = await db.webdevices.find_one({"_id": gdev}) or {}
+            n = await self.d.signout_request(uid, p["tid"], gdev, p["name"], rec.get("name") or "device", rec.get("last"))
+            if not n:
+                return err(503, "I couldn't reach your parents on Telegram. Please ask them to sign you out.")
             return jresp({"ok": True})
         if path in ("/api/passkey_begin", "/api/passkey_finish"):
             if not guest or uid >= 0:
@@ -974,6 +1020,7 @@ class WebApp:
                 "guest": guest,
                 "dl": gp.get("dl") is not False if gp else True,
                 "pin": bool(gp and gp.get("pin")),
+                "signout": bool(gp and gp.get("signout")),
                 "a2hs": False if owner else (bool(gp and gp.get("a2hs")) if guest else bool((await self.d.db().users.find_one({"_id": uid}) or {}).get("a2hs"))),  # (the photographer asked them to add the app to their home screen)
                 "child": False if (owner or guest) else bool((await db.families.find_one({"thread_id": tid}) or {}).get("child_ok")),
                 "welcome": await self.welcome(uid, tid),
