@@ -1297,6 +1297,10 @@ async def on_private_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 "I only add photos, image files and videos (JPG, PNG, HEIC, MP4, MOV and so on). That one was skipped."
             )
         return
+    if up.get("pro") and await add_role(update.effective_user.id) != "trusted":  # (no longer a trusted photographer: close it)
+        context.user_data.pop("up", None)
+        await msg.reply_text("You're not a trusted photographer anymore, so I closed the upload and did not add that file.")
+        return
     if up.get("gid") and not await group_doc(up["gid"]):  # the group was deleted while this session was open
         context.user_data.pop("up", None)
         await msg.reply_text("That group no longer exists, so I closed the upload and did not add that file.")
