@@ -457,7 +457,18 @@ class WebApp:
             exp = exp.replace(tzinfo=timezone.utc)
         return d.get("kind") == kind and (pid is None or d.get("pid") == pid) and bool(exp and exp > datetime.now(timezone.utc))
 
-    async def passkey_finish(self, uid: int, req: dict) -> Resp:
+    @staticmethod
+    def device_name(ua: str) -> str:
+        """A friendly name from the browser's own description, e.g. "iPhone · Safari" (a website can't read the device's real name)."""
+        ua = ua or ""
+        dev = ("iPhone" if "iPhone" in ua else "iPad" if "iPad" in ua else "Android phone" if "Android" in ua and "Mobile" in ua
+               else "Android tablet" if "Android" in ua else "Mac" if "Macintosh" in ua or "Mac OS X" in ua else "Windows PC" if "Windows" in ua
+               else "Chromebook" if "CrOS" in ua else "Linux computer" if "Linux" in ua else "Device")
+        br = ("Edge" if "Edg/" in ua or "EdgiOS" in ua else "Opera" if "OPR/" in ua else "Firefox" if "Firefox/" in ua or "FxiOS" in ua
+              else "Chrome" if "Chrome/" in ua or "CriOS" in ua else "Safari" if "Safari/" in ua else "")
+        return f"{dev} · {br}" if br else dev
+
+    async def passkey_finish(self, uid: int, req: dict, ua: str = "") -> Resp:
         site, rp_id = self.rp()
         if not site or not await self.person_of(uid):
             return err(503, "Passkeys aren't available here.")
@@ -471,7 +482,7 @@ class WebApp:
             return err(400, str(e))
         if await db.webpasskeys.find_one({"_id": res["id"]}):
             return err(400, "That passkey is already saved.")
-        await db.webpasskeys.insert_one({"_id": res["id"], "pid": uid, "key": res["key"], "count": res["count"], "created": datetime.now(timezone.utc)})
+        await db.webpasskeys.insert_one({"_id": res["id"], "pid": uid, "key": res["key"], "count": res["count"], "created": datetime.now(timezone.utc), "name": self.device_name(ua)})
         return jresp({"ok": True})
 
     async def passkey_login_begin(self, headers: dict) -> Resp:
@@ -871,7 +882,7 @@ class WebApp:
         if path in ("/api/passkey_begin", "/api/passkey_finish"):
             if not guest or uid >= 0:
                 return err(403, "Not available.")
-            return await (self.passkey_begin(uid) if path == "/api/passkey_begin" else self.passkey_finish(uid, req))
+            return await (self.passkey_begin(uid) if path == "/api/passkey_begin" else self.passkey_finish(uid, req, headers.get("user-agent", "")))
         if path == "/api/child":  # the parents' own "Web access" screen
             if owner:
                 return err(403, "This is for clients.")

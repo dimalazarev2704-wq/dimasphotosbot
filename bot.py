@@ -3863,7 +3863,10 @@ async def web_person_row(p: dict) -> dict:
             "dates": list(p.get("dates") or []), "opened": ago_text(p.get("last_open")) if p.get("last_open") else "never",
             "locked": bool(p.get("locked")), "until": until.strftime("%b %d, %Y") if until else "",
             "expired": bool(until and until < datetime.now(timezone.utc)),
-            "seen": await db.seen.count_documents({"uid": p["_id"]}), "favs": await db.favs.count_documents({"uid": p["_id"]})}
+            "seen": await db.seen.count_documents({"uid": p["_id"]}), "favs": await db.favs.count_documents({"uid": p["_id"]}),
+            "passkeys": [{"id": k["_id"], "name": k.get("name") or "A device", "added": as_utc(k["created"]).strftime("%b %d, %Y") if k.get("created") else "",
+                          "used": ago_text(k["last"]) if k.get("last") else "never"}
+                         for k in (await db.webpasskeys.find({"pid": p["_id"]}).sort("created", 1).to_list())[:10]]}
 
 
 async def web_people_list(tid: int, fam: dict) -> dict:
@@ -3897,7 +3900,7 @@ async def web_people_api(tid: int, req: dict, by_owner: bool = False) -> tuple[i
                 break
         await db.webcodes.insert_one({"_id": code, "pid": p["_id"], "tid": tid, "exp": datetime.now(timezone.utc) + timedelta(hours=WEB_CODE_HOURS)})
         return 200, {"code": f"{code[:4]} {code[4:]}", "address": f"{WEBAPP_URL}/web", "hours": WEB_CODE_HOURS}
-    if action in ("set", "newlink", "remove"):
+    if action in ("set", "newlink", "remove", "delpk"):
         pid = req.get("id")
         p = await db.webpeople.find_one({"_id": pid, "tid": tid}) if isinstance(pid, int) and not isinstance(pid, bool) else None
         if not p:
@@ -3906,6 +3909,11 @@ async def web_people_api(tid: int, req: dict, by_owner: bool = False) -> tuple[i
             return 403, {"error": f"🔒 {OWNER_NAME} locked {p['name']}'s settings. Please ask {OWNER_NAME} to change this."}
         if action == "remove":
             await drop_web_people(tid, p["_id"])
+        elif action == "delpk":  # delete ONE passkey (that device can't use it to log in anymore)
+            cid = req.get("pk")
+            if not isinstance(cid, str) or len(cid) > 1400:
+                return 400, {"error": "Bad request"}
+            await db.webpasskeys.delete_one({"_id": cid, "pid": p["_id"]})
         elif action == "newlink":  # disconnect every device of this person (they need a new code to connect again)
             await db.webpeople.update_one({"_id": p["_id"]}, {"$set": {"token": secrets.token_urlsafe(18)}, "$inc": {"gen": 1}, "$unset": {"pin": ""}})
             await db.webcodes.delete_many({"pid": p["_id"]})

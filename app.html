@@ -928,6 +928,14 @@ async function personScreen(wp, pid) {
       toggle("Access is on", p.on, "on"),
       toggle("Can download photos", p.dl, "dl"),
       toggle("Can log in by themselves (PIN or passkey) on a new device, no parent needed", p.pinany, "pinany"),
+      ...(p.passkeys && p.passkeys.length ? [h("h2", { text: "🔐 Passkeys" }),
+        h("div", { class: "hint", text: "Each one is a device that can log in with Face ID, a fingerprint or a screen lock. Delete one if a device is lost or no longer used." }),
+        ...p.passkeys.map(k => h("div", { class: "card", style: "display:flex;align-items:center;gap:10px" },
+          h("div", { style: "flex:1;min-width:0" }, h("b", { "data-ugc": "1", text: k.name }), h("div", { class: "hint", text: "Added " + k.added + " · last used " + k.used })),
+          h("button", { class: "cta danger", style: "width:auto;margin:0;padding:8px 14px", text: "Delete", on: { click: () => oneAtATime(async () => {
+            if (!await confirmAsk("Delete the passkey on " + k.name + "? It can no longer log in with that passkey. (If it is already connected it stays connected: use “Disconnect all their devices” to cut it off.)")) return;
+            try { await wp.call({ action: "delpk", id: pid, pk: k.id }); } catch (e) { await alertMsg("⚠️ " + e.message); }
+            personScreen(wp, pid); }) } })))] : []),
       h("h2", { text: "Which photos can they see?" }),
       scopeBtn("all", "All photos"), scopeBtn("best", "⭐ Best shots only"),
       scopeBtn("dates", p.scope === "dates" ? "📅 Chosen days (" + p.dates.length + ")" : "📅 Chosen days…"),

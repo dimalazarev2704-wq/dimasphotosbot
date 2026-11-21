@@ -351,6 +351,9 @@ Everything people suggest (➕ Suggest photos) goes to you, not to the family's 
 - **📤 Upload line** is one shared topic in the group for everybody's suggestions.
 - **📤 Photographers line** is a separate topic for your top photographers. You pick them in /admin → 📸 Photographers
   (or the Admin tab → Photographers, or Families → Members → "📸 Photographer": tap to go off → ON → ⭐ trusted → off).
+- **Passkeys have a device name** (like "iPhone · Safari", taken from the browser when the passkey is made; older ones show "A device").
+  On a person's screen (parents, or you) a **🔐 Passkeys** list shows each one with when it was added and last used, and a **Delete** button.
+  Deleting only stops that passkey from logging in; a device that is already connected stays connected until you use "Disconnect all their devices".
 - **➕ Add to…** (bot: on the By date / By location screens and, for photographers, on the main menu; app: owner, on the Dates / Places lists):
   asks the place and the date, with buttons for the ones that family already has, then you send the photos and they join that
   place and date. You and ⭐ trusted photographers publish directly: a trusted photographer sees a list of **all families (names
