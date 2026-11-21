@@ -284,7 +284,7 @@ class WebApp:
         db = self.d.db()
         person = await db.webpeople.find_one({"_id": gid})
         if person:  # a named person: one identity on every device, so hearts follow them
-            if not dev or not hmac.compare_digest(self.device_key(gid, person.get("gen", 0), dev), key) or not await self.person_of(gid):
+            if not dev or not hmac.compare_digest(self.device_key(gid, person.get("gen", 0), dev), f"{gid}.{dev}.{sig}") or not await self.person_of(gid):
                 return None
             rec = await db.webdevices.find_one({"_id": dev, "pid": gid})
             if not rec:  # (a parent signed this device out)
