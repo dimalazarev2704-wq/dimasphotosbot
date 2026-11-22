@@ -417,3 +417,7 @@ The first time someone opens a web link on a phone, a sheet asks "Want this as a
 ## The look of the app and website
 
 One clean, colourful look for everyone: soft rounded cards, big buttons, real line icons in a floating tab bar, dates and places as big picture tiles, a welcoming connect / PIN screen with a camera logo, and colour avatars with status chips in the parents' and Users screens. On the website the colours follow the visitor's light or dark setting; inside Telegram they follow the Telegram theme.
+
+## The app icon / logo
+
+Put a picture called `logo.png` next to `webapp.py` (any size; the middle square is used) and it becomes the home-screen icon, the browser tab icon and the logo on the connect screen, with thin viewfinder corners added. Without it, a simple teal camera is drawn.

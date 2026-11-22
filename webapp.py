@@ -614,14 +614,14 @@ class WebApp:
             if method == "GET" and path in ("/web", "/web/"):  # the one web address for everyone
                 head = ('<link rel="manifest" href="/web/manifest.webmanifest"><link rel="apple-touch-icon" href="/icon-180.png">'
                         '<meta name="apple-mobile-web-app-capable" content="yes"><meta name="mobile-web-app-capable" content="yes">'
-                        '<meta name="apple-mobile-web-app-title" content="Photos"><meta name="theme-color" content="#1f6fb2">')
+                        '<meta name="apple-mobile-web-app-title" content="Photos"><meta name="theme-color" content="#0b7f70"><link rel="icon" href="/icon-192.png">')
                 return self.page({"Referrer-Policy": "no-referrer", "X-Robots-Tag": "noindex"}, head)
             if path.startswith("/w/") and method == "GET":  # a web link: the same app page, set up so it can be put on a home screen
                 m = re.fullmatch(r"/w/([A-Za-z0-9_-]{10,60})/?", path)
                 head = (f'<link rel="manifest" href="/w/{m.group(1)}/manifest.webmanifest">'
                         '<link rel="apple-touch-icon" href="/icon-180.png"><meta name="apple-mobile-web-app-capable" content="yes">'
                         '<meta name="mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-title" content="Photos">'
-                        '<meta name="theme-color" content="#1f6fb2">') if m else ""
+                        '<meta name="theme-color" content="#0b7f70"><link rel="icon" href="/icon-192.png">') if m else ""
                 return self.page({"Referrer-Policy": "no-referrer", "X-Robots-Tag": "noindex"}, head)
             if path.startswith("/dl/") and method == "GET":
                 return await self.image(path[4:], query, download=True)
@@ -654,16 +654,35 @@ class WebApp:
         if hit:
             return hit
         from PIL import Image, ImageDraw
+        logo = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logo.png")
+        if os.path.exists(logo):  # your own picture (logo.png next to this file): centred, square, with thin viewfinder corners
+            try:
+                src = Image.open(logo).convert("RGB")
+                side = min(src.size)
+                left, top = (src.size[0] - side) // 2, (src.size[1] - side) // 2
+                im = src.crop((left, top, left + side, top + side)).resize((size, size), Image.LANCZOS)
+                d = ImageDraw.Draw(im)
+                m, arm, wd = size * 0.09, size * 0.2, max(2, round(size * 0.018))
+                for sx, sy in ((1, 1), (-1, -1)):
+                    x0, y0 = (m, m) if sx == 1 else (size - m, size - m)
+                    d.line((x0, y0, x0 + sx * arm, y0), fill=(255, 255, 255), width=wd)
+                    d.line((x0, y0, x0, y0 + sy * arm), fill=(255, 255, 255), width=wd)
+                out = io.BytesIO()
+                im.save(out, "PNG", optimize=True)
+                self.icons[size] = out.getvalue()
+                return self.icons[size]
+            except Exception:
+                log.exception("logo.png could not be used; drawing the default icon")
         k = size / 512
-        im = Image.new("RGB", (size, size), (31, 111, 178))
+        im = Image.new("RGB", (size, size), (11, 127, 112))
         d = ImageDraw.Draw(im)
         box = lambda x0, y0, x1, y1: [x0 * k, y0 * k, x1 * k, y1 * k]
         d.rounded_rectangle(box(196, 150, 316, 200), radius=14 * k, fill=(255, 255, 255))
         d.rounded_rectangle(box(120, 180, 392, 370), radius=34 * k, fill=(255, 255, 255))
-        d.ellipse(box(196, 211, 316, 331), fill=(31, 111, 178))
+        d.ellipse(box(196, 211, 316, 331), fill=(11, 127, 112))
         d.ellipse(box(214, 229, 298, 313), fill=(255, 255, 255))
-        d.ellipse(box(232, 247, 280, 295), fill=(31, 111, 178))
-        d.ellipse(box(340, 200, 366, 226), fill=(31, 111, 178))
+        d.ellipse(box(232, 247, 280, 295), fill=(11, 127, 112))
+        d.ellipse(box(340, 200, 366, 226), fill=(255, 181, 71))
         out = io.BytesIO()
         im.save(out, "PNG", optimize=True)
         self.icons[size] = out.getvalue()
@@ -675,7 +694,7 @@ class WebApp:
             return err(404, "Not found")
         base = "/web" if tok is None else f"/w/{tok}"
         data = {"name": f"{self.d.owner_name} · Photos", "short_name": "Photos", "id": base, "start_url": base, "scope": base,
-                "display": "standalone", "background_color": "#ffffff", "theme_color": "#1f6fb2",
+                "display": "standalone", "background_color": "#ffffff", "theme_color": "#0b7f70",
                 "icons": [{"src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable"},
                           {"src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable"}]}
         return Resp(200, json.dumps(data).encode(), "application/manifest+json", {"Cache-Control": "no-store", "X-Robots-Tag": "noindex"})

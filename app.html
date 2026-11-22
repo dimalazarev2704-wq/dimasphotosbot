@@ -439,7 +439,9 @@ function avatar(name) {
   return h("div", { class: "avatar", style: "background:" + c, "aria-hidden": "true", "data-ugc": "1", text: ([...n][0] || "?").toUpperCase() });
 }
 function splash(title, sub) {
-  return [h("div", { class: "splash" }, icon("camera", "logo"), h("h1", { text: title }), sub ? h("div", { class: "hint", text: sub }) : null)];
+  const mark = icon("camera", "logo");
+  const pic = h("img", { src: "/icon-192.png", alt: "", class: "logo", style: "object-fit:cover;padding:0", on: { error: () => { pic.replaceWith(mark); } } });
+  return [h("div", { class: "splash" }, pic, h("h1", { text: title }), sub ? h("div", { class: "hint", text: sub }) : null)];
 }
 function drawTabs() {
   if (!HOME && !IS_ADMIN) { $tabs.replaceChildren(); return; }  // (the owner's tabs differ, so wait to know who this is)
