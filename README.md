@@ -420,4 +420,4 @@ One clean, colourful look for everyone: soft rounded cards, big buttons, real li
 
 ## The app icon / logo
 
-Put a picture called `logo.png` next to `webapp.py` (any size; the middle square is used) and it becomes the home-screen icon, the browser tab icon and the logo on the connect screen, with thin viewfinder corners added. Without it, a simple teal camera is drawn.
+The picture `logo.png` (next to `webapp.py`) is your logo: it shows on the connect screen, and it is made square (its own background is extended) for the home-screen icon and the browser tab. Replace the file to change it. If it is missing, a simple teal camera is drawn.

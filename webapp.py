@@ -605,6 +605,12 @@ class WebApp:
                 return Resp(200, b"ok", "text/plain")
             if path == "/app" and method == "GET":
                 return self.page()
+            if method == "GET" and path == "/logo.png":  # (the picture itself, for the connect screen)
+                lp = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logo.png")
+                if os.path.exists(lp):
+                    with open(lp, "rb") as f:
+                        return Resp(200, f.read(), "image/png", {"Cache-Control": "public, max-age=86400"})
+                return err(404, "Not found")
             if method == "GET" and (m := re.fullmatch(r"/icon-(180|192|512)\.png", path)):
                 return Resp(200, self.app_icon(int(m.group(1))), "image/png", {"Cache-Control": "public, max-age=86400"})
             if method == "GET" and (m := re.fullmatch(r"/w/([A-Za-z0-9_-]{10,60})/manifest\.webmanifest", path)):
@@ -655,20 +661,28 @@ class WebApp:
             return hit
         from PIL import Image, ImageDraw
         logo = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logo.png")
-        if os.path.exists(logo):  # your own picture (logo.png next to this file): centred, square, with thin viewfinder corners
+        if os.path.exists(logo):  # your own picture (logo.png next to this file): made square by extending its own background
             try:
                 src = Image.open(logo).convert("RGB")
-                side = min(src.size)
-                left, top = (src.size[0] - side) // 2, (src.size[1] - side) // 2
-                im = src.crop((left, top, left + side, top + side)).resize((size, size), Image.LANCZOS)
-                d = ImageDraw.Draw(im)
-                m, arm, wd = size * 0.09, size * 0.2, max(2, round(size * 0.018))
-                for sx, sy in ((1, 1), (-1, -1)):
-                    x0, y0 = (m, m) if sx == 1 else (size - m, size - m)
-                    d.line((x0, y0, x0 + sx * arm, y0), fill=(255, 255, 255), width=wd)
-                    d.line((x0, y0, x0, y0 + sy * arm), fill=(255, 255, 255), width=wd)
+                from PIL import ImageFilter
+                fit = src.resize((size, max(1, round(src.size[1] * size / src.size[0]))), Image.LANCZOS)
+                top = (size - fit.size[1]) // 2
+                bgim = Image.new("RGB", (size, size))
+                if top > 0:  # extend the picture's own top and bottom edge into the empty bands, softened
+                    band = max(2, size // 40)
+                    up = fit.crop((0, 0, size, band)).resize((size, top), Image.LANCZOS).filter(ImageFilter.GaussianBlur(size / 30))
+                    down = fit.crop((0, fit.size[1] - band, size, fit.size[1])).resize((size, size - top - fit.size[1]), Image.LANCZOS).filter(ImageFilter.GaussianBlur(size / 30))
+                    bgim.paste(up, (0, 0))
+                    bgim.paste(down, (0, top + fit.size[1]))
+                bgim.paste(fit, (0, top))
+                if top > 0:  # blend the two joins
+                    seam = bgim.crop((0, max(0, top - size // 40), size, top + size // 40)).filter(ImageFilter.GaussianBlur(size / 80))
+                    bgim.paste(seam, (0, max(0, top - size // 40)))
+                    y2 = top + fit.size[1]
+                    seam = bgim.crop((0, y2 - size // 40, size, min(size, y2 + size // 40))).filter(ImageFilter.GaussianBlur(size / 80))
+                    bgim.paste(seam, (0, y2 - size // 40))
                 out = io.BytesIO()
-                im.save(out, "PNG", optimize=True)
+                bgim.save(out, "PNG", optimize=True)
                 self.icons[size] = out.getvalue()
                 return self.icons[size]
             except Exception:
