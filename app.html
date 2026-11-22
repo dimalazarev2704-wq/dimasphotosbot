@@ -145,6 +145,7 @@ nav button.on{background:color-mix(in srgb,var(--btn) 14%,transparent);color:var
 .ico{display:inline-flex;vertical-align:-4px}.ico svg{width:20px;height:20px;stroke:currentColor;fill:none;stroke-width:1.9;stroke-linecap:round;stroke-linejoin:round}
 .person{display:flex;align-items:center;gap:12px}
 .person .who{flex:1;min-width:0}
+.brand{display:block;margin:12px auto 12px;width:62%;max-width:230px;border-radius:16px;box-shadow:0 10px 22px -14px #0008}
 </style>
 </head>
 <body>
@@ -486,6 +487,7 @@ async function homeScreen() {
       h("button", { on: { click: () => { size = Math.max(14, size - 2); applySize(); } }, "aria-label": "Smaller text", text: "A−" }),
       h("button", { on: { click: () => { size = Math.min(30, size + 2); applySize(); } }, "aria-label": "Bigger text", text: "A+" }),
       h("button", { on: { click: () => push(helpScreen) }, "aria-label": "Help", text: "❓" })),
+    h("img", { src: "/logo.png", alt: "Dima's Photos", class: "brand", on: { error: e => e.target.remove() } }),
     h("h1", { text: HOME.first ? "Hi " + HOME.first + "! 👋" : "Hi! 👋" }),
     h("div", { class: "hint", text: HOME.family ? "The " + HOME.family + " family's photos" : "" }),
   ];
