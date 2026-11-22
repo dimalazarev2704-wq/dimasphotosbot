@@ -8,15 +8,19 @@
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 <style>
 :root{
-  --bg:var(--tg-theme-bg-color,#fff);
-  --text:var(--tg-theme-text-color,#111);
-  --hint:var(--tg-theme-hint-color,#6b7280);
-  --btn:var(--tg-theme-button-color,#2481cc);
-  --btntext:var(--tg-theme-button-text-color,#fff);
-  --sec:var(--tg-theme-secondary-bg-color,#f1f3f5);
+  --f-bg:#ffffff;--f-text:#1c1b2e;--f-hint:#6a6d85;--f-btn:#5b5bf0;--f-btntext:#fff;--f-sec:#f3f2ff;--f-line:#e4e2f7;
+  --bg:var(--tg-theme-bg-color,var(--f-bg));
+  --text:var(--tg-theme-text-color,var(--f-text));
+  --hint:var(--tg-theme-hint-color,var(--f-hint));
+  --btn:var(--tg-theme-button-color,var(--f-btn));
+  --btntext:var(--tg-theme-button-text-color,var(--f-btntext));
+  --sec:var(--tg-theme-secondary-bg-color,var(--f-sec));
+  --line:var(--f-line);
+  --pop:#ffb547;
   --fs:18px;
   --tabh:64px;
 }
+@media (prefers-color-scheme:dark){:root{--f-bg:#14131f;--f-text:#f2f1ff;--f-hint:#a3a6bf;--f-btn:#9a9aff;--f-btntext:#14131f;--f-sec:#201f31;--f-line:#2f2d45}}
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
 html,body{margin:0;background:var(--bg);color:var(--text);font:var(--fs)/1.35 -apple-system,system-ui,"Segoe UI",Roboto,sans-serif}
 #main{padding:10px 14px calc(var(--tabh) + 28px + env(safe-area-inset-bottom))}
@@ -99,6 +103,48 @@ textarea{min-height:140px}
 .file.bad .st{color:#e53935}
 .bar{height:10px;border-radius:5px;background:#8883;margin-top:10px;overflow:hidden}
 .bar i{display:block;height:100%;width:0;background:var(--btn);transition:width .2s}
+
+/* ---- friendlier look: big rounded cards, soft shadows, real icons ---- */
+h1{font-size:1.55em;font-weight:800;letter-spacing:-.02em;margin:8px 0 4px}
+h2{font-weight:700}
+button{transition:transform .12s ease,filter .12s ease}
+button:active{transform:scale(.97)}
+.cta{border-radius:18px;box-shadow:0 6px 16px -8px var(--btn);font-weight:700}
+.cta.alt{box-shadow:none;border:1px solid var(--line)}
+.card,.hero,.msg,.stat{border-radius:20px}
+.card,.hero{box-shadow:0 1px 0 var(--line),0 10px 24px -18px #0006}
+.hero{padding:16px 14px 18px;background:linear-gradient(180deg,var(--sec),transparent 140%);border:1px solid var(--line)}
+.grid{gap:6px}.grid button{border-radius:12px}
+.chip{transition:background .15s}
+.tiles{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin:10px 0}
+.tile{position:relative;display:block;padding:0;border:0;border-radius:22px;overflow:hidden;aspect-ratio:1/1.05;background:var(--sec);color:#fff;text-align:start;box-shadow:0 10px 24px -16px #0008}
+.tile img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+.tile .cap{position:absolute;left:0;right:0;bottom:0;padding:34px 12px 12px;background:linear-gradient(#0000,#000b)}
+.tile .cap b{display:block;font-size:.95em;line-height:1.2;overflow-wrap:anywhere}
+.tile .cap span{font-size:.72em;opacity:.85}
+.tile .ph0{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:var(--hint)}
+nav{left:12px;right:12px;bottom:calc(10px + env(safe-area-inset-bottom));padding:6px;border:1px solid var(--line);border-radius:26px;background:color-mix(in srgb,var(--bg) 92%,transparent);backdrop-filter:blur(12px);box-shadow:0 12px 30px -12px #0007;overflow-x:auto;scrollbar-width:none}
+nav::-webkit-scrollbar{display:none}
+nav:empty{display:none}
+.cta+.hint,.cta+.msg{margin-top:14px}
+nav button{height:calc(var(--tabh) - 12px);border-radius:20px;min-width:58px;font-size:10.5px}
+nav button svg{width:24px;height:24px;stroke:currentColor;fill:none;stroke-width:1.9;stroke-linecap:round;stroke-linejoin:round}
+nav button.on{background:color-mix(in srgb,var(--btn) 14%,transparent);color:var(--btn)}
+#main{padding-bottom:calc(var(--tabh) + 44px + env(safe-area-inset-bottom))}
+.splash{display:flex;flex-direction:column;align-items:center;text-align:center;padding:30px 4px 6px}
+.splash .logo{width:92px;height:92px;border-radius:30px;display:flex;align-items:center;justify-content:center;color:#fff;background:linear-gradient(135deg,var(--btn),var(--pop));box-shadow:0 18px 32px -16px var(--btn)}
+.splash .logo svg{width:46px;height:46px;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+.splash h1{margin:18px 0 6px;font-size:1.7em}
+.splash .hint{max-width:320px}
+.codebox{width:100%;box-sizing:border-box;font-size:34px;font-weight:700;text-align:center;letter-spacing:6px;padding:16px;margin:18px 0 4px;border-radius:20px;border:2px solid var(--line);background:var(--sec);color:var(--text);font-variant-numeric:tabular-nums}
+.codebox:focus{outline:none;border-color:var(--btn);box-shadow:0 0 0 4px color-mix(in srgb,var(--btn) 20%,transparent)}
+.avatar{flex:none;width:46px;height:46px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:1.1em;color:#fff}
+.pill{display:inline-block;padding:2px 10px;border-radius:999px;font-size:.7em;font-weight:700;background:color-mix(in srgb,var(--btn) 15%,transparent);color:var(--btn);margin-inline-end:6px}
+.pill.off{background:#8882;color:var(--hint)}
+.pill.ok{background:#2e9e5b22;color:#2e9e5b}
+.ico{display:inline-flex;vertical-align:-4px}.ico svg{width:20px;height:20px;stroke:currentColor;fill:none;stroke-width:1.9;stroke-linecap:round;stroke-linejoin:round}
+.person{display:flex;align-items:center;gap:12px}
+.person .who{flex:1;min-width:0}
 </style>
 </head>
 <body>
@@ -367,19 +413,47 @@ new MutationObserver(ms => {
 const _confirmRu = s => ruT(s);
 applySize();
 
+const ICONS = {
+  admin: '<path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18l3 3 6.3-6.3a4 4 0 0 0 5.4-5.4l-2.6 2.6-2.4-.6-.6-2.4z"/>',
+  home: '<path d="M3 11l9-8 9 8"/><path d="M5 10v10h5v-6h4v6h5V10"/>',
+  dates: '<rect x="3" y="5" width="18" height="16" rx="3"/><path d="M8 3v4M16 3v4M3 10h18"/>',
+  places: '<path d="M12 21s7-6.2 7-11.5A7 7 0 0 0 5 9.5C5 14.8 12 21 12 21z"/><circle cx="12" cy="9.5" r="2.5"/>',
+  all: '<rect x="3" y="4" width="18" height="16" rx="3"/><circle cx="9" cy="10" r="1.8"/><path d="M21 16l-5-5-8 8"/>',
+  best: '<path d="M12 3l2.7 5.6 6.1.8-4.5 4.3 1.1 6.1L12 16.8 6.6 19.8l1.1-6.1L3.2 9.4l6.1-.8z"/>',
+  sug: '<path d="M9 18h6M10 21h4"/><path d="M12 3a6 6 0 0 0-3.5 10.9c.6.5 1 1.2 1 2.1h5c0-.9.4-1.6 1-2.1A6 6 0 0 0 12 3z"/>',
+  fav: '<path d="M12 20s-7.5-4.6-9-9.3C2 7.6 4 5 6.8 5c1.9 0 3.2 1 5.2 3 2-2 3.3-3 5.2-3C20 5 22 7.6 21 10.7 19.5 15.4 12 20 12 20z"/>',
+  settings: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/>',
+  camera: '<path d="M4 8h3l2-3h6l2 3h3a1 1 0 0 1 1 1v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V9a1 1 0 0 1 1-1z"/><circle cx="12" cy="13" r="3.6"/>',
+  lock: '<rect x="4" y="10" width="16" height="11" rx="3"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/>',
+  phone: '<rect x="7" y="2.5" width="10" height="19" rx="2.5"/><path d="M11 18.5h2"/>',
+  key: '<circle cx="8" cy="15" r="4"/><path d="M11 12l9-9M17 6l3 3M14 9l2 2"/>',
+};
+function icon(name, cls) {  // (a fixed, built-in picture: the strings above are never user text)
+  const s = h("span", { class: cls || "ico", "aria-hidden": "true" });
+  s.innerHTML = '<svg viewBox="0 0 24 24">' + (ICONS[name] || "") + "</svg>";
+  return s;
+}
+const AVATAR_COLORS = ["#5b5bf0", "#e5731f", "#2e9e5b", "#d04a8c", "#2a8fbd", "#8b5cf6"];
+function avatar(name) {
+  const n = String(name || "?").trim(), c = AVATAR_COLORS[[...n].reduce((s, ch) => s + ch.charCodeAt(0), 0) % AVATAR_COLORS.length];
+  return h("div", { class: "avatar", style: "background:" + c, "aria-hidden": "true", "data-ugc": "1", text: ([...n][0] || "?").toUpperCase() });
+}
+function splash(title, sub) {
+  return [h("div", { class: "splash" }, icon("camera", "logo"), h("h1", { text: title }), sub ? h("div", { class: "hint", text: sub }) : null)];
+}
 function drawTabs() {
   if (!HOME && !IS_ADMIN) { $tabs.replaceChildren(); return; }  // (the owner's tabs differ, so wait to know who this is)
   let defs = [];
-  if (IS_ADMIN) defs.push(["admin", "🛠", "Admin"]);
+  if (IS_ADMIN) defs.push(["admin", "admin", "Admin"]);
   if (!IS_ADMIN || adminFam != null) {
-    defs.push(["home", "🏠", "Home"], ["dates", "📅", "Dates"], ["places", "📍", "Places"], ["all", "🖼", "All"]);
-    if (HOME && HOME.best) defs.push(["best", "⭐", "Best"]);
-    if (!IS_GUEST) defs.push(["sug", "💡", "Suggested"]);
-    if (!IS_ADMIN && HOME && HOME.favs > 0) defs.push(["fav", "♥", "Favorites"]);  // (only once they have a heart)
-    if (GUEST_TOKEN) defs.push(["settings", "⚙️", "Settings"]);  // (on the website: logging in, text size, add to home screen)
+    defs.push(["home", "home", "Home"], ["dates", "dates", "Dates"], ["places", "places", "Places"], ["all", "all", "All"]);
+    if (HOME && HOME.best) defs.push(["best", "best", "Best"]);
+    if (!IS_GUEST) defs.push(["sug", "sug", "Suggested"]);
+    if (!IS_ADMIN && HOME && HOME.favs > 0) defs.push(["fav", "fav", "Favorites"]);  // (only once they have a heart)
+    if (GUEST_TOKEN) defs.push(["settings", "settings", "Settings"]);  // (on the website: logging in, text size, add to home screen)
   }
   $tabs.replaceChildren(...defs.map(([k, ic, label]) =>
-    h("button", { class: k === tab ? "on" : "", on: { click: () => { haptic(); setTab(k); } } }, h("span", { class: "ic", text: ic }), label)));
+    h("button", { class: k === tab ? "on" : "", on: { click: () => { haptic(); setTab(k); } } }, icon(ic, "ic"), label)));
 }
 
 // ---------- home / welcome ----------
@@ -562,11 +636,11 @@ async function listScreen(title, path, kind) {
   let data;
   try { data = await api(path); } catch (e) { if (my === navId) errorScreen(e, () => listScreen(title, path, kind)); return; }
   if (my !== navId) return;
-  const rows = data.rows.map(r => h("button", { class: "row", on: { click: () => push(() => gridScreen(r.label, { mode: kind, value: r.v })) } },
+  const rows = data.rows.map(r => h("button", { class: "tile", on: { click: () => push(() => gridScreen(r.label, { mode: kind, value: r.v })) } },
     h("img", { src: r.cover, alt: "", loading: "lazy", on: { error: e => { e.target.style.visibility = "hidden"; } } }),
-    h("span", {}, h("b", { "data-ugc": "1", text: r.label }), h("span", { class: "hint", text: r.n + (r.n === 1 ? " photo" : " photos") }))));
+    h("span", { class: "cap" }, h("b", { "data-ugc": "1", text: r.label }), h("span", { text: r.n + (r.n === 1 ? " photo" : " photos") }))));
   const addTo = IS_ADMIN && typeof adminFam === "number" ? h("button", { class: "cta alt", text: "➕ Add to…", on: { click: () => push(() => uploadScreen(adminFam)) } }) : null;
-  show([banner(), h("h1", { text: title }), addTo, rows.length ? rows : h("div", { class: "msg", text: "No photos yet. Check back soon!" }), footer()]);
+  show([banner(), h("h1", { text: title }), addTo, rows.length ? h("div", { class: "tiles" }, rows) : h("div", { class: "msg", text: "No photos yet. Check back soon!" }), footer()]);
 }
 const datesScreen = () => listScreen("📅 Pick a date", "/api/dates", "date");
 const placesScreen = () => listScreen("📍 Pick a place", "/api/places", "loc");
@@ -881,9 +955,13 @@ async function peopleScreen(wp) {
   let d; try { d = await wp.call({ action: "list" }); } catch (e) { if (my === navId) errorScreen(e, () => peopleScreen(wp)); return; }
   show([backBtn(), h("h1", { text: wp.title }), wp.sub ? h("div", { class: "hint", text: wp.sub }) : null,
     h("div", { class: "hint", text: wp.owner ? "Each person connects their own device with a short code and has their own favorites. You can change anything for them, and lock a person so the parents can't." : "Let someone look at your family's photos in a web browser with no Telegram account. You make them a short code, they type it once on their device. You choose what each person can do." }),
-    d.people.length ? d.people.map(p => h("button", { class: "row", on: { click: () => push(() => personScreen(wp, p.id)) } },
-      h("b", { "data-ugc": "1", text: p.name }),
-      h("div", { class: "hint", text: statusLine(p) }))) : h("div", { class: "msg", text: "Nobody yet. Add a child, a grandparent or anyone you trust." }),
+    d.people.length ? d.people.map(p => h("button", { class: "row person", on: { click: () => push(() => personScreen(wp, p.id)) } },
+      avatar(p.name),
+      h("span", { class: "who" }, h("b", { "data-ugc": "1", text: p.name }),
+        h("div", {}, h("span", { class: p.on && !p.expired ? "pill ok" : "pill off", text: p.on && !p.expired ? "On" : p.expired ? "Expired" : "Off" }),
+          p.locked ? h("span", { class: "pill off", text: "🔒 Locked" }) : null),
+        h("div", { class: "hint", text: "Last opened: " + p.opened })),
+      h("span", { class: "hint", text: "›", "aria-hidden": "true" }))) : h("div", { class: "msg", text: "Nobody yet. Add a child, a grandparent or anyone you trust." }),
     d.people.length < d.max ? h("button", { class: "cta", text: "➕ Add a person", on: { click: () => push(() => addWebPersonScreen(wp)) } }) : h("div", { class: "hint", text: "That's the most people allowed (" + d.max + ")." }),
     wp.owner ? h("div", { class: "card" }, h("b", { text: "People allowed for this family: " + d.max }),
       h("div", { style: "display:flex;gap:10px;margin-top:8px" },
@@ -914,7 +992,7 @@ async function personScreen(wp, pid) {
     if (v === "dates") { push(() => pickDaysScreen(wp, pid)); return; }
     if (p.scope !== v) await save({ scope: v }, true); }) } });
   const expBtn = (days, label) => h("button", { class: "cta alt", style: "flex:1;margin:0;padding:10px 4px", text: label, on: { click: () => oneAtATime(async () => { await save({ days }, true); }) } });
-  show([backBtn(), h("h1", { "data-ugc": "1", text: p.name }),
+  show([backBtn(), h("div", { class: "person", style: "margin:6px 0" }, avatar(p.name), h("h1", { "data-ugc": "1", style: "margin:0", text: p.name })),
     h("div", { class: "hint", text: statusLine(p) }),
     h("div", { class: "hint", text: "👀 Opened " + p.seen + (p.seen === 1 ? " photo" : " photos") + " · ♥ " + p.favs + (p.favs === 1 ? " favorite" : " favorites") }),
     h("h2", { text: "Connect a device" }),
@@ -937,7 +1015,7 @@ async function personScreen(wp, pid) {
       ...(p.devices && p.devices.length ? [h("h2", { text: "📱 Connected devices" }),
         h("div", { class: "hint", text: "Each phone or tablet that is connected. Sign one out and it needs a new code or a PIN to get back in." }),
         ...p.devices.map(d => h("div", { class: "card", style: "display:flex;align-items:center;gap:10px" },
-          h("div", { style: "flex:1;min-width:0" }, h("b", { "data-ugc": "1", text: d.name }), h("div", { class: "hint", text: "Connected " + d.added + " · last used " + d.used })),
+          h("div", { style: "flex:1;min-width:0" }, h("b", { "data-ugc": "1" }, icon("phone"), " " + d.name), h("div", { class: "hint", text: "Connected " + d.added + " · last used " + d.used })),
           h("button", { class: "cta danger", style: "width:auto;margin:0;padding:8px 14px", text: "Sign out", on: { click: () => oneAtATime(async () => {
             if (!await confirmAsk("Sign " + p.name + " out of " + d.name + "?")) return;
             try { await wp.call({ action: "deldev", id: pid, dev: d.id }); } catch (e) { await alertMsg("⚠️ " + e.message); }
@@ -945,7 +1023,7 @@ async function personScreen(wp, pid) {
       ...(p.passkeys && p.passkeys.length ? [h("h2", { text: "🔐 Passkeys" }),
         h("div", { class: "hint", text: "Each one is a device that can log in with Face ID, a fingerprint or a screen lock. Delete one if a device is lost or no longer used." }),
         ...p.passkeys.map(k => h("div", { class: "card", style: "display:flex;align-items:center;gap:10px" },
-          h("div", { style: "flex:1;min-width:0" }, h("b", { "data-ugc": "1", text: k.name }), h("div", { class: "hint", text: "Added " + k.added + " · last used " + k.used })),
+          h("div", { style: "flex:1;min-width:0" }, h("b", { "data-ugc": "1" }, icon("key"), " " + k.name), h("div", { class: "hint", text: "Added " + k.added + " · last used " + k.used })),
           h("button", { class: "cta danger", style: "width:auto;margin:0;padding:8px 14px", text: "Delete", on: { click: () => oneAtATime(async () => {
             if (!await confirmAsk("Delete the passkey on " + k.name + "? It can no longer log in with that passkey. (If it is already connected it stays connected: use “Disconnect all their devices” to cut it off.)")) return;
             try { await wp.call({ action: "delpk", id: pid, pk: k.id }); } catch (e) { await alertMsg("⚠️ " + e.message); }
@@ -1400,12 +1478,12 @@ async function usersScreen() {
   const openWeb = (tid, name) => push(() => peopleScreen(Object.assign(ownerWp(tid, name), { tid })));
   show([backBtn(), h("h1", { text: "👥 Users" }), groupChips(gs, "users", usersScreen),
     h("div", { class: "hint", text: d.total + " in total" + (d.shown < d.total ? " (showing the newest " + d.shown + ")" : "") + " · " + d.inFamily + " in a family · " + (d.total - d.inFamily) + " not yet" + (d.webTotal ? " · " + d.webTotal + " on the website" : "") }),
-    ...(d.web && d.web.length ? [h("h2", { text: "🌐 Web access (no Telegram)" }), ...d.web.map(p => h("div", { class: "card", style: "cursor:pointer", on: { click: () => push(() => personScreen(Object.assign(ownerWp(p.tid, p.fam), { tid: p.tid }), p.id)) } },
-      h("b", { "data-ugc": "1", text: p.name }), h("div", { class: "hint", text: p.status }), h("div", { class: "hint", text: "Tap for their settings ›" })))] : []),
-    ...(d.rows.length ? [h("h2", { text: "Telegram" }), ...d.rows.map(p => h("div", { class: "card" },
+    ...(d.web && d.web.length ? [h("h2", { text: "🌐 Web access (no Telegram)" }), ...d.web.map(p => h("div", { class: "card person", style: "cursor:pointer", on: { click: () => push(() => personScreen(Object.assign(ownerWp(p.tid, p.fam), { tid: p.tid }), p.id)) } },
+      avatar(p.name), h("div", { class: "who" }, h("b", { "data-ugc": "1", text: p.name }), h("div", { class: "hint", text: p.status }), h("div", { class: "hint", text: "Tap for their settings ›" }))))] : []),
+    ...(d.rows.length ? [h("h2", { text: "Telegram" }), ...d.rows.map(p => h("div", { class: "card" }, h("div", { class: "person" }, avatar(p.name || "?"), h("div", { class: "who" },
       h("b", { text: p.name || "(no name)" }), p.username ? " @" + p.username : "",
       h("div", { class: "hint", text: p.status }),
-      h("div", { class: "hint", text: "ID " + p.id + (p.at ? " · started " + p.at : "") }),
+      h("div", { class: "hint", text: "ID " + p.id + (p.at ? " · started " + p.at : "") }))),
       p.tid ? h("div", { class: "btns" }, h("button", { class: "alt", text: "🌐 Web access for this family", on: { click: () => openWeb(p.tid, p.fam) } })) : null))]
       : [h("div", { class: "msg", text: gf.users ? "Nobody in this group yet." : "Nobody has started the bot yet." })])]);
 }
@@ -1720,7 +1798,7 @@ function pinLoginScreen(w, note) {  // (this device logged out, and the person s
     HOME = null; guestStart();
   });
   inp.addEventListener("keydown", e => { if (e.key === "Enter") go(); });
-  show([h("h1", { text: "🔐 Welcome back" }), h("div", { class: "hint", "data-ugc": "1", text: "Type your 6-digit PIN to open the photos." }),
+  show([...splash("Welcome back" + (w.name ? ", " + w.name : ""), "Type your 6-digit PIN to open the photos."),
     note ? h("div", { class: "msg", text: note }) : null, inp, h("button", { class: "cta", text: "Log in", on: { click: go } }), passkeyButton(),
     h("button", { class: "cta alt", text: "Use a new code instead", on: { click: () => { try { localStorage.removeItem("who:web"); } catch (e) {} connectScreen(); } } })]);
 }
@@ -1754,7 +1832,7 @@ function pinSetScreen() {
 }
 function connectScreen(note, force) {
   const who = webWho(); if (who && !note && !force) { pinLoginScreen(who); return; }
-  const inp = h("input", { type: "text", inputmode: "numeric", autocomplete: "off", maxlength: "9", placeholder: "0000 0000", style: "width:100%;box-sizing:border-box;font-size:30px;text-align:center;letter-spacing:3px;padding:12px;margin:12px 0" });
+  const inp = h("input", { type: "text", inputmode: "numeric", autocomplete: "off", maxlength: "9", placeholder: "0000 0000", class: "codebox", "aria-label": "Your 8-digit code" });
   inp.addEventListener("input", () => { const d = inp.value.replace(/\D/g, "").slice(0, 8); inp.value = d.length > 4 ? d.slice(0, 4) + " " + d.slice(4) : d; });
   const go = () => oneAtATime(async () => {
     if (inp.value.replace(/\D/g, "").length !== 8) { await alertMsg("Please type all 8 digits of your code."); return; }
@@ -1763,7 +1841,7 @@ function connectScreen(note, force) {
     HOME = null; guestStart();
   });
   inp.addEventListener("keydown", e => { if (e.key === "Enter") go(); });
-  show([h("h1", { text: "📷 Connect this device" }), h("div", { class: "hint", text: "Type the code you were given. You only have to do this once on this device." }),
+  show([...splash("Connect this device", "Type the code you were given. You only have to do this once on this device."),
     note ? h("div", { class: "msg", text: note }) : null, inp, h("button", { class: "cta", text: "Connect", on: { click: go } }),
     h("button", { class: "cta alt", text: "🔐 I have my PIN", on: { click: () => pinNewScreen() } }),
     passkeyButton(),

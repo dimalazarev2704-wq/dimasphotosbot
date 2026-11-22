@@ -413,3 +413,7 @@ The first time someone opens a web link on a phone, a sheet asks "Want this as a
 ### Home screen: the button, and asking people
 - Everyone (parents inside Telegram, web visitors in a browser) gets a permanent "📲 Add to home screen" button at the bottom of Home. Inside Telegram it uses Telegram's own "Add to Home Screen" (needs a recent Telegram); on the web it shows the example and the steps.
 - You can make the pop-up appear the next time someone opens the app: for one web person (their page), for a family's parents and web people (the family's Web link screen), or for everybody (Admin tile, or the bot's /admin "📲 Home-screen pop-up for everyone"). It appears once, then is cleared.
+
+## The look of the app and website
+
+One clean, colourful look for everyone: soft rounded cards, big buttons, real line icons in a floating tab bar, dates and places as big picture tiles, a welcoming connect / PIN screen with a camera logo, and colour avatars with status chips in the parents' and Users screens. On the website the colours follow the visitor's light or dark setting; inside Telegram they follow the Telegram theme.
