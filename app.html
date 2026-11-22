@@ -8,7 +8,7 @@
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 <style>
 :root{
-  --f-bg:#ffffff;--f-text:#1c1b2e;--f-hint:#6a6d85;--f-btn:#5b5bf0;--f-btntext:#fff;--f-sec:#f3f2ff;--f-line:#e4e2f7;
+  --f-bg:#ffffff;--f-text:#16211f;--f-hint:#5f716e;--f-btn:#0b7f70;--f-btntext:#fff;--f-sec:#eef7f5;--f-line:#d5e8e4;
   --bg:var(--tg-theme-bg-color,var(--f-bg));
   --text:var(--tg-theme-text-color,var(--f-text));
   --hint:var(--tg-theme-hint-color,var(--f-hint));
@@ -20,7 +20,7 @@
   --fs:18px;
   --tabh:64px;
 }
-@media (prefers-color-scheme:dark){:root{--f-bg:#14131f;--f-text:#f2f1ff;--f-hint:#a3a6bf;--f-btn:#9a9aff;--f-btntext:#14131f;--f-sec:#201f31;--f-line:#2f2d45}}
+@media (prefers-color-scheme:dark){:root{--f-bg:#0f1a19;--f-text:#e9f5f3;--f-hint:#9db4b0;--f-btn:#3ccfba;--f-btntext:#0a1816;--f-sec:#182827;--f-line:#27403d}}
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
 html,body{margin:0;background:var(--bg);color:var(--text);font:var(--fs)/1.35 -apple-system,system-ui,"Segoe UI",Roboto,sans-serif}
 #main{padding:10px 14px calc(var(--tabh) + 28px + env(safe-area-inset-bottom))}
@@ -433,7 +433,7 @@ function icon(name, cls) {  // (a fixed, built-in picture: the strings above are
   s.innerHTML = '<svg viewBox="0 0 24 24">' + (ICONS[name] || "") + "</svg>";
   return s;
 }
-const AVATAR_COLORS = ["#5b5bf0", "#e5731f", "#2e9e5b", "#d04a8c", "#2a8fbd", "#8b5cf6"];
+const AVATAR_COLORS = ["#0b7f70", "#e5731f", "#2e8bc9", "#d04a8c", "#c0392b", "#7a8a1f"];
 function avatar(name) {
   const n = String(name || "?").trim(), c = AVATAR_COLORS[[...n].reduce((s, ch) => s + ch.charCodeAt(0), 0) % AVATAR_COLORS.length];
   return h("div", { class: "avatar", style: "background:" + c, "aria-hidden": "true", "data-ugc": "1", text: ([...n][0] || "?").toUpperCase() });
