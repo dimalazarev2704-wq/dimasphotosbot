@@ -1790,6 +1790,7 @@ function passkeyButton() {
 }
 const pinBox = type => h("input", { type, inputmode: "numeric", autocomplete: "off", maxlength: "6", placeholder: "••••••", style: "width:100%;box-sizing:border-box;font-size:30px;text-align:center;letter-spacing:8px;padding:12px;margin:12px 0" });
 function pinLoginScreen(w, note) {  // (this device logged out, and the person set a PIN: they can come back in by themselves)
+  $tabs.replaceChildren();
   const inp = pinBox("password");
   const go = () => oneAtATime(async () => {
     if (!/^\d{6}$/.test(inp.value)) { await alertMsg("Please type your 6-digit PIN."); return; }
@@ -1803,6 +1804,7 @@ function pinLoginScreen(w, note) {  // (this device logged out, and the person s
     h("button", { class: "cta alt", text: "Use a new code instead", on: { click: () => { try { localStorage.removeItem("who:web"); } catch (e) {} connectScreen(); } } })]);
 }
 function pinNewScreen(note) {  // (a new device: no parent needed, just the first letter of their name and their own PIN)
+  $tabs.replaceChildren();
   const nm = h("input", { type: "text", autocomplete: "off", autocapitalize: "characters", maxlength: "30", placeholder: "First letter of my name", style: "width:100%;box-sizing:border-box;font-size:18px;padding:12px;margin:6px 0" });
   const pn = pinBox("password");
   const go = () => oneAtATime(async () => {
@@ -1831,6 +1833,7 @@ function pinSetScreen() {
     HOME && HOME.pin ? h("button", { class: "cta alt", text: "Remove my PIN", on: { click: () => save("") } }) : null]);
 }
 function connectScreen(note, force) {
+  $tabs.replaceChildren();  // (no tab bar before someone is connected)
   const who = webWho(); if (who && !note && !force) { pinLoginScreen(who); return; }
   const inp = h("input", { type: "text", inputmode: "numeric", autocomplete: "off", maxlength: "9", placeholder: "0000 0000", class: "codebox", "aria-label": "Your 8-digit code" });
   inp.addEventListener("input", () => { const d = inp.value.replace(/\D/g, "").slice(0, 8); inp.value = d.length > 4 ? d.slice(0, 4) + " " + d.slice(4) : d; });
