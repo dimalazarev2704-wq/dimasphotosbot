@@ -526,7 +526,8 @@ function settingsScreen() {  // (the website's Settings tab)
     ...mine,
     ...(canAddHome() ? [h("h2", { text: "On this device" }), h("button", { class: "cta alt", text: "📲 Add to home screen", on: { click: offerHomeScreen } })] : []),
     h("h2", { text: "Help" }), h("button", { class: "cta alt", text: "❓ How this works", on: { click: () => push(helpScreen) } }),
-    h("div", { class: "hint", style: "margin-top:12px;text-align:center" }, "Contact: ", h("a", { href: "mailto:photosfromdima@yahoo.com", text: "photosfromdima@yahoo.com" })),
+    h("div", { class: "hint", style: "margin-top:12px;text-align:center" }, "Contact: ", h("span", { style: "user-select:all;-webkit-user-select:all", text: "photosfromdima@yahoo.com" })),
+    h("button", { class: "cta alt", text: "📋 Copy email address", on: { click: () => oneAtATime(async () => { try { await navigator.clipboard.writeText("photosfromdima@yahoo.com"); await alertMsg("Email address copied."); } catch (e) { await alertMsg("Press and hold the address above to copy it."); } }) } }),
     footer()]);
 }
 function settingsLogin() {
