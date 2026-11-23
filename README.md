@@ -421,3 +421,9 @@ One clean, colourful look for everyone: soft rounded cards, big buttons, real li
 ## The app icon / logo
 
 The picture `logo.png` (next to `webapp.py`) is your logo: it shows on the connect screen, and it is made square (its own background is extended) for the home-screen icon and the browser tab. Replace the file to change it. If it is missing, a simple teal camera is drawn.
+
+## A nicer address with Cloudflare (free, no domain needed)
+
+1. Make a free Cloudflare account, open Workers & Pages, create a Worker (name it something short like `photos`), paste in `cloudflare-worker.js` (check `ORIGIN`) and deploy. You get `https://<name>.<account>.workers.dev`.
+2. Optional: in the Worker's Settings add a Cron Trigger `*/5 * * * *` to keep the free Render service awake (not needed if you already use UptimeRobot).
+3. In Render set `WEBAPP_URL=https://<name>.<account>.workers.dev` and `BEHIND_CLOUDFLARE=1`, then deploy. Do this before anyone makes a passkey (a passkey belongs to one address).
