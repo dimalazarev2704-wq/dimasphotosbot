@@ -110,6 +110,7 @@ ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "")  # needed for /addphotos in pri
 OWNER_ID = int(os.getenv("OWNER_ID", "0") or 0)
 # The name clients see when you add them yourself ("Dima has already added you to the ... family")
 OWNER_NAME = (os.getenv("OWNER_NAME", "") or "The photographer").strip()[:40]
+CONTACT_EMAIL = (os.getenv("CONTACT_EMAIL", "") or "photosfromdima@yahoo.com").strip()[:80]
 TZ = ZoneInfo(os.getenv("TIMEZONE", "America/New_York"))
 # Stops clients from forwarding/saving files from the chat (they can still screenshot)
 COPYRIGHT = (os.getenv("COPYRIGHT_NOTICE", "") or "© 2024 Dima Lazarev. All photos are protected by copyright.").strip()
@@ -2026,7 +2027,7 @@ def help_text(linked: bool) -> str:
         "➕ Suggest photos lets you share your own for the gallery.\n"
         "👪 Add a family member lets you add a relative: pick them from your contacts, then type their name.\n\n"
         f"{COPYRIGHT_WARNING}\n\n"
-        f"Stuck? Message {OWNER_NAME}."
+        f"Stuck? Message {OWNER_NAME} or email {CONTACT_EMAIL}."
     )
 
 
