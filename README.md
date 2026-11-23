@@ -427,3 +427,5 @@ The picture `logo.png` (next to `webapp.py`) is your logo: it shows on the conne
 1. Make a free Cloudflare account, open Workers & Pages, create a Worker (name it something short like `photos`), paste in `cloudflare-worker.js` (check `ORIGIN`) and deploy. You get `https://<name>.<account>.workers.dev`.
 2. Optional: in the Worker's Settings add a Cron Trigger `*/5 * * * *` to keep the free Render service awake (not needed if you already use UptimeRobot).
 3. In Render set `WEBAPP_URL=https://<name>.<account>.workers.dev` and `BEHIND_CLOUDFLARE=1`, then deploy. Do this before anyone makes a passkey (a passkey belongs to one address).
+
+©️2026 Dima's Photos. All Rights Reserved
