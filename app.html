@@ -1691,6 +1691,59 @@ document.addEventListener("visibilitychange", () => {
   const typing = [...document.querySelectorAll("textarea,input")].some(x => x.value);  // (never wipe something half-written)
   if (document.visibilityState === "visible" && HOME && !viewerOpen() && !typing && stack.length <= 1 && Date.now() - homeAt > 3600 * 1000) { HOME = null; setTab(typeof tab !== "undefined" && tab ? tab : (IS_ADMIN && adminFam == null ? "admin" : "home")); }  // (the home screen is what reloads HOME and the tab bar)
 });
+// ----- the owner reviews a trusted photographer's photos on the photographer's phone (opened from the bot's "📥 In process" window)
+function reviewScreen() {
+  $tabs.replaceChildren();
+  const input = h("input", { type: "password", inputmode: "numeric", autocomplete: "off", maxlength: "8", placeholder: "Code", style: "text-align:center;font-size:22px;letter-spacing:6px" });
+  const msg = h("div", { class: "msg" });
+  const go = h("button", { class: "cta", text: "Continue", on: { click: () => oneAtATime(async () => {
+    const pin = input.value.replace(/\D/g, "");
+    if (!pin) return;
+    msg.textContent = "";
+    try { await api("/api/review/pin", { pin }); input.value = ""; reviewList(); }
+    catch (e) { msg.textContent = e.message; }
+  }) } });
+  show([h("h1", { text: "🤝 Photographer's code" }), h("div", { class: "hint", text: "Enter your own code to look at this photographer's photos, and approve or delete them." }), input, msg, go]);
+}
+async function reviewList() {
+  $tabs.replaceChildren();
+  loading();
+  let d;
+  try { d = await api("/api/review/list", {}); }
+  catch (e) {
+    if (e.status === 401) { reviewScreen(); return; }
+    show([h("h1", { text: "Oops" }), h("div", { class: "msg err", text: e.message }), h("button", { class: "cta", text: "Try again", on: { click: reviewList } })]); return;
+  }
+  const my = navId;
+  const act = (r, action, btns, ask) => oneAtATime(async () => {
+    if (ask && !await confirmAsk(ask)) return;
+    btns.forEach(b => b.disabled = true);
+    try { const x = await api("/api/review/act", { id: r.id, action }); await alertMsg(x.message); }
+    catch (e) { if (e.status === 401) { reviewScreen(); return; } await alertMsg("⚠️ " + e.message); }
+    if (my === navId) reviewList();
+  });
+  const card = r => {
+    const btns = [];
+    const mk = (text, cls, fn) => { const b = h("button", { class: cls, text, on: { click: fn } }); btns.push(b); return b; };
+    return h("div", { class: "card" },
+      h("b", { text: r.family + " family" }),
+      h("div", { class: "hint", text: r.n + (r.n === 1 ? " file" : " files") + " · " + r.dt + (r.place ? " · " + r.place : "") + (r.hold ? " · ⏸ on hold" : "") + " · " + r.at }),
+      photoGrid(r.cards),
+      h("div", { class: "btns" },
+        r.state === "wait" ? mk("✅ Let go", "", () => act(r, "go", btns, "Publish these photos?")) : null,
+        mk("🗑 Delete", "danger", () => act(r, "del", btns, r.state === "wait" ? "Delete these? They won't be added." : "Delete these from the family's photos?"))));
+  };
+  const wait = d.rows.filter(r => r.state === "wait"), done = d.rows.filter(r => r.state === "done");
+  show([h("h1", { text: "📥 In process" }),
+    wait.length ? wait.map(card) : h("div", { class: "msg", text: "Nothing is waiting. 🎉" }),
+    h("h2", { text: "✅ Approved" }),
+    done.length ? done.map(card) : h("div", { class: "msg", text: "Nothing yet." }),
+    h("button", { class: "cta alt", text: "🚪 Sign out", on: { click: () => oneAtATime(async () => {
+      try { await api("/api/review/signout", {}); } catch (e) {}
+      show([h("h1", { text: "Signed out" }), h("div", { class: "msg", text: "The review is closed. Nobody can approve or delete from this phone any more." }),
+        h("button", { class: "cta", text: "Close", on: { click: () => { try { tg.close(); } catch (e) {} } } })]);
+    }) } })]);
+}
 async function helperScreen() {
   const q = new URLSearchParams(location.search);
   const first = (q.get("n") || "").slice(0, 40);
@@ -1874,6 +1927,7 @@ async function guestStart() {
   setTab("home"); maybeOfferApp();
 }
 if (IS_GUEST) guestStart(); else
+if (new URLSearchParams(location.search).get("review") === "1" && initData && !IS_ADMIN) reviewScreen(); else
 if (new URLSearchParams(location.search).get("helper") === "1" && initData && !IS_ADMIN) helperScreen(); else
 setTab("home");
 </script>

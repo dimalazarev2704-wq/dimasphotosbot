@@ -912,6 +912,15 @@ class WebApp:
                     row["cards"] = [self.sug_card(row, row["id"], i, uid) for i in range(min(row["n"], 10))]
             return jresp(data, status)
 
+        if path in ("/api/review/pin", "/api/review/list", "/api/review/act", "/api/review/signout"):  # (the owner reviews a trusted photographer's batches with his own code)
+            if owner:
+                return err(403, "This is for trusted photographers.")
+            status, data = await self.d.review(uid, user, path.rsplit("/", 1)[1], req)
+            if path.endswith("/list") and status == 200:
+                for row in data["rows"]:
+                    row["cards"] = [self.sug_card({**row, "place": row["place"]}, row["id"], i, uid) for i in range(min(row["n"], 10))]
+            return jresp(data, status)
+
         if path in ("/api/helper/families", "/api/helper/link", "/api/helper/newfam"):  # (the photographer letting someone in on their phone)
             if owner:
                 return err(403, "This is for clients.")
@@ -1207,9 +1216,7 @@ class WebApp:
             return err(404, "Not found")
         if not hmac.compare_digest(self.sug_sign(sid, i, size, uid, exp), sig) or exp < time.time():
             return err(403, "This link expired. Close and reopen the app.")
-        if not self.d.is_owner(uid):
-            return err(404, "Not found")
-        item = await self.d.suggestion_item(sid, i)
+        item = await self.d.suggestion_item(sid, i) if self.d.is_owner(uid) else await self.d.review_item(uid, sid, i)
         if not item or not isinstance(item.get("file_id"), str):
             return err(404, "Not found")
         doc = {"message_id": f"sug:{sid}:{i}", "file_id": item["file_id"], "kind": item.get("kind", "photo"),

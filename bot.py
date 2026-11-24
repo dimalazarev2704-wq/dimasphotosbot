@@ -1808,10 +1808,12 @@ def add_row() -> list:
 
 
 async def with_add_row(markup: InlineKeyboardMarkup, user_id: int) -> InlineKeyboardMarkup:
-    if not await add_role(user_id):
+    role = await add_role(user_id)
+    if not role:
         return markup
     rows = [list(r) for r in markup.inline_keyboard]
-    return InlineKeyboardMarkup(rows[:-1] + [add_row()] + rows[-1:])  # (above the 🏠 Menu button)
+    mine = add_row() + (review_row() if role == "trusted" else [])
+    return InlineKeyboardMarkup(rows[:-1] + [mine] + rows[-1:])  # (above the 🏠 Menu button)
 
 
 async def quick_places(tid: int) -> list[str]:
@@ -2927,6 +2929,142 @@ async def handle_look_text(update: Update, context: ContextTypes.DEFAULT_TYPE, l
     context.user_data.pop("lk", None)
     await msg.reply_text(f"✅ Changed to {what}." + (f" ({failed} caption{'s' if failed != 1 else ''} couldn't be updated; the gallery is right.)" if failed else ""),
                          reply_markup=look_buttons(doc["_id"]))
+
+
+# ---------- 📥 In process: a trusted photographer's window, and the owner's review (with his own code) ----------
+
+REVIEW_SECONDS = 1800  # (how long the code keeps the review open, 30 minutes)
+REVIEW_ROWS = 20
+
+
+async def review_open(uid: int) -> bool:
+    """True while the owner's code is active for this trusted photographer's phone."""
+    s = await db.revsess.find_one({"_id": uid})
+    return bool(s and s.get("until", 0) > time.time()) and await add_role(uid) == "trusted"
+
+
+async def review_rows(uid: int) -> list[dict]:
+    """This photographer's batches: waiting ones first, then published ones, newest first."""
+    docs = await db.suggestions.find({"from_id": uid, "status": {"$in": ["line", "review", "pending", "approved"]}}).sort("created", -1).to_list(80)
+    waiting = [d for d in docs if d["status"] != "approved"][:REVIEW_ROWS]
+    done = [d for d in docs if d["status"] == "approved" and d.get("pub")][:REVIEW_ROWS]
+    fams = {f["thread_id"]: f["name"] for f in await db.families.find().to_list()}
+    return [
+        {"id": d["_id"], "state": "wait" if d["status"] != "approved" else "done",
+         "hold": d["status"] == "review", "from": d.get("from_name") or "?",
+         "family": ", ".join(fams.get(t, "?") for t in [d["thread_id"]] + list(d.get("others", []))[:2]),
+         "dt": _safe_date(d.get("date")), "place": d.get("place") or "", "n": len(d.get("items", [])),
+         "kinds": [{"k": i.get("kind", "photo"), "dur": int(i.get("dur") or 0)} for i in d.get("items", [])[:10]],
+         "at": fmt_when(d.get("created"))}
+        for d in waiting + done]
+
+
+async def review_api(bot, uid: int, user: dict, action: str, req: dict) -> tuple[int, dict]:
+    if not HELPER_PIN:
+        return 404, {"error": "Not available."}
+    if await add_role(uid) != "trusted":
+        return 403, {"error": "This is for trusted photographers."}
+    if action == "pin":  # (the owner types his own code on the photographer's phone)
+        key = f"rpin:{uid}"
+        if await helper_global_locked():
+            return 429, {"error": "Too many wrong codes. Please try again in a while."}
+        lock = await locked_for(key)
+        if lock:
+            return 429, {"error": lock_text(lock)}
+        pin = re.sub(r"\D", "", str(req.get("pin") or ""))[:20]
+        if not hmac.compare_digest(pin.encode(), HELPER_PIN.encode()):
+            await helper_global_fail(bot)
+            locked = await record_fail(key)
+            return 403, {"error": "That code isn't right." + (" " + lock_text(LOCK_SECONDS) if locked else "")}
+        await clear_fails(key)
+        await db.revsess.update_one({"_id": uid}, {"$set": {"until": time.time() + REVIEW_SECONDS, "exp": datetime.now(timezone.utc) + timedelta(seconds=REVIEW_SECONDS)}}, upsert=True)
+        return 200, {"ok": True}
+    if action == "signout":
+        await db.revsess.delete_one({"_id": uid})
+        return 200, {"ok": True}
+    if not await review_open(uid):
+        return 401, {"error": "Please enter the code again."}
+    if action == "list":
+        return 200, {"rows": await review_rows(uid)}
+    if action == "act":
+        sid, act = req.get("id"), req.get("action")
+        if not isinstance(sid, str) or not re.fullmatch(r"[0-9a-f]{4,20}", sid) or act not in ("go", "del"):
+            return 400, {"error": "Bad request"}
+        doc = await db.suggestions.find_one({"_id": sid, "from_id": uid})
+        if not doc:
+            return 404, {"error": "That batch isn't there anymore."}
+
+        async def quiet(text: str, markup=None) -> None:
+            pass
+
+        st = doc["status"]
+        try:
+            if act == "go":
+                if st in LINE_STATUSES:
+                    await line_publish(bot, sid, quiet)
+                elif st == "pending":
+                    await process_suggestion(bot, sid, "o", quiet)
+                else:
+                    return 400, {"error": "That one is already published."}
+                after = await db.suggestions.find_one({"_id": sid}) or {}
+                if after.get("status") != "approved":
+                    return 502, {"error": "I couldn't finish publishing it. Please try again."}
+                return 200, {"message": "Published."}
+            if st in LINE_STATUSES:
+                await line_reject(bot, sid, quiet)
+            elif st == "pending":
+                await process_suggestion(bot, sid, "n", quiet)
+            elif st == "approved":
+                bad = 0
+                for pm in doc.get("pub", []):
+                    if await delete_photo_everywhere(bot, pm["m"]):
+                        bad += 1
+                await db.suggestions.update_one({"_id": sid}, {"$set": {"pub": [], "status": "deleted"}})
+                if bad:
+                    return 200, {"message": f"Deleted, but {bad} could not be removed (check my 'Delete messages' right)."}
+            else:
+                return 400, {"error": "Nothing to delete."}
+        except (TelegramError, RuntimeError):
+            log.exception("Review action failed")
+            return 502, {"error": "Telegram didn't answer. Please try again."}
+        return 200, {"message": "Deleted."}
+    return 404, {"error": "Not found"}
+
+
+def review_row() -> list:
+    return [InlineKeyboardButton("📥 In process", callback_data="rv:p")]
+
+
+async def review_window(uid: int, which: str) -> tuple[str, InlineKeyboardMarkup]:
+    rows = await review_rows(uid)
+    waiting = [r for r in rows if r["state"] == "wait"]
+    done = [r for r in rows if r["state"] == "done"]
+    show = waiting if which == "p" else done
+    def line(r: dict) -> str:
+        return f"• {r['family']} · {r['n']} file{'' if r['n'] == 1 else 's'} · {r['dt']}" + (f" · {r['place']}" if r["place"] else "") + (" · ⏸ on hold" if r["hold"] else "")
+    text = (f"📥 In process: {len(waiting)} waiting · ✅ Approved: {len(done)}\n\n"
+            + ("⏳ Waiting for approval:\n" if which == "p" else "✅ Published (approved):\n")
+            + ("\n".join(line(r) for r in show[:10]) if show else "Nothing here.")
+            + (f"\n…and {len(show) - 10} more" if len(show) > 10 else ""))
+    kb = [[_btn(("• " if which == "p" else "") + f"⏳ In process ({len(waiting)})", "rv:p"), _btn(("• " if which == "a" else "") + f"✅ Approved ({len(done)})", "rv:a")]]
+    if WEBAPP_URL and HELPER_PIN:
+        kb.append([InlineKeyboardButton(f"🤝 I have {OWNER_NAME} with me", web_app=WebAppInfo(url=f"{WEBAPP_URL}/app?review=1"))])
+    kb.append([InlineKeyboardButton("🏠 Menu", callback_data="menu")])
+    return text, InlineKeyboardMarkup(kb)
+
+
+async def on_review_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    if await add_role(q.from_user.id) != "trusted":
+        await q.answer("This is for trusted photographers.", show_alert=True)
+        return
+    text, markup = await review_window(q.from_user.id, q.data.split(":")[1])
+    await q.answer()
+    try:
+        await q.edit_message_text(text, reply_markup=markup)
+    except TelegramError as e:
+        if "not modified" not in str(e).lower():
+            await q.message.reply_text(text, reply_markup=markup)
 
 
 def next_line_state(u: dict) -> dict:
@@ -7267,6 +7405,17 @@ class WebDeps:
     async def helper(self, uid: int, user: dict, action: str, req: dict) -> tuple[int, dict]:
         return await helper_api(self.app.bot, uid, user, action, req)
 
+    async def review(self, uid: int, user: dict, action: str, req: dict) -> tuple[int, dict]:
+        return await review_api(self.app.bot, uid, user, action, req)
+
+    async def review_item(self, uid: int, sid: str, i: int):
+        """One photo of this trusted photographer's batch, only while the owner's code is active."""
+        if not await review_open(uid):
+            return None
+        doc = await db.suggestions.find_one({"_id": sid, "from_id": uid})
+        items = (doc or {}).get("items") or []
+        return items[i] if isinstance(i, int) and 0 <= i < len(items) else None
+
     @staticmethod
     def fmt_when(dt):
         return fmt_when(dt)
@@ -7443,6 +7592,7 @@ async def post_init(app: Application) -> None:
     await safe_index(lambda: db.families.create_index("thread_id", unique=True))
     await safe_index(lambda: db.families.create_index("code", unique=True))
     await safe_index(lambda: db.families.create_index("key"))
+    await safe_index(lambda: db.revsess.create_index("exp", expireAfterSeconds=0))
     await safe_index(lambda: db.photos.create_index("message_id", unique=True))
     await safe_index(lambda: db.photos.create_index([("thread_id", 1), ("date", 1)]))
     await safe_index(lambda: db.photos.create_index([("thread_id", 1), ("loc_id", 1)]))
@@ -7563,6 +7713,7 @@ def main() -> None:
     app.add_handler(CommandHandler("testlogin", testlogin_cmd, filters=priv))
     app.add_handler(CommandHandler("exittest", exittest_cmd, filters=priv))
     app.add_handler(CommandHandler("look", look_cmd, filters=priv))
+    app.add_handler(CallbackQueryHandler(on_review_button, pattern=r"^rv:(p|a)$"))
     app.add_handler(CallbackQueryHandler(on_look_button, pattern=r"^lk:[a-z]:[\w:-]+$"))
     app.add_handler(CommandHandler("addphotos", addphotos, filters=priv))
     app.add_handler(CommandHandler("done", done, filters=priv))
