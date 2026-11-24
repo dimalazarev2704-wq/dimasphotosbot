@@ -59,6 +59,8 @@ nav{position:fixed;left:0;right:0;bottom:0;display:flex;background:var(--bg);bor
 nav button{flex:1;min-width:0;height:var(--tabh);border:0;background:none;color:var(--hint);font:inherit;font-size:10px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;padding:0 2px}
 nav button .ic{font-size:22px;line-height:1}
 nav button.on{color:var(--btn);font-weight:700}
+.dh{grid-column:1/-1;font-weight:700;padding:12px 2px 2px;opacity:.75;font-size:.85em}
+.tail{min-height:2px}
 #viewer{position:fixed;inset:0;background:#000;color:#fff;z-index:10;display:none;touch-action:none;overflow:hidden}
 #viewer .stage{position:absolute;inset:0;display:flex;align-items:center;justify-content:center}
 #viewer img{max-width:100%;max-height:100%;transform-origin:center;will-change:transform;-webkit-user-drag:none;user-select:none}
@@ -69,6 +71,9 @@ nav button.on{color:var(--btn);font-weight:700}
 #viewer .copy{margin-top:8px;text-align:center;font-size:.6em;opacity:.7}
 #viewer .nav{position:absolute;top:45%;width:52px;height:90px;border:0;background:#0006;color:#fff;font-size:32px;border-radius:14px}
 #viewer .prev{left:6px}#viewer .next{right:6px}
+#viewer .cap,#viewer .bot,#viewer .nav{transition:opacity .2s}
+#viewer.clean .cap,#viewer.clean .bot,#viewer.clean .nav{opacity:0;pointer-events:none}
+#viewer img{cursor:grab}
 label{display:block;margin:14px 0 6px;font-weight:600}
 input[type=text],input[type=date],input[type=datetime-local],textarea,select{width:100%;min-height:52px;padding:10px 12px;border-radius:12px;border:2px solid #8885;background:var(--bg);color:var(--text);font:inherit}
 textarea{min-height:140px}
@@ -671,35 +676,66 @@ const placesScreen = () => listScreen("📍 Pick a place", "/api/places", "loc")
 
 // ---------- grids ----------
 const vlen = s => Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");
+function photoBtn(items, i) {
+  const p = items[i];
+  return h("button", { on: { click: () => { viewList = items; openViewer(i); } }, "aria-label": "Photo " + (i + 1) },
+    h("img", { src: p.t, alt: "", loading: "lazy", on: { error: e => { e.target.replaceWith(p.k === "video" ? h("div", { class: "vbox", text: "🎬" }) : h("div", { class: "hint", style: "padding:8px", text: "Tap to open" })); } } }),
+    p.k === "video" ? h("span", { class: "vid", text: "▶ " + (p.dur ? vlen(p.dur) : "Video") }) : null,
+    p.g ? h("span", { class: "grp", "data-ugc": "1", text: "👥 " + p.g }) : null,
+    p.best ? h("span", { class: "star", text: "⭐" }) : null);
+}
 function photoGrid(items) {
-  return h("div", { class: "grid" }, items.map((p, i) =>
-    h("button", { on: { click: () => { viewList = items; openViewer(i); } }, "aria-label": "Photo " + (i + 1) },
-      h("img", { src: p.t, alt: "", loading: "lazy", on: { error: e => { e.target.replaceWith(p.k === "video" ? h("div", { class: "vbox", text: "🎬" }) : h("div", { class: "hint", style: "padding:8px", text: "Tap to open" })); } } }),
-      p.k === "video" ? h("span", { class: "vid", text: "▶ " + (p.dur ? vlen(p.dur) : "Video") }) : null,
-      p.g ? h("span", { class: "grp", "data-ugc": "1", text: "👥 " + p.g }) : null,
-      p.best ? h("span", { class: "star", text: "⭐" }) : null)));
+  return h("div", { class: "grid" }, items.map((p, i) => photoBtn(items, i)));
+}
+// adds the photos from index `from` on to a grid; with `heads`, a date heading appears whenever the day changes
+function addPhotos(grid, items, from, heads) {
+  for (let i = from; i < items.length; i++) {
+    if (heads && items[i].dt && items[i].dt !== items.lastDt) { grid.append(h("div", { class: "dh", "data-ugc": "1", text: items[i].dt })); items.lastDt = items[i].dt; }
+    grid.append(photoBtn(items, i));
+  }
 }
 async function gridScreen(title, query, extra) {
   loading(); const my = navId;
   const all = [];
-  try { await loadMore(title, query, all, extra); } catch (e) { if (my === navId) errorScreen(e, () => gridScreen(title, query, extra)); }
-}
-async function loadMore(title, query, all, extra) {
-  const my = navId;
-  const data = await api("/api/photos", Object.assign({}, query, { skip: all.skip || 0 }));
+  const heads = query.mode !== "date";
+  const page = async () => {
+    const data = await api("/api/photos", Object.assign({}, query, { skip: all.skip || 0 }));
+    const have = new Set(all.map(p => p.id));  // (a photo added meanwhile can shift the pages, so skip repeats)
+    all.skip = (all.skip || 0) + data.items.length;
+    const from = all.length;
+    all.push(...data.items.filter(p => !have.has(p.id)));
+    return { from, more: !!data.more };
+  };
+  let first;
+  try { first = await page(); } catch (e) { if (my === navId) errorScreen(e, () => gridScreen(title, query, extra)); return; }
   if (my !== navId) return;
-  const have = new Set(all.map(p => p.id));  // (a photo added meanwhile can shift the pages, so skip repeats)
-  all.skip = (all.skip || 0) + data.items.length;
-  all.push(...data.items.filter(p => !have.has(p.id)));
-  const nodes = [banner(), backBtn(), h("h1", query.mode === "date" || query.mode === "loc" ? { "data-ugc": "1", text: title } : { text: title }), extra || null,
-    all.length ? photoGrid(all) : h("div", { class: "msg", text: "No photos here yet." })];
-  if (data.more) nodes.push(h("button", { class: "cta alt", on: { click: async (ev) => {
-    ev.target.disabled = true; ev.target.textContent = "Loading…";
-    const y = window.scrollY;
-    try { await loadMore(title, query, all, extra); window.scrollTo(0, y); } catch (e) { ev.target.disabled = false; ev.target.textContent = "Couldn't load. Tap to try again"; }
-  } }, text: "Show more photos" }));
-  nodes.push(footer());
-  show(nodes);
+  const grid = h("div", { class: "grid" });
+  addPhotos(grid, all, 0, heads);
+  const tail = h("div", { class: "tail" });
+  show([banner(), backBtn(), h("h1", query.mode === "date" || query.mode === "loc" ? { "data-ugc": "1", text: title } : { text: title }), extra || null,
+    all.length ? grid : h("div", { class: "msg", text: "No photos here yet." }), tail, footer()]);
+  // more photos load by themselves as you get near the bottom (the button stays as a fallback)
+  let busyMore = false, io = null;
+  const more = async () => {
+    if (busyMore || my !== navId || !tail.isConnected) return;
+    busyMore = true; tail.replaceChildren(h("div", { class: "spin", text: "Loading…" }));
+    try {
+      const r = await page();
+      if (my !== navId) return;
+      addPhotos(grid, all, r.from, heads);
+      tail.replaceChildren();
+      if (!r.more) { if (io) io.disconnect(); return; }
+      if (io) { io.unobserve(tail); io.observe(tail); }  // (checks again: the new photos may still not fill the screen)
+      else tail.append(btn());
+    } catch (e) { tail.replaceChildren(h("button", { class: "cta alt", text: "Couldn't load. Tap to try again", on: { click: more } })); }
+    finally { busyMore = false; }
+  };
+  const btn = () => h("button", { class: "cta alt", text: "Show more photos", on: { click: more } });
+  if (!first.more) return;
+  if ("IntersectionObserver" in window) {
+    io = new IntersectionObserver(es => { if (es.some(x => x.isIntersecting)) more(); }, { rootMargin: "900px 0px" });
+    io.observe(tail);
+  } else tail.append(btn());
 }
 function suggestedScreen() {
   const note = IS_ADMIN ? null : h("div", { class: "msg" }, "Photos your family shared and " + ((HOME && HOME.owner) || "the photographer") + " approved. To share your own, open the chat and tap “➕ Suggest photos”.",
@@ -720,10 +756,15 @@ const ROOTS = {
 const V = document.getElementById("viewer"), vimg = document.getElementById("vimg");
 let cur = 0, scale = 1, tx = 0, ty = 0;
 function viewerOpen() { return V.style.display === "block"; }
-function paint() { vimg.style.transform = `translate(${tx}px,${ty}px) scale(${scale})`; }
+function paint() {
+  // (the picture can't be dragged off the screen: it stops at its own edges)
+  const lx = Math.max(0, (vimg.clientWidth * scale - V.clientWidth) / 2), ly = Math.max(0, (vimg.clientHeight * scale - V.clientHeight) / 2);
+  tx = Math.max(-lx, Math.min(lx, tx)); ty = Math.max(-ly, Math.min(ly, ty));
+  vimg.style.transform = `translate(${tx}px,${ty}px) scale(${scale})`;
+}
 function resetZoom() { scale = 1; tx = ty = 0; paint(); }
 function openViewer(i) {
-  cur = i; dirty = false; V.style.display = "block"; document.body.style.overflow = "hidden";
+  cur = i; dirty = false; V.classList.remove("clean"); V.style.display = "block"; document.body.style.overflow = "hidden";
   document.getElementById("vcopy").textContent = HOME ? HOME.copyright : "";
   try { tg.disableVerticalSwipes(); } catch (e) {}
   syncBack(); showPhoto();
@@ -844,7 +885,13 @@ document.getElementById("vfav").onclick = (ev) => oneAtATime(async () => {
   } catch (e) { b.textContent = "⚠️ " + e.message; setTimeout(() => { if (viewList[cur] === p) drawFav(); }, 2500); return; }
   if (viewList[cur] === p) drawFav();
 });
-function step(d, quiet) { const n = cur + d; if (n >= 0 && n < viewList.length) { cur = n; showPhoto(); if (!quiet) haptic(); } }
+function step(d, quiet) {
+  const n = cur + d;
+  if (n >= 0 && n < viewList.length) {
+    cur = n; showPhoto(); if (!quiet) haptic();
+    if (!matchMedia("(prefers-reduced-motion: reduce)").matches) try { vimg.animate([{ transform: `translateX(${d * 60}px)`, opacity: .2 }, { transform: "translateX(0)", opacity: 1 }], { duration: 220, easing: "ease-out" }); } catch (e) {}
+  }
+}
 // slideshow: a new photo every 4 seconds, until they touch the screen, press a button, reach a video or the end
 let showTimer = null;
 function slideshowStop() {
@@ -897,11 +944,25 @@ V.addEventListener("touchend", e => {
   const dx = e.changedTouches[0].clientX - t0.x, dy = e.changedTouches[0].clientY - t0.y, t = t0; t0 = null;
   if (scale === 1 && Math.abs(dx) > 50 && Math.abs(dx) > Math.abs(dy) * 1.3) { step(dx < 0 ? 1 : -1); return; }
   if (scale === 1 && dy > 110 && Math.abs(dy) > Math.abs(dx) * 1.5) { closeViewer(); return; }
-  if (!t.moved) {  // a tap; two quick taps zoom
+  if (!t.moved) {  // a tap hides or shows the buttons; two quick taps zoom
     const now = Date.now();
-    if (now - lastTap < 320) { if (scale > 1) resetZoom(); else { scale = 2.5; tx = ty = 0; paint(); } lastTap = 0; } else lastTap = now;
+    if (now - lastTap < 320) { clearTimeout(tapTimer); if (scale > 1) resetZoom(); else { scale = 2.5; tx = ty = 0; paint(); } lastTap = 0; }
+    else { lastTap = now; clearTimeout(tapTimer); tapTimer = setTimeout(() => V.classList.toggle("clean"), 330); }
   }
 });
+let tapTimer = null;
+// computer: mouse wheel zooms, drag moves a zoomed picture, double click zooms
+V.addEventListener("wheel", e => {
+  e.preventDefault();
+  scale = Math.max(1, Math.min(5, scale * (e.deltaY < 0 ? 1.15 : 1 / 1.15)));
+  if (scale === 1) tx = ty = 0;
+  paint();
+}, { passive: false });
+let drag = null;
+vimg.addEventListener("mousedown", e => { if (scale > 1) { drag = { x: e.clientX, y: e.clientY, tx, ty }; e.preventDefault(); } });
+window.addEventListener("mousemove", e => { if (drag) { tx = drag.tx + e.clientX - drag.x; ty = drag.ty + e.clientY - drag.y; paint(); } });
+window.addEventListener("mouseup", () => { drag = null; });
+vimg.addEventListener("dblclick", () => { if (scale > 1) resetZoom(); else { scale = 2.5; tx = ty = 0; paint(); } });
 document.addEventListener("keydown", e => { if (!viewerOpen()) return; if (e.key === "ArrowRight") step(1); else if (e.key === "ArrowLeft") step(-1); else if (e.key === "Escape") closeViewer(); });
 
 // ---------- the owner's Admin tab ----------
@@ -921,20 +982,25 @@ async function adminHome() {
   const s = d.stats;
   show([h("h1", { text: "🛠 Admin" }),
     h("div", { class: "stats" }, stat(s.families, "Families"), stat(s.people, "People"), stat(s.photos, "Photos"), stat(s.new7, "New this week")),
+    h("h2", { text: "Do" }),
     bigRow("➕", "Add a family", "", () => push(addFamilyScreen)),
     bigRow("📤", "Add photos", "", () => push(() => uploadScreen(null))),
+    h("h2", { text: "Needs you" }),
     bigRow("💬", "Messages", s.comments, () => push(commentsScreen)),
     bigRow("📝", "Feedback", s.feedback, () => push(feedbackAdminScreen)),
     bigRow("💡", "Suggestions inbox", s.sugs, () => push(sugsScreen)),
+    bigRow("👀", "Not opened yet", "", () => push(notOpenedScreen)),
+    !(s.comments || s.feedback || s.sugs) ? h("div", { class: "hint", text: "✅ Nothing is waiting for you right now." }) : null,
+    h("h2", { text: "Manage" }),
     bigRow("📣", "Announcements & messages", s.scheduled ? s.scheduled + " scheduled" : "", () => { if (annDraft.aud === "person") annDraft = { aud: "all", person: "", text: "", picks: [] }; push(() => annScreen()); }),
     bigRow("🏷", "Groups", d.groups && d.groups.length ? d.groups.length : "", () => push(() => groupsScreen())),
-    bigRow("🕵️", "Login attempts", s.tries, () => push(() => triesScreen())),
-    bigRow("👀", "Not opened yet", "", () => push(notOpenedScreen)),
     bigRow("📸", "Photographers", "", () => push(uplineScreen)),
+    bigRow("👥", "Users", "", () => push(usersScreen)),
+    bigRow("🕵️", "Login attempts", s.tries, () => push(() => triesScreen())),
+    h("h2", { text: "Tools" }),
     bigRow("📲", "Home-screen pop-up for everyone", "", () => oneAtATime(async () => {
       if (!await confirmAsk("Show the “add to your home screen” pop-up to everyone the next time they open the app?")) return;
       try { const r = await api("/api/admin/a2hs", {}); await alertMsg(r.note); } catch (e) { await alertMsg("⚠️ " + e.message); } })),
-    bigRow("👥", "Users", "", () => push(usersScreen)),
     h("h2", { text: "Families" }), groupChips(d.groups || [], "fams", () => { const y = window.scrollY; adminHome().then(() => window.scrollTo(0, y)); }),
     d.families.length ? d.families.filter(f => !gf.fams || ((d.groups || []).find(g => g.id === gf.fams) || { tids: [] }).tids.includes(f.tid)).map(f => h("button", { class: "row", on: { click: () => push(() => familyScreen(f.tid)) } },
       h("span", {}, h("b", { text: f.name + " family" }),
