@@ -1614,7 +1614,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if data == "menu":
         context.user_data.pop("sug", None)
         context.user_data.pop("cm", None)
-        await show("What would you like to see?", await family_menu(thread_id, [add_row()] if await add_role(q.from_user.id) and not is_owner(q.from_user.id) else None))
+        await show("What would you like to see?", await family_menu(thread_id, [await role_row(q.from_user.id)] if await add_role(q.from_user.id) and not is_owner(q.from_user.id) else None))
 
     elif data == "bs":  # ⭐ Best shots
         if not await has_best(thread_id):
@@ -1808,13 +1808,16 @@ def add_row() -> list:
     return [InlineKeyboardButton("➕ Add to…", callback_data="ad:go")]
 
 
+async def role_row(user_id: int) -> list:
+    """The photographer's own buttons: ➕ Add to… for everyone with a role, plus 📥 In process for trusted photographers."""
+    return add_row() + (review_row() if await add_role(user_id) == "trusted" else [])
+
+
 async def with_add_row(markup: InlineKeyboardMarkup, user_id: int) -> InlineKeyboardMarkup:
-    role = await add_role(user_id)
-    if not role:
+    if not await add_role(user_id):
         return markup
     rows = [list(r) for r in markup.inline_keyboard]
-    mine = add_row() + (review_row() if role == "trusted" else [])
-    return InlineKeyboardMarkup(rows[:-1] + [mine] + rows[-1:])  # (above the 🏠 Menu button)
+    return InlineKeyboardMarkup(rows[:-1] + [await role_row(user_id)] + rows[-1:])  # (above the 🏠 Menu button)
 
 
 async def quick_places(tid: int) -> list[str]:
