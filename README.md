@@ -442,3 +442,10 @@ The picture `logo.png` (next to `webapp.py`) is your logo: it shows on the conne
 ## Tests
 
 `tests/` has checks that need no network or Telegram (a fake Telegram and a fake database): `python3 -I tests/t_review.py`, `tests/t_look.py`, `tests/t_web.py`. They cover the trusted photographers' 📥 In process review, `/look`, and the web server's review access.
+
+## Website extras
+
+- **Faster opens:** the page is sent with an ETag, so a phone that already has the current version gets a tiny "not changed" answer instead of re-downloading it (a new version still shows at once). The Cloudflare Worker also keeps the logo and home-screen icons at Cloudflare. After updating the Worker code, paste the new `cloudflare-worker.js` into it again.
+- **Clear errors:** "You're offline" and "The server didn't answer. It may be waking up" are told apart, and the screen tries again by itself (10 s, then 20 s, up to 60 s) instead of staying stuck.
+- **▶ Slideshow** in the photo viewer: a new photo every 4 seconds; it stops when you touch the screen, press a button, reach a video or the end.
+- **New here?** The connect screen has a short "who we are" blurb with the contact email (link and a copy button).

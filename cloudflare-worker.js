@@ -25,7 +25,7 @@ async function up() {  // is the real service answering?
 }
 
 export default {
-  async fetch(request) {
+  async fetch(request, env, ctx) {
     const url = new URL(request.url);
     if (url.pathname === "/status") {
       const ok = await up();
@@ -38,11 +38,18 @@ export default {
     // the bare address opens the website
     if (url.pathname === "/") return Response.redirect(url.origin + "/web", 302);
     const target = new Request(ORIGIN + url.pathname + url.search, request);
+    // the logo and the home-screen icons never change between updates: Cloudflare keeps a copy so they load fast (even while Render sleeps)
+    const still = request.method === "GET" && /^\/(logo\.png|icon-(180|192|512)\.png)$/.test(url.pathname);
+    if (still) {
+      const hit = await caches.default.match(request);
+      if (hit) return hit;
+    }
     const stop = new AbortController();
     const timer = setTimeout(() => stop.abort(), WAIT_MS * 2);  // (only waits for the answer to start; long photo downloads are not cut off)
     try {
       const r = await fetch(target, { redirect: "manual", signal: stop.signal });
       clearTimeout(timer);
+      if (still && r.status === 200) ctx.waitUntil(caches.default.put(request, r.clone()));
       if (r.status < 502 || r.status > 504) return r;  // all good (only gateway errors count as "down")
     } catch (e) { clearTimeout(timer); /* fall through to the friendly page */ }
     if ((request.headers.get("accept") || "").includes("text/html"))

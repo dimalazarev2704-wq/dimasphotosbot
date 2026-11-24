@@ -596,6 +596,13 @@ class WebApp:
     # ---------- routing ----------
 
     async def handle(self, method: str, target: str, headers: dict, body: bytes) -> Resp:
+        resp = await self.handle_inner(method, target, headers, body)
+        tag = resp.headers.get("ETag")
+        if tag and resp.status == 200 and method in ("GET", "HEAD") and headers.get("if-none-match") == tag:
+            return Resp(304, b"", resp.ctype, {k: v for k, v in resp.headers.items() if k in ("ETag", "Cache-Control")})
+        return resp
+
+    async def handle_inner(self, method: str, target: str, headers: dict, body: bytes) -> Resp:
         parts = urlsplit(target)
         path, query = parts.path, dict(parse_qsl(parts.query))
         head = method == "HEAD"
@@ -653,7 +660,8 @@ class WebApp:
             return Resp(500, b"The app page is missing on the server.", "text/plain")
         if head:
             html = html.replace(b"</head>", head.encode() + b"</head>", 1)
-        return Resp(200, html, "text/html; charset=utf-8", {"Cache-Control": "no-store", **(extra or {})})
+        # (no-cache = the phone asks "has it changed?" each time and gets a tiny "no" answer, so a new version still shows up at once)
+        return Resp(200, html, "text/html; charset=utf-8", {"Cache-Control": "no-cache", "ETag": '"' + hashlib.sha1(html).hexdigest()[:20] + '"', **(extra or {})})
 
     def app_icon(self, size: int) -> bytes:
         """The little camera picture for a home screen (drawn here, so there is no file to ship)."""
@@ -1413,7 +1421,7 @@ class WebApp:
 
     async def write(self, writer, r: Resp, head: bool) -> None:
         reason = {200: "OK", 400: "Bad Request", 401: "Unauthorized", 403: "Forbidden", 404: "Not Found",
-                  409: "Conflict", 413: "Payload Too Large", 504: "Gateway Timeout", 503: "Service Unavailable", 429: "Too Many Requests",
+                  304: "Not Modified", 409: "Conflict", 413: "Payload Too Large", 504: "Gateway Timeout", 503: "Service Unavailable", 429: "Too Many Requests",
                   500: "Internal Server Error", 502: "Bad Gateway"}.get(r.status, "OK")
         hdr = {"Content-Type": r.ctype, "Content-Length": str(len(r.body)), "Connection": "close", **SECURITY, **r.headers}
         out = f"HTTP/1.1 {r.status} {reason}\r\n" + "".join(f"{k}: {v}\r\n" for k, v in hdr.items()) + "\r\n"

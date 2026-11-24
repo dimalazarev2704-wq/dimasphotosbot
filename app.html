@@ -159,7 +159,7 @@ nav button.on{background:color-mix(in srgb,var(--btn) 14%,transparent);color:var
   <div id="vdlg"></div>
   <div class="bot">
     <div class="tools" id="vtools" style="display:none"></div>
-    <div class="btns"><button id="vfav" style="display:none">♡ Favorite</button><button id="vorig">📥 Send me the photo in chat</button><button id="vclose">✖ Close</button></div>
+    <div class="btns"><button id="vfav" style="display:none">♡ Favorite</button><button id="vshow">▶ Slideshow</button><button id="vorig">📥 Send me the photo in chat</button><button id="vclose">✖ Close</button></div>
     <div class="copy" id="vcopy"></div>
   </div>
 </div>
@@ -199,12 +199,29 @@ async function api(path, body) {
   const ctl = new AbortController(), timer = setTimeout(() => ctl.abort(), 60000);  // (a sleeping server can take a while to wake)
   try {
     res = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json", "X-Init-Data": initData, "X-Guest-Key": guestKey }, body: JSON.stringify(body || {}), signal: ctl.signal });
-  } catch (e) { throw new Error("No connection, or the server is still waking up. Please wait a moment and try again."); }
+  } catch (e) {
+    const er = new Error(navigator.onLine === false ? "You're offline. Please check your internet connection." : "The server didn't answer. It may be waking up, which can take a minute.");
+    er.net = true; throw er;
+  }
   finally { clearTimeout(timer); }
   let data = {};
   try { data = await res.json(); } catch (e) {}
-  if (!res.ok) { const er = new Error(data.error || "Something went wrong. Please try again."); er.exists = !!data.exists; er.status = res.status; throw er; }
+  if (!res.ok) { const er = new Error(data.error || "Something went wrong. Please try again."); er.exists = !!data.exists; er.status = res.status; er.net = res.status >= 502 && res.status <= 504; throw er; }
+  autoN = 0;  // (it answered, so the "try again by itself" counter starts over)
   return data;
+}
+let autoN = 0;
+function autoRetry(fn) {  // "Trying again in 10…": for a server that is waking up (waits longer each time, so it isn't hammered)
+  const secs = Math.min(10 * 2 ** autoN, 60), my = navId;
+  const line = h("div", { class: "hint" });
+  let left = secs;
+  const tick = () => {
+    if (my !== navId || !line.isConnected) return;  // (they went somewhere else)
+    if (left <= 0) { autoN++; fn(); return; }
+    line.textContent = "Trying again in " + left + "…"; left--; setTimeout(tick, 1000);
+  };
+  setTimeout(tick, 0);  // (after the screen has been drawn)
+  return line;
 }
 function haptic() { try { tg.HapticFeedback.impactOccurred("light"); } catch (e) {} }
 function show(nodes) {
@@ -242,6 +259,7 @@ function footer() { return h("div", { class: "foot", text: HOME ? HOME.copyright
 function errorScreen(e, retry) {
   show([h("h1", { text: "Oops" }), h("div", { class: "msg err", text: e.message || String(e) }),
     retry ? h("button", { class: "cta", on: { click: retry }, text: "Try again" }) : null,
+    retry && e.net ? autoRetry(retry) : null,
     /reopen|expired|open the app again|open this app/i.test(e.message || "") ? h("button", { class: "cta alt", on: { click: () => { try { tg.close(); } catch (x) {} } }, text: "Close the app" }) : null,
     IS_ADMIN && adminFam != null ? h("button", { class: "cta alt", on: { click: leaveFamily }, text: "🛠 Back to Admin" }) : null]);
 }
@@ -267,7 +285,7 @@ let LANG = "en";
 const RU_EXACT = {
   "Home": "Главная", "Dates": "Даты", "Places": "Места", "All": "Все", "Best": "Лучшие", "Suggested": "Предложено",
   "Loading…": "Загрузка…", "‹ Back": "‹ Назад", "Cancel": "Отмена", "Save": "Сохранить", "Send": "Отправить",
-  "Sending…": "Отправка…", "Help": "Помощь", "Oops": "Ой", "Try again": "Повторить", "Close the app": "Закрыть приложение", "Close": "Закрыть", "✖ Close": "✖ Закрыть",
+  "Sending…": "Отправка…", "▶ Slideshow": "▶ Слайд-шоу", "⏸ Pause": "⏸ Пауза", "Help": "Помощь", "Oops": "Ой", "Try again": "Повторить", "Close the app": "Закрыть приложение", "Close": "Закрыть", "✖ Close": "✖ Закрыть",
   "A+": "A+", "A−": "A−", "Bigger text": "Крупнее текст", "Smaller text": "Мельче текст",
   "Hi! 👋": "Привет! 👋", "✨ New photos": "✨ Новые фото", "See all new photos": "Все новые фото", "See all photos": "Все фото",
   "No photos yet. Check back soon!": "Фото пока нет. Загляните позже!", "No photos here yet.": "Здесь пока нет фото.",
@@ -711,6 +729,7 @@ function openViewer(i) {
   syncBack(); showPhoto();
 }
 function closeViewer() {
+  slideshowStop();
   V.style.display = "none"; document.body.style.overflow = ""; vimg.removeAttribute("src");
   document.getElementById("vdlg").style.display = "none";
   try { tg.enableVerticalSwipes(); } catch (e) {}
@@ -800,6 +819,7 @@ function showPhoto() {
   document.getElementById("vorig").textContent = isVid ? "📥 Send me the video in chat" : IS_GUEST ? "⬇️ Download the photo" : "📥 Send me the photo in chat";
   if (IS_GUEST && (isVid || (HOME && HOME.dl === false))) document.getElementById("vorig").style.display = "none";
   document.getElementById("vcap").textContent = [isVid ? "🎬 Video" + (p.dur ? " " + vlen(p.dur) : "") + (p.mb ? " · " + p.mb + " MB" : "") : "", p.dt, p.loc, p.g ? "👥 " + p.g : "", p.by ? "Added by " + p.by : ""].filter(Boolean).join(" · ") + "   (" + (cur + 1) + " of " + viewList.length + ")";
+  document.getElementById("vshow").style.display = viewList.length > 1 ? "" : "none";
   document.getElementById("vprev").style.visibility = cur > 0 ? "visible" : "hidden";
   document.getElementById("vnext").style.visibility = cur < viewList.length - 1 ? "visible" : "hidden";
   drawTools(); drawFav();
@@ -824,9 +844,25 @@ document.getElementById("vfav").onclick = (ev) => oneAtATime(async () => {
   } catch (e) { b.textContent = "⚠️ " + e.message; setTimeout(() => { if (viewList[cur] === p) drawFav(); }, 2500); return; }
   if (viewList[cur] === p) drawFav();
 });
-function step(d) { const n = cur + d; if (n >= 0 && n < viewList.length) { cur = n; showPhoto(); haptic(); } }
-document.getElementById("vprev").onclick = () => step(-1);
-document.getElementById("vnext").onclick = () => step(1);
+function step(d, quiet) { const n = cur + d; if (n >= 0 && n < viewList.length) { cur = n; showPhoto(); if (!quiet) haptic(); } }
+// slideshow: a new photo every 4 seconds, until they touch the screen, press a button, reach a video or the end
+let showTimer = null;
+function slideshowStop() {
+  if (showTimer) { clearInterval(showTimer); showTimer = null; }
+  const b = document.getElementById("vshow"); if (b) b.textContent = LANG !== "en" && !IS_ADMIN ? ruT("▶ Slideshow") : "▶ Slideshow";
+}
+function slideshowStart() {
+  slideshowStop();
+  const b = document.getElementById("vshow"); b.textContent = LANG !== "en" && !IS_ADMIN ? ruT("⏸ Pause") : "⏸ Pause";
+  showTimer = setInterval(() => {
+    const next = viewList[cur + 1];
+    if (!next || next.k === "video" || !viewerOpen()) { slideshowStop(); return; }
+    step(1, true);
+  }, 4000);
+}
+document.getElementById("vshow").onclick = () => { if (showTimer) slideshowStop(); else slideshowStart(); };
+document.getElementById("vprev").onclick = () => { slideshowStop(); step(-1); };
+document.getElementById("vnext").onclick = () => { slideshowStop(); step(1); };
 document.getElementById("vclose").onclick = closeViewer;
 document.getElementById("vorig").onclick = async (ev) => {
   if (IS_GUEST) {  // no Telegram chat to send it to: save the picture from the web link instead
@@ -843,6 +879,7 @@ document.getElementById("vorig").onclick = async (ev) => {
 let t0 = null, pinch = null, lastTap = 0;
 const dist = (a, b) => Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
 V.addEventListener("touchstart", e => {
+  if (!e.target.closest("#vshow")) slideshowStop();
   if (e.target.closest("button") || e.target.closest("#vdlg") || e.target.closest("#vplay")) return;
   if (e.touches.length === 2) { pinch = { d: dist(e.touches[0], e.touches[1]), s: scale }; t0 = null; }
   else if (e.touches.length === 1) { t0 = { x: e.touches[0].clientX, y: e.touches[0].clientY, tx, ty, moved: false }; }
@@ -1907,7 +1944,12 @@ function connectScreen(note, force) {
     note ? h("div", { class: "msg", text: note }) : null, inp, h("button", { class: "cta", text: "Connect", on: { click: go } }),
     h("button", { class: "cta alt", text: "🔐 I have my PIN", on: { click: () => pinNewScreen() } }),
     passkeyButton(),
-    h("div", { class: "hint", text: "No code? Ask the person who shared these photos with you to make one." })]);
+    h("div", { class: "hint", text: "No code? Ask the person who shared these photos with you to make one." }),
+    h("div", { class: "card", style: "margin-top:14px;text-align:center" },
+      h("b", { text: "New here?" }),
+      h("div", { class: "hint", text: "Dima's Photos delivers family photo sessions privately: you get your own photos, by date and place, in full quality. To ask for access, email:" }),
+      h("div", { class: "hint" }, h("a", { href: "mailto:photosfromdima@yahoo.com", text: "photosfromdima@yahoo.com" })),
+      h("button", { class: "cta alt", text: "📋 Copy email address", on: { click: () => oneAtATime(async () => { try { await navigator.clipboard.writeText("photosfromdima@yahoo.com"); await alertMsg("Email address copied."); } catch (e) { await alertMsg("Press and hold the address above to copy it."); } }) } }))]);
 }
 async function guestStart() {
   if (GUEST_TOKEN === "web") {
@@ -1915,7 +1957,7 @@ async function guestStart() {
     loading();
     try { await api("/api/home"); } catch (e) {
       if (e.status === 401 || e.status === 403) { guestKey = ""; try { localStorage.removeItem("gk:web"); localStorage.removeItem("who:web"); } catch (x) {} connectScreen("This device was disconnected. Please type a new code."); return; }
-      show([h("h1", { text: "Can't open the photos" }), h("div", { class: "msg", text: e.message }), h("button", { class: "cta", text: "Try again", on: { click: guestStart } })]); return;
+      show([h("h1", { text: "Can't open the photos" }), h("div", { class: "msg", text: e.message }), h("button", { class: "cta", text: "Try again", on: { click: guestStart } }), e.net ? autoRetry(guestStart) : null]); return;
     }
     setTab("home"); maybeOfferApp(); return;
   }
