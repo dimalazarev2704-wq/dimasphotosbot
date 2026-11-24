@@ -2726,8 +2726,27 @@ async def auto_publish(bot, sid: str) -> None:
         doc = await db.suggestions.find_one({"_id": sid})
         if doc and doc.get("status") in LINE_STATUSES and OWNER_ID:
             await bot.send_message(OWNER_ID, "⚠️ I couldn't finish publishing a trusted photographer's batch by itself. It is waiting in the 📤 Photographers line topic: reply /go to try again.")
+        elif doc and doc.get("status") == "approved" and OWNER_ID:
+            await trusted_published_note(bot, doc)
     except (TelegramError, RuntimeError):
         log.exception("Auto-publish for a trusted photographer failed")
+
+
+async def trusted_published_note(bot, doc: dict) -> None:
+    """Tells you, in a private message, that a trusted photographer's batch was just published (they don't wait for /go, so this is how you know)."""
+    try:
+        tids = [doc["thread_id"]] + list(doc.get("others", []))
+        fams = await db.families.find({"thread_id": {"$in": tids}}).to_list()
+        names = ", ".join(f["name"] for f in fams[:3]) + ("…" if len(fams) > 3 else "")
+        n = len(doc.get("items", []))
+        await bot.send_message(
+            OWNER_ID,
+            f"⭐ {doc.get('from_name') or 'A trusted photographer'} published {n} file{'' if n == 1 else 's'}"
+            + (f" to the {names} {'family' if len(fams) == 1 else 'families'}" if fams else "")
+            + f"\n📅 {pretty_date(doc['date'])}" + (f"\n📍 {doc['place']}" if doc.get("place") else "")
+            + "\nNothing for you to do. To remove a photo, open it in the app (or the family's topic) and delete it.")
+    except (TelegramError, RuntimeError, KeyError):
+        log.exception("Couldn't tell the owner about a trusted photographer's published batch")
 
 
 def next_line_state(u: dict) -> dict:

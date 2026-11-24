@@ -360,6 +360,7 @@ Everything people suggest (➕ Suggest photos) goes to you, not to the family's 
   only, no codes)** to pick from. A normal ON photographer's batch goes to the Photographers line and waits for your `/go`.
 - **⭐ Trusted** photographers are published right away: their batch still shows in the Photographers line topic, then goes to
   their own family (and the other families they listed) with no `/go` from you, and the bot asks whether to tell the family.
+  You get a private message each time one is published (who, how many files, which families, date and place).
   If it can't finish (a Telegram error), you get a message and the batch waits for `/go` as usual. Normal ON photographers
   and everyone else still need your `/go`.
 
