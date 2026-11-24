@@ -104,6 +104,7 @@ MONGODB_URI = os.environ["MONGODB_URI"]
 DB_NAME = os.getenv("MONGODB_DB", "photobot")
 GROUP_ID = int(os.getenv("GROUP_ID", "0") or 0)  # your private photo group; use /id to find it
 HELPER_PIN = re.sub(r"\D", "", os.getenv("HELPER_PIN", ""))[:8]  # the photographer's own short code, for letting someone in on their phone
+REVIEW_PIN = re.sub(r"\D", "", os.getenv("REVIEW_PIN", ""))[:8]  # the owner's own code for reviewing a trusted photographer's photos (not the same as HELPER_PIN)
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "")  # needed for /addphotos in private chat
 # Your own Telegram user ID (send /id to the bot in a private chat). This account gets the
 # /admin panel and skips the /addphotos password. The bot stores nothing about you.
@@ -2960,7 +2961,7 @@ async def review_rows(uid: int) -> list[dict]:
 
 
 async def review_api(bot, uid: int, user: dict, action: str, req: dict) -> tuple[int, dict]:
-    if not HELPER_PIN:
+    if not REVIEW_PIN:
         return 404, {"error": "Not available."}
     if await add_role(uid) != "trusted":
         return 403, {"error": "This is for trusted photographers."}
@@ -2972,7 +2973,7 @@ async def review_api(bot, uid: int, user: dict, action: str, req: dict) -> tuple
         if lock:
             return 429, {"error": lock_text(lock)}
         pin = re.sub(r"\D", "", str(req.get("pin") or ""))[:20]
-        if not hmac.compare_digest(pin.encode(), HELPER_PIN.encode()):
+        if not hmac.compare_digest(pin.encode(), REVIEW_PIN.encode()):
             await helper_global_fail(bot)
             locked = await record_fail(key)
             return 403, {"error": "That code isn't right." + (" " + lock_text(LOCK_SECONDS) if locked else "")}
@@ -3047,7 +3048,7 @@ async def review_window(uid: int, which: str) -> tuple[str, InlineKeyboardMarkup
             + ("\n".join(line(r) for r in show[:10]) if show else "Nothing here.")
             + (f"\n…and {len(show) - 10} more" if len(show) > 10 else ""))
     kb = [[_btn(("• " if which == "p" else "") + f"⏳ In process ({len(waiting)})", "rv:p"), _btn(("• " if which == "a" else "") + f"✅ Approved ({len(done)})", "rv:a")]]
-    if WEBAPP_URL and HELPER_PIN:
+    if WEBAPP_URL and REVIEW_PIN:
         kb.append([InlineKeyboardButton(f"🤝 I have {OWNER_NAME} with me", web_app=WebAppInfo(url=f"{WEBAPP_URL}/app?review=1"))])
     kb.append([InlineKeyboardButton("🏠 Menu", callback_data="menu")])
     return text, InlineKeyboardMarkup(kb)

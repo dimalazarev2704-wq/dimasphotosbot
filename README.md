@@ -362,7 +362,7 @@ Everything people suggest (➕ Suggest photos) goes to you, not to the family's 
   their own family (and the other families they listed) with no `/go` from you, and the bot asks whether to tell the family.
   You get a private message each time one is published (who, how many files, which families, date and place).
   **📥 In process** (a button on a trusted photographer's menu, next to ➕ Add to…) is their own window: ⏳ batches still waiting and
-  ✅ batches you approved. **🤝 I have {your name} with me** opens the app and asks for **your own 8-digit code** (the same `HELPER_PIN`).
+  ✅ batches you approved. **🤝 I have {your name} with me** opens the app and asks for **your own 8-digit code**, set as `REVIEW_PIN` on Render (a different code from `HELPER_PIN`; with no `REVIEW_PIN` the button is hidden).
   After you type it you see that photographer's batches with the photos and can **✅ Let go** (publish) or **🗑 Delete** them, even ones
   already published. **🚪 Sign out** at the bottom closes it (it also closes by itself after 30 minutes, or if they stop being trusted),
   so they can't approve or delete anything. Wrong codes are limited like the other code screens.
