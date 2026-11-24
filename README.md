@@ -438,3 +438,7 @@ The picture `logo.png` (next to `webapp.py`) is your logo: it shows on the conne
 3. In Render set `WEBAPP_URL=https://<name>.<account>.workers.dev` and `BEHIND_CLOUDFLARE=1`, then deploy. Do this before anyone makes a passkey (a passkey belongs to one address).
 
 ©️2026 Dima's Photos. All Rights Reserved
+
+## Tests
+
+`tests/` has checks that need no network or Telegram (a fake Telegram and a fake database): `python3 -I tests/t_review.py`, `tests/t_look.py`, `tests/t_web.py`. They cover the trusted photographers' 📥 In process review, `/look`, and the web server's review access.
