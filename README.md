@@ -361,6 +361,9 @@ Everything people suggest (➕ Suggest photos) goes to you, not to the family's 
 - **⭐ Trusted** photographers are published right away: their batch still shows in the Photographers line topic, then goes to
   their own family (and the other families they listed) with no `/go` from you, and the bot asks whether to tell the family.
   You get a private message each time one is published (who, how many files, which families, date and place).
+  **Reply `/look`** to that message (or send `/look` alone for the latest one) and the bot shows you those photos in your private
+  chat with buttons: 📅 Change date, 📍 Change place (the gallery and the caption on the photos are updated), 🗑 Delete some (one by one),
+  🗑 Delete all (asks first), ✅ Looks good. Works for batches published after this feature was added.
   If it can't finish (a Telegram error), you get a message and the batch waits for `/go` as usual. Normal ON photographers
   and everyone else still need your `/go`.
 

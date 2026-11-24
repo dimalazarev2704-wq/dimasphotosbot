@@ -1408,6 +1408,10 @@ async def on_private_text(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         tid = await my_thread(context, update.effective_user.id)
         await msg.reply_text(out["message"], reply_markup=await family_menu(tid) if status == 200 and tid else None)
         return
+    lk = context.user_data.get("lk")
+    if lk and is_owner(update.effective_user.id):
+        await handle_look_text(update, context, lk)
+        return
     adm = context.user_data.get("adm")
     if adm and is_owner(update.effective_user.id):
         await handle_admin_text(update, context, adm)
@@ -2229,7 +2233,7 @@ def sug_name(user_doc, user) -> str:
     return (user_doc or {}).get("first_name") or getattr(user, "first_name", None) or "Guest"
 
 
-FLOW_KEYS = ("up", "link", "adm", "sug", "fm", "cm", "fb", "lng")
+FLOW_KEYS = ("up", "link", "adm", "sug", "fm", "cm", "fb", "lng", "lk")
 
 
 def clear_flows(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2579,6 +2583,8 @@ async def _process_suggestion(bot, sid: str, action: str, edit) -> None:
                 log.exception("Couldn't add a suggested photo")
                 failed = True
                 break
+            await db.suggestions.update_one(  # (so /look can find these exact messages later)
+                {"_id": sid}, {"$push": {"pub": {"$each": [{"m": sm.message_id, "t": tid, "c": j == 0} for j, sm in enumerate(sent_msgs)]}}})
             for it, sm in zip(chunk, sent_msgs):
                 await db.photos.update_one(
                     {"message_id": sm.message_id},
@@ -2727,6 +2733,7 @@ async def auto_publish(bot, sid: str) -> None:
         if doc and doc.get("status") in LINE_STATUSES and OWNER_ID:
             await bot.send_message(OWNER_ID, "⚠️ I couldn't finish publishing a trusted photographer's batch by itself. It is waiting in the 📤 Photographers line topic: reply /go to try again.")
         elif doc and doc.get("status") == "approved" and OWNER_ID:
+            await db.suggestions.update_one({"_id": sid}, {"$set": {"auto": True}})
             await trusted_published_note(bot, doc)
     except (TelegramError, RuntimeError):
         log.exception("Auto-publish for a trusted photographer failed")
@@ -2739,14 +2746,186 @@ async def trusted_published_note(bot, doc: dict) -> None:
         fams = await db.families.find({"thread_id": {"$in": tids}}).to_list()
         names = ", ".join(f["name"] for f in fams[:3]) + ("…" if len(fams) > 3 else "")
         n = len(doc.get("items", []))
-        await bot.send_message(
+        note = await bot.send_message(
             OWNER_ID,
             f"⭐ {doc.get('from_name') or 'A trusted photographer'} published {n} file{'' if n == 1 else 's'}"
             + (f" to the {names} {'family' if len(fams) == 1 else 'families'}" if fams else "")
             + f"\n📅 {pretty_date(doc['date'])}" + (f"\n📍 {doc['place']}" if doc.get("place") else "")
-            + "\nNothing for you to do. To remove a photo, open it in the app (or the family's topic) and delete it.")
+            + "\nNothing for you to do. To look at them or change something, reply /look to this message.")
+        await db.suggestions.update_one({"_id": doc["_id"]}, {"$set": {"note_mid": note.message_id}})
     except (TelegramError, RuntimeError, KeyError):
         log.exception("Couldn't tell the owner about a trusted photographer's published batch")
+
+
+# ---------- /look: the owner looks at a trusted photographer's published batch and can fix it ----------
+
+LOOK_MAX_SINGLES = 30
+
+
+async def look_batch(reply_mid: int | None) -> dict | None:
+    """The batch a /look reply points at, or (no reply) the most recent trusted one."""
+    if reply_mid:
+        return await db.suggestions.find_one({"note_mid": reply_mid, "pub": {"$exists": True}})
+    return await db.suggestions.find_one({"auto": True, "pub": {"$exists": True}}, sort=[("created", -1)])
+
+
+async def look_items(doc: dict) -> list[dict]:
+    """The published files, once each (a batch for several families is the same files in each topic)."""
+    first = doc["thread_id"]
+    mids = [p["m"] for p in doc.get("pub", []) if p["t"] == first] or [p["m"] for p in doc.get("pub", [])][: len(doc.get("items", []))]
+    rows = {r["message_id"]: r for r in await db.photos.find({"message_id": {"$in": mids}}).to_list()}
+    return [rows[m] for m in mids if m in rows]
+
+
+def look_buttons(sid: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [_btn("📅 Change date", f"lk:d:{sid}"), _btn("📍 Change place", f"lk:p:{sid}")],
+        [_btn("🗑 Delete some", f"lk:o:{sid}"), _btn("🗑 Delete all", f"lk:x:{sid}")],
+        [_btn("✅ Looks good", f"lk:k:{sid}")]])
+
+
+async def look_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    msg = update.effective_message
+    if not is_owner(update.effective_user.id):
+        return
+    doc = await look_batch(msg.reply_to_message.message_id if msg.reply_to_message else None)
+    if not doc:
+        await msg.reply_text("I don't have a trusted photographer's batch to show. Reply /look to the ⭐ message about it (new batches only).")
+        return
+    items = await look_items(doc)
+    if not items:
+        await msg.reply_text("Those photos are gone (deleted already), so there's nothing to look at.")
+        return
+    for chunk in kind_chunks(items):
+        meth, argname, _a, cls = send_spec(chunk[0]["kind"], bool(chunk[0].get("as_doc")))
+        try:
+            if len(chunk) == 1:
+                await send_with_retry(lambda: getattr(context.bot, meth)(msg.chat_id, **{argname: chunk[0]["file_id"]}))
+            else:
+                await send_with_retry(lambda: context.bot.send_media_group(msg.chat_id, [cls(media=d["file_id"]) for d in chunk]))
+        except (TelegramError, RuntimeError):
+            log.exception("/look couldn't show a photo")
+            await msg.reply_text("⚠️ I couldn't show some of them (Telegram error). The buttons below still work.")
+            break
+    fams = await db.families.find({"thread_id": {"$in": [doc["thread_id"]] + list(doc.get("others", []))}}).to_list()
+    await msg.reply_text(
+        f"⭐ {doc.get('from_name') or 'A trusted photographer'} · {len(items)} file{'' if len(items) == 1 else 's'}"
+        + (f" · {', '.join(f['name'] for f in fams[:3])}" if fams else "")
+        + f"\n📅 {pretty_date(doc['date'])}" + (f"\n📍 {doc['place']}" if doc.get("place") else "\n📍 no place"),
+        reply_markup=look_buttons(doc["_id"]))
+
+
+async def look_apply(bot, doc: dict, day: str | None, place: str | None, set_place: bool) -> int:
+    """Changes the date and/or place of the whole batch: the gallery's list and the caption on the photos."""
+    mids = [p["m"] for p in doc.get("pub", [])]
+    new_day = day or doc["date"]
+    new_place = place if set_place else doc.get("place")
+    await db.photos.update_many({"message_id": {"$in": mids}}, {"$set": {"date": new_day, "location": new_place, "loc_id": loc_id(new_place)}})
+    await db.suggestions.update_one({"_id": doc["_id"]}, {"$set": {"date": new_day, "place": new_place}})
+    caption = pretty_date(new_day) + (f" · {new_place}" if new_place else "") + f" · Added by {doc.get('from_name') or 'a photographer'}"
+    failed = 0
+    for p in doc.get("pub", []):
+        if not p.get("c"):
+            continue
+        try:
+            await bot.edit_message_caption(GROUP_ID, p["m"], caption=caption)
+        except TelegramError as e:
+            if "not modified" not in str(e).lower():
+                failed += 1
+    return failed
+
+
+async def on_look_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    if not is_owner(q.from_user.id):
+        await q.answer("Only the photographer can do this.", show_alert=True)
+        return
+    _, act, rest = q.data.split(":", 2)
+    if act == "r":  # (one photo from "Delete some")
+        sid, mid = rest.rsplit(":", 1)
+        doc = await db.suggestions.find_one({"_id": sid})
+        row = await db.photos.find_one({"message_id": int(mid)})
+        if not doc or not row:
+            await q.answer("Already gone.")
+            return
+        same = [p["m"] for p in doc.get("pub", []) if (await db.photos.find_one({"message_id": p["m"]}) or {}).get("file_id") == row["file_id"]]
+        for m in same or [int(mid)]:
+            await delete_photo_everywhere(context.bot, m)
+        await q.answer("Deleted.")
+        try:
+            await q.edit_message_caption("🗑 Deleted", reply_markup=None)
+        except TelegramError:
+            pass
+        return
+    doc = await db.suggestions.find_one({"_id": rest})
+    if not doc:
+        await q.answer("That batch isn't there anymore.", show_alert=True)
+        return
+    sid = doc["_id"]
+    if act == "k":
+        await q.answer()
+        try:
+            await q.edit_message_reply_markup(reply_markup=None)
+        except TelegramError:
+            pass
+    elif act in ("d", "p"):
+        clear_flows(context)
+        context.user_data["lk"] = {"sid": sid, "what": act, "until": time.time() + SESSION_SECONDS}
+        await q.answer()
+        await q.message.reply_text(ASK_DATE if act == "d" else ASK_PLACE + " Type none to clear it.")
+    elif act == "x":
+        await q.answer()
+        await q.message.reply_text("Delete ALL of these photos from the family gallery and the group?",
+                                   reply_markup=InlineKeyboardMarkup([[_btn("Yes, delete them", f"lk:y:{sid}"), _btn("Cancel", f"lk:n:{sid}")]]))
+    elif act == "n":
+        await q.answer("Cancelled.")
+        await q.edit_message_reply_markup(reply_markup=None)
+    elif act == "y":
+        await q.answer("Deleting…")
+        bad = 0
+        for p in doc.get("pub", []):
+            if await delete_photo_everywhere(context.bot, p["m"]):
+                bad += 1
+        await db.suggestions.update_one({"_id": sid}, {"$set": {"pub": []}})
+        await q.edit_message_text("🗑 Deleted." if not bad else f"🗑 Deleted, but {bad} could not be removed (check my 'Delete messages' right).")
+    elif act == "o":
+        await q.answer()
+        items = (await look_items(doc))[:LOOK_MAX_SINGLES]
+        for row in items:
+            meth, argname, _a, _c = send_spec(row["kind"], bool(row.get("as_doc")))
+            try:
+                await send_with_retry(lambda: getattr(context.bot, meth)(
+                    q.message.chat_id, caption="Delete this one?", reply_markup=InlineKeyboardMarkup([[_btn("🗑 Delete", f"lk:r:{sid}:{row['message_id']}")]]),
+                    **{argname: row["file_id"]}))
+            except (TelegramError, RuntimeError):
+                break
+
+
+async def handle_look_text(update: Update, context: ContextTypes.DEFAULT_TYPE, lk: dict) -> None:
+    msg = update.message
+    if time.time() > lk["until"]:
+        context.user_data.pop("lk", None)
+        await msg.reply_text("That timed out. Reply /look to start again.")
+        return
+    doc = await db.suggestions.find_one({"_id": lk["sid"]})
+    if not doc:
+        context.user_data.pop("lk", None)
+        return
+    text = " ".join((msg.text or "").split())
+    if lk["what"] == "d":
+        day = parse_date_answer(text)
+        if not day:
+            await msg.reply_text("I couldn't read that date. " + ASK_DATE)
+            return
+        failed = await look_apply(context.bot, doc, day, None, False)
+        what = pretty_date(day)
+    else:
+        place = None if text.casefold() in ("none", "no", "clear") or not text else text[:80]
+        failed = await look_apply(context.bot, doc, None, place, True)
+        what = place or "no place"
+    context.user_data.pop("lk", None)
+    await msg.reply_text(f"✅ Changed to {what}." + (f" ({failed} caption{'s' if failed != 1 else ''} couldn't be updated; the gallery is right.)" if failed else ""),
+                         reply_markup=look_buttons(doc["_id"]))
 
 
 def next_line_state(u: dict) -> dict:
@@ -7382,6 +7561,8 @@ def main() -> None:
     app.add_handler(CommandHandler("buttons", buttons_cmd, filters=priv))
     app.add_handler(CommandHandler("testlogin", testlogin_cmd, filters=priv))
     app.add_handler(CommandHandler("exittest", exittest_cmd, filters=priv))
+    app.add_handler(CommandHandler("look", look_cmd, filters=priv))
+    app.add_handler(CallbackQueryHandler(on_look_button, pattern=r"^lk:[a-z]:[\w:-]+$"))
     app.add_handler(CommandHandler("addphotos", addphotos, filters=priv))
     app.add_handler(CommandHandler("done", done, filters=priv))
     app.add_handler(MessageHandler(priv & filters.UpdateType.MESSAGE & filters.TEXT & ~filters.COMMAND, on_private_text))
