@@ -2824,8 +2824,9 @@ async def look_apply(bot, doc: dict, day: str | None, place: str | None, set_pla
     await db.suggestions.update_one({"_id": doc["_id"]}, {"$set": {"date": new_day, "place": new_place}})
     caption = pretty_date(new_day) + (f" · {new_place}" if new_place else "") + f" · Added by {doc.get('from_name') or 'a photographer'}"
     failed = 0
+    alive = {r["message_id"] for r in await db.photos.find({"message_id": {"$in": mids}}, {"message_id": 1}).to_list()}
     for p in doc.get("pub", []):
-        if not p.get("c"):
+        if not p.get("c") or p["m"] not in alive:  # (a photo you already deleted has no caption to fix)
             continue
         try:
             await bot.edit_message_caption(GROUP_ID, p["m"], caption=caption)
