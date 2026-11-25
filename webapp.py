@@ -37,6 +37,7 @@ MAX_JSON = 16 * 1024
 MAX_UPLOAD = 30 * 1024 * 1024  # one photo from the Admin tab (bots can send up to 50 MB; this keeps Render's memory safe)
 UPLOAD_PATH = "/api/admin/upload"
 CACHE_BYTES = 80 * 1024 * 1024
+VIDEO_MAX_BYTES = 20 * 1024 * 1024  # (the most a bot can fetch from Telegram; bigger videos are still sent to the chat)
 MAX_CONNECTIONS = 300
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -641,6 +642,8 @@ class WebApp:
                 return await self.image(path[4:], query, download=True)
             if path.startswith("/img/") and method == "GET":
                 return await self.image(path[5:], query)
+            if path.startswith("/vid/") and method == "GET":
+                return await self.video(path[5:], query, headers)
             if path.startswith("/simg/") and method == "GET":
                 return await self.suggestion_image(path[6:], query)
             if path == UPLOAD_PATH and method == "POST":
@@ -828,7 +831,9 @@ class WebApp:
             "id": doc["message_id"], "k": doc.get("kind", "document"), "d": doc.get("date") or "",
             "dt": self.pd(doc.get("date") or ""), "loc": doc.get("location") or "",
             "by": doc.get("by") or "", "best": bool(doc.get("best")),
-            **({"dur": int(doc.get("dur") or 0), "mb": round((doc.get("vsize") or 0) / 1048576, 1)} if doc.get("kind") == "video" else {}),
+            **({"dur": int(doc.get("dur") or 0), "mb": round((doc.get("vsize") or 0) / 1048576, 1),
+                **({"v": self.photo_url(doc["message_id"], "vid", uid).replace("/img/", "/vid/", 1).replace("?s=vid&", "?")} if 0 < (doc.get("vsize") or 0) <= VIDEO_MAX_BYTES else {})}
+               if doc.get("kind") == "video" else {}),
             "t": self.photo_url(doc["message_id"], "thumb", uid),
             "f": self.photo_url(doc["message_id"], "full", uid),
         }
@@ -1280,6 +1285,45 @@ class WebApp:
         # a blurry stand-in (Telegram was slow) must not be kept by the phone, so the sharp one can load next time
         return Resp(200, data, ctype, {"Cache-Control": "private, max-age=86400" if good else "no-store"})
 
+    async def video(self, mid_s: str, q: dict, headers: dict) -> Resp:
+        """Plays a small video in the browser (the browser asks for pieces of it with a Range header)."""
+        try:
+            mid, uid, exp = int(mid_s), int(q.get("u", "")), int(q.get("e", ""))
+        except ValueError:
+            return err(404, "Not found")
+        sig = q.get("sig", "")
+        if not re.fullmatch(r"[0-9a-f]{32}", sig) or not hmac.compare_digest(self.sign(mid, "vid", uid, exp), sig) or exp < time.time():
+            return err(403, "This link expired. Close and reopen the app.")
+        if self.d.is_owner(uid):
+            doc = await self.d.db().photos.find_one({"message_id": mid})
+            if doc and not await self.d.owner_can_see(doc.get("thread_id")):
+                doc = None
+        else:
+            tid = await self.family_of(uid)  # (checked every time, so removing someone cuts them off)
+            doc = await self.my_photo(mid, tid, uid) if tid else None
+        if not doc or doc.get("kind") != "video" or not 0 < (doc.get("vsize") or 0) <= VIDEO_MAX_BYTES:
+            return err(404, "Not found")
+        hit = self.cache.get((mid, "vid"))
+        if hit is None:
+            data = await self.download(doc["file_id"])
+            if not data:
+                return err(404, "Couldn't load this video")
+            hit = ("video/mp4", data)
+            self.cache.put((mid, "vid"), hit)
+        ctype, data = hit
+        size = len(data)
+        base = {"Cache-Control": "private, max-age=3600", "Accept-Ranges": "bytes", "Content-Disposition": "inline"}
+        m = re.fullmatch(r"bytes=(\d*)-(\d*)", headers.get("range", "").strip())
+        if not m or (m.group(1) == "" and m.group(2) == ""):
+            return Resp(200, data, ctype, base)
+        if m.group(1) == "":  # the last N bytes
+            start, end = max(0, size - int(m.group(2))), size - 1
+        else:
+            start, end = int(m.group(1)), min(int(m.group(2)) if m.group(2) else size - 1, size - 1)
+        if start >= size or start > end:
+            return Resp(416, b"", ctype, {**base, "Content-Range": f"bytes */{size}"})
+        return Resp(206, data[start:end + 1], ctype, {**base, "Content-Range": f"bytes {start}-{end}/{size}"})
+
     async def download(self, file_id: str) -> bytes | None:
         try:
             async with self.dl_gate:
@@ -1421,7 +1465,7 @@ class WebApp:
 
     async def write(self, writer, r: Resp, head: bool) -> None:
         reason = {200: "OK", 400: "Bad Request", 401: "Unauthorized", 403: "Forbidden", 404: "Not Found",
-                  304: "Not Modified", 409: "Conflict", 413: "Payload Too Large", 504: "Gateway Timeout", 503: "Service Unavailable", 429: "Too Many Requests",
+                  206: "Partial Content", 304: "Not Modified", 409: "Conflict", 413: "Payload Too Large", 416: "Range Not Satisfiable", 504: "Gateway Timeout", 503: "Service Unavailable", 429: "Too Many Requests",
                   500: "Internal Server Error", 502: "Bad Gateway"}.get(r.status, "OK")
         hdr = {"Content-Type": r.ctype, "Content-Length": str(len(r.body)), "Connection": "close", **SECURITY, **r.headers}
         out = f"HTTP/1.1 {r.status} {reason}\r\n" + "".join(f"{k}: {v}\r\n" for k, v in hdr.items()) + "\r\n"

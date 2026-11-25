@@ -43,6 +43,7 @@ h1,label{overflow-wrap:anywhere}
 .grid .grp{position:absolute;left:4px;top:4px;max-width:80%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:1px 7px;border-radius:999px;background:#000a;color:#fff;font-size:11px;font-weight:600}
 .grid .vid{position:absolute;left:4px;bottom:4px;padding:1px 7px;border-radius:999px;background:#000a;color:#fff;font-size:11px;font-weight:600}
 .grid .vbox{width:100%;height:100%;display:flex;align-items:center;justify-content:center;font-size:30px}
+#vvid{max-width:100%;max-height:100%;background:#000}
 #vplay{position:absolute;width:84px;height:84px;border-radius:50%;background:#000a;color:#fff;font-size:38px;display:none;align-items:center;justify-content:center;z-index:2;padding-left:6px;box-sizing:border-box}
 .cta{display:block;width:100%;min-height:56px;margin:16px 0 0;border:0;border-radius:16px;background:var(--btn);color:var(--btntext);font:inherit;font-weight:700}
 .cta.alt{background:var(--sec);color:var(--text)}
@@ -770,7 +771,7 @@ function openViewer(i) {
   syncBack(); showPhoto();
 }
 function closeViewer() {
-  slideshowStop();
+  slideshowStop(); stopVideo();
   V.style.display = "none"; document.body.style.overflow = ""; vimg.removeAttribute("src");
   document.getElementById("vdlg").style.display = "none";
   try { tg.enableVerticalSwipes(); } catch (e) {}
@@ -844,8 +845,17 @@ function editPhoto() {
     h("button", { class: "cta alt", text: "Cancel", on: { click: () => { dlg.style.display = "none"; } } })));
   dlg.style.display = "flex";
 }
+function stopVideo() { const v = document.getElementById("vvid"); if (v) { try { v.pause(); } catch (e) {} v.remove(); } }
+function playVideo(p) {
+  stopVideo();
+  const v = h("video", { id: "vvid", controls: "", playsinline: "", autoplay: "", poster: p.f, src: p.v, controlsList: "nodownload" });
+  v.addEventListener("error", () => { document.getElementById("vcap").textContent = "Couldn\u2019t play this video here."; stopVideo(); vimg.style.visibility = "visible"; });
+  V.querySelector(".stage").append(v);
+  vimg.style.visibility = "hidden"; document.getElementById("vplay").style.display = "none";
+}
 function showPhoto() {
   const p = viewList[cur]; if (!p) return;
+  stopVideo();
   resetZoom();
   vimg.style.opacity = ".4";
   vimg.onload = () => { vimg.style.opacity = "1"; };
@@ -855,11 +865,11 @@ function showPhoto() {
   vimg.src = p.f;
   const isVid = p.k === "video";
   let pl = document.getElementById("vplay");
-  if (!pl) { pl = h("div", { id: "vplay", text: "▶", on: { click: () => document.getElementById("vorig").click() } }); V.querySelector(".stage").append(pl); }
-  pl.style.display = isVid && !IS_GUEST ? "flex" : "none";
+  if (!pl) { pl = h("div", { id: "vplay", text: "▶", on: { click: () => { const q = viewList[cur]; if (q && q.v) playVideo(q); else document.getElementById("vorig").click(); } } }); V.querySelector(".stage").append(pl); }
+  pl.style.display = isVid && (p.v || !IS_GUEST) ? "flex" : "none";  // (a small video plays right here; a big one is sent to the chat)
   document.getElementById("vorig").textContent = isVid ? "📥 Send me the video in chat" : IS_GUEST ? "⬇️ Download the photo" : "📥 Send me the photo in chat";
   if (IS_GUEST && (isVid || (HOME && HOME.dl === false))) document.getElementById("vorig").style.display = "none";
-  document.getElementById("vcap").textContent = [isVid ? "🎬 Video" + (p.dur ? " " + vlen(p.dur) : "") + (p.mb ? " · " + p.mb + " MB" : "") : "", p.dt, p.loc, p.g ? "👥 " + p.g : "", p.by ? "Added by " + p.by : ""].filter(Boolean).join(" · ") + "   (" + (cur + 1) + " of " + viewList.length + ")";
+  document.getElementById("vcap").textContent = [isVid ? "🎬 Video" + (p.dur ? " " + vlen(p.dur) : "") + (p.mb ? " · " + p.mb + " MB" : "") + (isVid && !p.v && IS_GUEST ? " · too big to play here" : "") : "", p.dt, p.loc, p.g ? "👥 " + p.g : "", p.by ? "Added by " + p.by : ""].filter(Boolean).join(" · ") + "   (" + (cur + 1) + " of " + viewList.length + ")";
   document.getElementById("vshow").style.display = viewList.length > 1 ? "" : "none";
   document.getElementById("vprev").style.visibility = cur > 0 ? "visible" : "hidden";
   document.getElementById("vnext").style.visibility = cur < viewList.length - 1 ? "visible" : "hidden";
@@ -927,7 +937,7 @@ let t0 = null, pinch = null, lastTap = 0;
 const dist = (a, b) => Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
 V.addEventListener("touchstart", e => {
   if (!e.target.closest("#vshow")) slideshowStop();
-  if (e.target.closest("button") || e.target.closest("#vdlg") || e.target.closest("#vplay")) return;
+  if (e.target.closest("button") || e.target.closest("#vdlg") || e.target.closest("#vplay") || e.target.closest("video")) return;
   if (e.touches.length === 2) { pinch = { d: dist(e.touches[0], e.touches[1]), s: scale }; t0 = null; }
   else if (e.touches.length === 1) { t0 = { x: e.touches[0].clientX, y: e.touches[0].clientY, tx, ty, moved: false }; }
 }, { passive: true });
