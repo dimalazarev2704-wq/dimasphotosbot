@@ -18,6 +18,7 @@ Group commands (group admins only, nobody gets "marked" as an admin by the bot):
     /announce            (private, owner only) message everyone or one family
     /connect, /unlink    (private, owner only) browse a family like its clients; leave again
     /unlink FirstName    inside a topic: unlinks a person (or /unlink <telegram id>)
+    /changefamily        inside a topic: moves someone linked in the last 10 minutes to another family
     /remove              reply to a photo: asks "are you sure", then deletes that exact photo
     /families            lists every family with its code and photo count
 
@@ -619,6 +620,101 @@ async def unlink(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"Unlinked {person['first_name']} from the {fam['name']} family. "
         "They can link again with the code."
     )
+
+
+CHANGE_FAMILY_MINUTES = 10  # how long after someone was linked the photographer can still move them to another family
+
+
+def _recent_link(u: dict) -> bool:
+    at = u.get("linked_at")
+    if not isinstance(at, datetime):
+        return False
+    if at.tzinfo is None:
+        at = at.replace(tzinfo=timezone.utc)
+    return datetime.now(timezone.utc) - at <= timedelta(minutes=CHANGE_FAMILY_MINUTES)
+
+
+@admin_only
+async def change_family_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/changefamily [FirstName]: put someone who was linked to the wrong family (in the last 10 minutes) into the right one."""
+    msg = update.effective_message
+    thread = msg.message_thread_id
+    try:  # the command itself is tidied away
+        await msg.delete()
+    except TelegramError:
+        pass
+
+    async def say(text, markup=None):
+        await context.bot.send_message(msg.chat_id, text, message_thread_id=thread, reply_markup=markup)
+
+    fam = await db.families.find_one({"thread_id": thread}) if msg.is_topic_message else None
+    if not fam:
+        await say("Send /changefamily inside the topic of the family you put the person in by mistake.")
+        return
+    args = [a for a in context.args if normalize(a) != "family"]  # ("/change family" works too)
+    arg = " ".join(args).strip()
+    people = [u for u in await db.users.find({"thread_id": thread}).to_list() if _recent_link(u)]
+    if arg:
+        people = [u for u in people if normalize(u["first_name"]) == normalize(arg) or str(u["_id"]) == arg]
+    if not people:
+        await say(f"No one joined the {fam['name']} family in the last {CHANGE_FAMILY_MINUTES} minutes"
+                  + (f" with the name “{arg}”." if arg else ".") + " For anyone else use /unlink, then link them again.")
+        return
+    if len(people) > 1:
+        await say("Who was put here by mistake?",
+                  InlineKeyboardMarkup([[_btn(u["first_name"], f"cf:w:{u['_id']}")] for u in people[:10]] + [[_btn("✖ Cancel", "cf:x")]]))
+        return
+    await cf_pick_family(context.bot, msg.chat_id, thread, people[0])
+
+
+async def cf_pick_family(bot, chat_id: int, thread, person: dict, q=None) -> None:
+    fams = [f for f in await db.families.find({}).sort("name", 1).to_list() if f["thread_id"] != person.get("thread_id")]
+    text = f"Which family should {person['first_name']} be in?"
+    if not fams:
+        text = "There is no other family yet."
+    kb = InlineKeyboardMarkup([[_btn(f["name"], f"cf:t:{person['_id']}:{f['thread_id']}")] for f in fams[:60]] + [[_btn("✖ Cancel", "cf:x")]])
+    if q:
+        await q.edit_message_text(text, reply_markup=kb)
+    else:
+        await bot.send_message(chat_id, text, message_thread_id=thread, reply_markup=kb)
+
+
+async def on_change_family_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    if not await is_group_admin(context.bot, q.message.chat_id, q.from_user.id):
+        await q.answer("Only group admins can do this.", show_alert=True)
+        return
+    await q.answer()
+    parts = q.data.split(":")
+    if parts[1] == "x":
+        await q.edit_message_text("Cancelled. Nothing was changed.")
+        return
+    uid = int(parts[2])
+    person = await db.users.find_one({"_id": uid})
+    if not person or not _recent_link(person):
+        await q.edit_message_text(f"I can only move someone in the first {CHANGE_FAMILY_MINUTES} minutes after they joined. Use /unlink, then link them again.")
+        return
+    if parts[1] == "w":
+        await cf_pick_family(context.bot, q.message.chat_id, None, person, q)
+        return
+    tid = int(parts[3])
+    new = await db.families.find_one({"thread_id": tid})
+    if not new or tid == person.get("thread_id"):
+        await q.edit_message_text("That family isn't available any more. Nothing was changed.")
+        return
+    old = await db.families.find_one({"thread_id": person.get("thread_id")})
+    await db.users.update_one({"_id": uid}, {"$set": {"thread_id": tid}})
+    await db.favs.delete_many({"uid": uid})  # (their hearts and views belong to the old family's photos)
+    await db.seen.delete_many({"uid": uid})
+    await drop_scheduled_for([uid])
+    await delete_chat(context.bot, uid)
+    try:
+        await context.bot.send_message(uid, f"You're in the {new['name']} family. 🎉 Here are their photos.", reply_markup=await family_menu(tid))
+        await ensure_keyboard(context.bot, uid, uid)
+    except TelegramError:
+        pass
+    log.info("Moved %s (%s) from %s to family %s", person.get("first_name"), uid, old["name"] if old else "?", new["name"])
+    await q.edit_message_text(f"✅ {person['first_name']} moved from the {old['name'] if old else 'old'} family to the {new['name']} family.")
 
 
 @admin_only
@@ -7688,6 +7784,8 @@ def main() -> None:
         app.add_handler(CommandHandler("code", code_cmd, filters=grp))
         app.add_handler(CommandHandler("members", members, filters=grp))
         app.add_handler(CommandHandler("unlink", unlink, filters=grp))
+        app.add_handler(CommandHandler(["changefamily", "change"], change_family_cmd, filters=grp))
+        app.add_handler(CallbackQueryHandler(on_change_family_button, pattern=r"^cf:(w:-?\d+|t:-?\d+:-?\d+|x)$"))
         app.add_handler(CommandHandler("families", families, filters=grp))
         app.add_handler(CommandHandler("remove", remove_cmd, filters=grp))
         app.add_handler(CommandHandler("best", best_cmd, filters=grp))

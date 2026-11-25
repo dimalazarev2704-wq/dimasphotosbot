@@ -182,6 +182,7 @@ All of these only work for admins of the group (and for the owner).
 | `/code` | in a topic | shows the family's code again |
 | `/members` | in a topic | lists people linked to that family |
 | `/unlink FirstName` | in a topic | unlinks a person (use `/unlink <id>` if two share a first name) |
+| `/changefamily` (or `/change family`) | in the wrong family's topic | moves someone who joined that family in the last 10 minutes to another family; the bot deletes your command message and asks which family |
 | `/remove` | reply to a photo | asks "Are you sure?", then deletes that exact photo from the group and the list |
 | `/families` | anywhere in the group | all families with codes and file counts |
 
