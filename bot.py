@@ -1025,6 +1025,40 @@ async def connect_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     )
 
 
+async def change_family_private(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/changefamily in the person's own chat: picked the wrong family in the first 10 minutes? Start over."""
+    msg, user = update.effective_message, update.effective_user
+    try:  # their command is tidied away
+        await msg.delete()
+    except TelegramError:
+        pass
+    chat = msg.chat_id
+    if is_owner(user.id):
+        await context.bot.send_message(chat, "This is for clients. Use /changefamily inside a family's topic in the group.")
+        return
+    person = await db.users.find_one({"_id": user.id})
+    if not person:
+        await context.bot.send_message(chat, "You're not linked yet. Send /start.")
+        return
+    if not _recent_link(person):
+        await context.bot.send_message(chat, f"You can only change your family in the first {CHANGE_FAMILY_MINUTES} minutes after you joined. Please ask {OWNER_NAME}.")
+        return
+    old = await db.families.find_one({"thread_id": person.get("thread_id")})
+    await db.users.delete_one({"_id": user.id})
+    await db.favs.delete_many({"uid": user.id})
+    await db.seen.delete_many({"uid": user.id})
+    await drop_scheduled_for([user.id])
+    clear_flows(context)
+    context.user_data["link"] = {"stage": "first"}
+    log.info("%s (%s) is changing family (was %s)", person.get("first_name"), user.id, old["name"] if old else "?")
+    if OWNER_ID:
+        try:
+            await context.bot.send_message(OWNER_ID, f"↩️ {person.get('first_name')} left the {old['name'] if old else 'wrong'} family on their own and is picking again.")
+        except TelegramError:
+            pass
+    await context.bot.send_message(chat, "No problem, let's start again. 🙂 What's your first name?")
+
+
 async def unlink_private(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """In a private chat, /unlink is for the owner only: it stops the /connect browsing."""
     user = update.effective_user
@@ -7810,6 +7844,7 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(on_notify_button, pattern=r"^nt:(y|n):[0-9a-f]{8}$"))
     app.add_handler(CommandHandler("announce", announce_cmd, filters=priv))
     app.add_handler(CommandHandler("unlink", unlink_private, filters=priv))
+    app.add_handler(CommandHandler(["changefamily", "change"], change_family_private, filters=priv))
     app.add_handler(CommandHandler("admin", admin_cmd, filters=priv))
     app.add_handler(CommandHandler("buttons", buttons_cmd, filters=priv))
     app.add_handler(CommandHandler("testlogin", testlogin_cmd, filters=priv))
