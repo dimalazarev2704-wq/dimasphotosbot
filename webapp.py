@@ -36,6 +36,23 @@ THUMB_SIDE, FULL_SIDE = 360, 1600
 MAX_JSON = 16 * 1024
 MAX_UPLOAD = 30 * 1024 * 1024  # one photo from the Admin tab (bots can send up to 50 MB; this keeps Render's memory safe)
 UPLOAD_PATH = "/api/admin/upload"
+SW_JS = r"""// Offline helper: it only shows a friendly page when the phone has no internet while opening the website.
+// It never stores photos, logins or any other data.
+const OFFLINE = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Offline</title><meta name="theme-color" content="#0b7f70"><style>
+:root{--bg:#f4f8f7;--card:#fff;--tx:#12302c;--mut:#5b716d;--ac:#0b7f70}
+@media(prefers-color-scheme:dark){:root{--bg:#0e1a18;--card:#16262a;--tx:#e6f2ef;--mut:#9bb3ae;--ac:#3fc5b1}}
+body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:var(--bg);color:var(--tx);font:18px/1.5 system-ui,sans-serif;padding:16px;box-sizing:border-box}
+.c{max-width:420px;background:var(--card);border-radius:20px;padding:28px 24px;text-align:center;box-shadow:0 4px 24px rgba(0,0,0,.08)}
+h1{font-size:24px;margin:8px 0}p{color:var(--mut)}button{margin-top:12px;width:100%;min-height:52px;border:0;border-radius:14px;background:var(--ac);color:#fff;font:inherit;font-weight:600}
+</style></head><body><div class="c"><div style="font-size:40px">📶</div><h1>You're offline</h1><p>Your photos need an internet connection. Check your Wi-Fi or mobile data. This page opens your photos by itself when you're back online.</p><button onclick="location.reload()">Try again</button></div><script>addEventListener("online",()=>location.reload())</script></body></html>`;
+self.addEventListener("install", () => self.skipWaiting());
+self.addEventListener("activate", e => e.waitUntil(self.clients.claim()));
+self.addEventListener("fetch", e => {
+  if (e.request.mode !== "navigate") return;  // (only the page itself; photos and data are never touched)
+  e.respondWith(fetch(e.request).catch(() => new Response(OFFLINE, { status: 503, headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" } })));
+});
+"""
+
 CACHE_BYTES = 80 * 1024 * 1024
 VIDEO_MAX_BYTES = 20 * 1024 * 1024  # (the most a bot can fetch from Telegram; bigger videos are still sent to the chat)
 MAX_CONNECTIONS = 300
@@ -620,6 +637,8 @@ class WebApp:
                     with open(lp, "rb") as f:
                         return Resp(200, f.read(), "image/png", {"Cache-Control": "public, max-age=86400"})
                 return err(404, "Not found")
+            if method == "GET" and path == "/sw.js":
+                return Resp(200, SW_JS.encode(), "application/javascript; charset=utf-8", {"Cache-Control": "no-cache", "Service-Worker-Allowed": "/"})
             if method == "GET" and (m := re.fullmatch(r"/icon-(180|192|512)\.png", path)):
                 return Resp(200, self.app_icon(int(m.group(1))), "image/png", {"Cache-Control": "public, max-age=86400"})
             if method == "GET" and (m := re.fullmatch(r"/w/([A-Za-z0-9_-]{10,60})/manifest\.webmanifest", path)):

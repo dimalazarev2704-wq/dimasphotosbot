@@ -41,5 +41,13 @@ async def main():
     # the image link signature can't be reused for video
     sigimg = w.sign(301, "full", 20, exp); r = await w.handle("GET", f"/vid/301?u=20&e={exp}&sig={sigimg}", {}, b""); check("photo link can't be reused for video", r.status == 403, r.status)
 asyncio.run(main())
+# ---- the offline helper script is served for the whole site ----
+async def sw():
+    d = fake.DB(); bot.db = d
+    w = webapp.WebApp(bot.WebDeps(FA()))
+    r = await w.handle("GET", "/sw.js", {}, b"")
+    check("sw.js served for the whole site", r.status == 200 and r.headers.get("Service-Worker-Allowed") == "/" and b"fetch" in r.body and r.ctype.startswith("application/javascript"), (r.status, r.headers))
+    check("sw.js never stores anything", b"caches." not in r.body and b"cache.put" not in r.body)
+asyncio.run(sw())
 bad = [n for n, ok in results if not ok]
 print(f"\n{len(results) - len(bad)}/{len(results)} passed"); sys.exit(1 if bad else 0)
