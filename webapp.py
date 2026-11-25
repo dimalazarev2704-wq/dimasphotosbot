@@ -54,6 +54,7 @@ self.addEventListener("fetch", e => {
 """
 
 CACHE_BYTES = 80 * 1024 * 1024
+SEND_MANY_MAX = 12  # photos one tap can send to the chat
 VIDEO_MAX_BYTES = 20 * 1024 * 1024  # (the most a bot can fetch from Telegram; bigger videos are still sent to the chat)
 MAX_CONNECTIONS = 300
 
@@ -246,7 +247,7 @@ class WebApp:
 
     # ---------- web-link visitors ("guests": no Telegram account) ----------
 
-    GUEST_PATHS = {"/api/home", "/api/dates", "/api/places", "/api/photos", "/api/fav", "/api/seen", "/api/a2hs", "/api/web_pin", "/api/passkey_begin", "/api/passkey_finish", "/api/web_logout", "/api/web_signout_ask"}
+    GUEST_PATHS = {"/api/home", "/api/dates", "/api/places", "/api/photos", "/api/fav", "/api/fav_many", "/api/seen", "/api/a2hs", "/api/web_pin", "/api/passkey_begin", "/api/passkey_finish", "/api/web_logout", "/api/web_signout_ask"}
     GUEST_MAX = 40  # browsers per family link
 
     def guest_key(self, gid: int, gen: int | None = None) -> str:
@@ -1179,6 +1180,48 @@ class WebApp:
             else:
                 await db.favs.delete_one({"_id": key})
             return jresp({"ok": True, "fav": on, "favs": await self.fav_count(uid, tid)})
+
+        if path == "/api/fav_many":  # several photos picked at once
+            ids, on = req.get("ids"), req.get("on")
+            if owner or not isinstance(on, bool) or not isinstance(ids, list) or not 0 < len(ids) <= 60:
+                return err(400, "Bad request")
+            db = self.d.db()
+            have = await db.favs.count_documents({"uid": uid})
+            done, full = [], False
+            for mid in ids:
+                doc = await self.my_photo(mid, tid, uid)
+                if not doc:
+                    continue
+                key = f"{uid}:{doc['message_id']}"
+                if on:
+                    exists = await db.favs.find_one({"_id": key})
+                    if not exists and have >= FAV_MAX:
+                        full = True
+                        break
+                    have += 0 if exists else 1
+                    await db.favs.update_one({"_id": key}, {"$set": {"uid": uid, "mid": doc["message_id"], "tid": tid, "at": datetime.now(timezone.utc)}}, upsert=True)
+                else:
+                    await db.favs.delete_one({"_id": key})
+                done.append(doc["message_id"])
+            return jresp({"ok": True, "done": done, "full": full, "favs": await self.fav_count(uid, tid)})
+
+        if path == "/api/send_many":  # several photos picked at once, sent to the person's own chat
+            ids = req.get("ids")
+            if not isinstance(ids, list) or not 0 < len(ids) <= SEND_MANY_MAX:
+                return err(400, f"Pick up to {SEND_MANY_MAX} photos at a time.")
+            now = time.time()
+            if now - self.last_orig.get(uid, 0) < 10:
+                return err(429, "One moment please, then tap again.")
+            self.last_orig[uid] = now
+            docs = [d for d in [await self.my_photo(mid, tid) for mid in ids] if d]
+            if not docs:
+                return err(404, "Photos not found")
+            sent = 0
+            for doc in docs:
+                if await self.d.send_original(uid, doc):
+                    sent += 1
+                await asyncio.sleep(0.35)
+            return jresp({"ok": sent > 0, "sent": sent, "failed": len(docs) - sent}) if sent else err(502, "I couldn't send them. Please open the chat with me and try again.")
 
         if path == "/api/seen":  # a photo was opened full-screen (so the photographer can see what was looked at)
             doc = await self.my_photo(req.get("id"), tid, uid)

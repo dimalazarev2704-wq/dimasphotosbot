@@ -49,5 +49,40 @@ async def sw():
     check("sw.js served for the whole site", r.status == 200 and r.headers.get("Service-Worker-Allowed") == "/" and b"fetch" in r.body and r.ctype.startswith("application/javascript"), (r.status, r.headers))
     check("sw.js never stores anything", b"caches." not in r.body and b"cache.put" not in r.body)
 asyncio.run(sw())
+
+# ---- picking several photos at once ----
+async def many():
+    d = fake.DB(); bot.db = d
+    d.users.d += [{"_id": 20, "thread_id": 5, "first_name": "Mom"}]
+    d.families.d += [{"_id": "f5", "thread_id": 5, "name": "Smith"}, {"_id": "f6", "thread_id": 6, "name": "Lee"}]
+    d.photos.d += [{"message_id": 400 + i, "thread_id": 5, "file_id": f"P{i}", "kind": "photo", "date": "2026-06-03"} for i in range(5)] + [{"message_id": 499, "thread_id": 6, "file_id": "X", "kind": "photo", "date": "2026-06-03"}]
+    sent = []
+    class D2(bot.WebDeps):
+        async def send_original(self, uid, doc): sent.append(doc["message_id"]); return True
+    w = webapp.WebApp(D2(FA()))
+    async def call(path, body, uid=20):
+        r = await w.handle("POST", path, {"x-init-data": init(uid), "content-type": "application/json"}, json.dumps(body).encode())
+        return r.status, json.loads(r.body)
+    s, r = await call("/api/fav_many", {"ids": [400, 401, 402, 499, 12345], "on": True}); check("favorite several (only own family's)", s == 200 and r["done"] == [400, 401, 402] and r["favs"] == 3, (s, r))
+    s, r = await call("/api/fav_many", {"ids": [401], "on": False}); check("un-favorite several", s == 200 and r["favs"] == 2, (s, r))
+    s, r = await call("/api/fav_many", {"ids": [], "on": True}); check("empty list refused", s == 400, (s, r))
+    s, r = await call("/api/fav_many", {"ids": list(range(61)), "on": True}); check("too many refused", s == 400, (s, r))
+    s, r = await call("/api/fav_many", {"ids": [400], "on": "yes"}); check("bad flag refused", s == 400, (s, r))
+    s, r = await call("/api/fav_many", {"ids": [1], "on": True}, uid=1); check("owner without a family refused", s == 403, (s, r))
+    webapp.FAV_MAX = 3
+    s, r = await call("/api/fav_many", {"ids": [403, 404], "on": True}); check("stops at the favorites limit", s == 200 and r["full"] and r["done"] == [403], (s, r))
+    s, r = await call("/api/send_many", {"ids": [400, 401, 499]}); check("send several (only own family's)", s == 200 and r["sent"] == 2 and sent == [400, 401], (s, r, sent))
+    s, r = await call("/api/send_many", {"ids": [400]}); check("second send too soon refused", s == 429, (s, r))
+    w.last_orig.clear()
+    s, r = await call("/api/send_many", {"ids": list(range(400, 413))}); check("more than 12 refused", s == 400, (s, r))
+    s, r = await call("/api/send_many", {"ids": [499]}); check("someone else's photo only -> not found", s == 404, (s, r))
+import hmac, hashlib, time
+from urllib.parse import urlencode
+def init(uid):
+    pairs = {"auth_date": str(int(time.time())), "user": json.dumps({"id": uid, "first_name": "T"})}
+    chk = "\n".join(f"{k}={v}" for k, v in sorted(pairs.items()))
+    pairs["hash"] = hmac.new(hmac.new(b"WebAppData", b"1:x", hashlib.sha256).digest(), chk.encode(), hashlib.sha256).hexdigest()
+    return urlencode(pairs)
+asyncio.run(many())
 bad = [n for n, ok in results if not ok]
 print(f"\n{len(results) - len(bad)}/{len(results)} passed"); sys.exit(1 if bad else 0)

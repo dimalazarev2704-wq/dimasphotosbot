@@ -449,3 +449,4 @@ The picture `logo.png` (next to `webapp.py`) is your logo: it shows on the conne
 - **Clear errors:** "You're offline" and "The server didn't answer. It may be waking up" are told apart, and the screen tries again by itself (10 s, then 20 s, up to 60 s) instead of staying stuck.
 - **▶ Slideshow** in the photo viewer: a new photo every 4 seconds; it stops when you touch the screen, press a button, reach a video or the end.
 - **New here?** The connect screen has a short "who we are" blurb with the contact email (link and a copy button).
+- **Pick several photos:** press and hold a photo (or tap-hold on a computer) to start picking, tap more to add or remove. The bar at the bottom has ♥ Favorite (up to 60 at once), 📥 Chat (sends up to 12 originals to the Telegram chat, once per 10 seconds) or ⬇️ Save (on the web). ✖ or Esc cancels. Not shown in the owner's Admin view.
