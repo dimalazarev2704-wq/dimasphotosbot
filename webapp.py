@@ -1213,7 +1213,9 @@ class WebApp:
             if now - self.last_orig.get(uid, 0) < 10:
                 return err(429, "One moment please, then tap again.")
             self.last_orig[uid] = now
-            docs = [d for d in [await self.my_photo(mid, tid) for mid in ids] if d]
+            if len(self.last_orig) > 2000:
+                self.last_orig = {k: v for k, v in self.last_orig.items() if now - v < 60}
+            docs = [d for d in [await self.my_photo(mid, tid, uid) for mid in dict.fromkeys(ids)] if d]  # (no duplicates)
             if not docs:
                 return err(404, "Photos not found")
             sent = 0
