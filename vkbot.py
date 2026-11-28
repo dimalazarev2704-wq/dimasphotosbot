@@ -36,6 +36,7 @@ UP_GATE = asyncio.Semaphore(2)  # (at most two uploads to VK at a time)
 B = None  # the bot module (database, family rules), set by run()
 _http = None
 _locks: dict[int, asyncio.Lock] = {}
+_tasks: set = set()  # (keeps running handlers from being garbage-collected)
 
 MONTHS = ["января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября", "ноября", "декабря"]
 COPYRIGHT_RU = "⚠️ Фото защищены авторским правом. Пожалуйста, не публикуйте и не пересылайте их без разрешения."
@@ -100,7 +101,7 @@ def text_btn(label: str, cmd: str, color: str = "secondary") -> dict:
 
 
 def cb_btn(label: str, payload: dict, color: str = "secondary") -> dict:
-    return {"action": {"type": "callback", "label": label[:40], "payload": json.dumps(payload, separators=(",", ":"))}, "color": color}
+    return {"action": {"type": "callback", "label": label[:40], "payload": json.dumps(payload, separators=(",", ":"), ensure_ascii=False)}, "color": color}
 
 
 def link_btn(label: str, url: str) -> dict:
@@ -213,6 +214,10 @@ async def build_query(spec: str, tid: int, uid: int):
 
 async def show_photos(peer: int, tid: int, spec: str, offset: int = 0) -> None:
     uid = peer
+    try:  # ("typing…": the first time a batch is copied to VK it takes a few seconds)
+        await call("messages.setActivity", peer_id=peer, type="typing")
+    except (VKError, HTTP_ERROR):
+        pass
     query, asc = await build_query(spec, tid, uid)
     order = 1 if asc else -1
     docs = await B.db.photos.find(query).sort([("date", order), ("message_id", order)]).skip(offset).limit(PAGE + 1).to_list()
@@ -558,7 +563,9 @@ async def run(bot_module) -> None:
                     break  # key expired or lost: ask for a new server
                 ts = d.get("ts", ts)
                 for u in d.get("updates", []):
-                    asyncio.create_task(handle(u))
+                    t = asyncio.create_task(handle(u))
+                    _tasks.add(t)
+                    t.add_done_callback(_tasks.discard)
         except asyncio.CancelledError:
             raise
         except Exception as e:
