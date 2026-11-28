@@ -19,6 +19,7 @@ Group commands (group admins only, nobody gets "marked" as an admin by the bot):
     /connect, /unlink    (private, owner only) browse a family like its clients; leave again
     /unlink FirstName    inside a topic: unlinks a person (or /unlink <telegram id>)
     /changefamily        inside a topic: moves someone linked in the last 10 minutes to another family
+    /invite [FirstName]  inside a topic: a one-person link that logs someone straight into that family
     /remove              reply to a photo: asks "are you sure", then deletes that exact photo
     /families            lists every family with its code and photo count
 
@@ -622,6 +623,7 @@ async def unlink(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+BOT_USERNAME_FALLBACK = os.environ.get("BOT_USERNAME", "dimaspicsbot")
 CHANGE_FAMILY_MINUTES = 10  # how long after someone was linked the photographer can still move them to another family
 
 
@@ -957,9 +959,105 @@ async def on_lang_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await start(fake, context)  # (a new person: now carry on with linking, in their language)
 
 
+INVITE_HOURS = 24  # how long a one-person invite link works
+
+
+def invite_link(bot_username: str, tok: str) -> str:
+    return f"https://t.me/{bot_username}?start=inv_{tok}"
+
+
+@admin_only
+async def invite_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/invite [FirstName], inside a family's topic: makes a one-person link that logs them straight in."""
+    msg = update.effective_message
+    fam = await _family_for_topic(msg)
+    if not fam:
+        return
+    name = " ".join(context.args).strip()[:40]
+    tok = secrets.token_urlsafe(12)
+    now = datetime.now(timezone.utc)
+    await db.invites.insert_one({"_id": tok, "tid": fam["thread_id"], "name": name, "created": now, "exp": now + timedelta(hours=INVITE_HOURS), "used": None})
+    uname = context.bot.username or BOT_USERNAME_FALLBACK
+    await msg.reply_text(
+        f"🔗 One-person link for the {fam['name']} family" + (f" ({name})" if name else "") + f":\n{invite_link(uname, tok)}\n\n"
+        f"Send it to them by text. It works once and stops working after {INVITE_HOURS} hours. Don't post it anywhere public.",
+        reply_markup=InlineKeyboardMarkup([[_btn("❌ Cancel this link", f"iv:x:{tok}")]]),
+        disable_web_page_preview=True,
+    )
+
+
+async def on_invite_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    if not await is_group_admin(context.bot, q.message.chat_id, q.from_user.id):
+        await q.answer("Only group admins can do this.", show_alert=True)
+        return
+    await q.answer()
+    tok = q.data.split(":", 2)[2]
+    doc = await db.invites.find_one({"_id": tok})
+    if not doc or doc.get("used"):
+        await q.edit_message_text("That link was already used or cancelled.")
+        return
+    await db.invites.delete_one({"_id": tok})
+    await q.edit_message_text("❌ Link cancelled. It no longer works.")
+
+
+async def claim_invite(update: Update, context: ContextTypes.DEFAULT_TYPE, tok: str) -> bool:
+    """Someone tapped an invite link. Returns True when the message was dealt with."""
+    user, msg = update.effective_user, update.effective_message
+    doc = await db.invites.find_one({"_id": tok}) if re.fullmatch(r"[\w-]{8,40}", tok) else None
+    exp = doc.get("exp") if doc else None
+    if exp is not None and exp.tzinfo is None:
+        exp = exp.replace(tzinfo=timezone.utc)
+    if doc and doc.get("used") == user.id and await db.users.find_one({"_id": user.id}):  # (they tap their own link again)
+        fam0 = await db.families.find_one({"thread_id": doc["tid"]})
+        await msg.reply_text("You're already in. 🙂 Here are the photos.", reply_markup=await family_menu(doc["tid"]) if fam0 else None)
+        return True
+    if not doc or doc.get("used") or (exp and exp < datetime.now(timezone.utc)):
+        await msg.reply_text(f"This link isn't working any more (it works once, for {INVITE_HOURS} hours). Please ask {OWNER_NAME} for a new one.")
+        return True
+    fam = await db.families.find_one({"thread_id": doc["tid"]})
+    if not fam:
+        await msg.reply_text(f"That family no longer exists. Please ask {OWNER_NAME}.")
+        return True
+    have = await db.users.find_one({"_id": user.id})
+    if have and have.get("thread_id") == fam["thread_id"]:  # already in: just open the photos (the link stays usable)
+        await msg.reply_text("You're already in. 🙂 Here are the photos.", reply_markup=await family_menu(fam["thread_id"]))
+        return True
+    if have:
+        await msg.reply_text(f"You're already linked to another family. Please ask {OWNER_NAME} to help.")
+        return True
+    r = await db.invites.update_one({"_id": tok, "used": None}, {"$set": {"used": user.id}})  # (claimed first: a double tap can't let two people in)
+    if r is not None and getattr(r, "modified_count", 1) == 0:
+        await msg.reply_text(f"This link isn't working any more. Please ask {OWNER_NAME} for a new one.")
+        return True
+    first = doc.get("name") or " ".join((user.first_name or "").split())[:40] or "Friend"
+    await db.tries.delete_one({"_id": user.id})
+    await clear_fails(f"link:{user.id}")
+    await db.users.update_one(
+        {"_id": user.id},
+        {"$set": {"thread_id": fam["thread_id"], "first_name": first, "username": user.username, "linked_at": datetime.now(timezone.utc)}},
+        upsert=True,
+    )
+    context.user_data.pop("link", None)
+    log.info("Linked %s (%s) to family %s with an invite link", first, user.id, fam["name"])
+    await msg.reply_text(f"You're in, {first}! 🎉 Here are the {fam['name']} family's photos.", reply_markup=await family_menu(fam["thread_id"]))
+    await ensure_keyboard(context.bot, msg.chat_id, user.id)
+    if OWNER_ID:
+        try:
+            await context.bot.send_message(OWNER_ID, f"✅ {first} joined the {fam['name']} family with the link.")
+        except TelegramError:
+            pass
+    return True
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     await note_start(user)
+    if not is_owner(user.id) and context.args and context.args[0].startswith("inv_"):  # a one-person invite link
+        await claim_invite(update, context, context.args[0][4:])
+        if not await lang_chosen(user.id) and await db.users.find_one({"_id": user.id}):
+            await send_lang_picker(context.bot, update.effective_message.chat_id)
+        return
     if not is_owner(user.id) and not await lang_chosen(user.id):
         clear_flows(context)  # (new here: the first thing asked is the language)
         await send_lang_picker(context.bot, update.effective_message.chat_id)
@@ -7727,6 +7825,7 @@ async def post_init(app: Application) -> None:
     await safe_index(lambda: db.families.create_index("code", unique=True))
     await safe_index(lambda: db.families.create_index("key"))
     await safe_index(lambda: db.revsess.create_index("exp", expireAfterSeconds=0))
+    await safe_index(lambda: db.invites.create_index("exp", expireAfterSeconds=0))
     await safe_index(lambda: db.photos.create_index("message_id", unique=True))
     await safe_index(lambda: db.photos.create_index([("thread_id", 1), ("date", 1)]))
     await safe_index(lambda: db.photos.create_index([("thread_id", 1), ("loc_id", 1)]))
@@ -7818,6 +7917,8 @@ def main() -> None:
         app.add_handler(CommandHandler("code", code_cmd, filters=grp))
         app.add_handler(CommandHandler("members", members, filters=grp))
         app.add_handler(CommandHandler("unlink", unlink, filters=grp))
+        app.add_handler(CommandHandler("invite", invite_cmd, filters=grp))
+        app.add_handler(CallbackQueryHandler(on_invite_button, pattern=r"^iv:x:[\w-]{8,40}$"))
         app.add_handler(CommandHandler(["changefamily", "change"], change_family_cmd, filters=grp))
         app.add_handler(CallbackQueryHandler(on_change_family_button, pattern=r"^cf:(w:-?\d+|t:-?\d+:-?\d+|x)$"))
         app.add_handler(CommandHandler("families", families, filters=grp))
