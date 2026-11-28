@@ -453,3 +453,18 @@ The picture `logo.png` (next to `webapp.py`) is your logo: it shows on the conne
 - **▶ Slideshow** in the photo viewer: a new photo every 4 seconds; it stops when you touch the screen, press a button, reach a video or the end.
 - **New here?** The connect screen has a short "who we are" blurb with the contact email (link and a copy button).
 - **Pick several photos:** press and hold a photo (or tap-hold on a computer) to start picking, tap more to add or remove. The bar at the bottom has ♥ Favorite (up to 60 at once), 📥 Chat (sends up to 12 originals to the Telegram chat, once per 10 seconds) or ⬇️ Save (on the web). ✖ or Esc cancels. Not shown in the owner's Admin view.
+
+## VK (for families who use VK instead of Telegram)
+
+The photos stay in Telegram (that is where you upload). The VK bot shows the same galleries to the same families, in Russian: 📷 all photos, 📅 by date, 📍 by place, ⭐ best shots, ♥ favourites, 📥 originals as files, a 🌐 website button, and a "new photos" note when you tell a family about new photos. Not in VK: suggestions, trusted photographers, "In process", the admin panel (you stay in Telegram for those). Videos are opened on the website (VK only lets a bot upload videos with a personal key).
+
+**Setup (free):**
+1. In VK, make a community (a public page or a group). Open **Manage → Messages** and turn **Community messages** on. Under **Bot settings** turn on **Bot abilities**, and tick **Add "Start" button** if it's there.
+2. **Manage → API usage → Access keys → Create key.** Tick **messages**, **photos**, **docs** and **manage**. Copy the key (keep it secret).
+3. Look at the community's web address: `vk.com/club123456789`. The number is the **community id**.
+4. On Render add `VK_TOKEN` (the key) and `VK_GROUP_ID` (the number), then Manual Deploy. The log says "VK bot is on" and "VK Long Poll is running".
+5. If the log says it couldn't switch on events, go to **Manage → API usage → Bots Long Poll API**, turn it on, choose API version 5.199 and tick **Incoming message** and **Message event** (callback button presses).
+
+**Adding people:** they write to the community, then type their first name, family last name and the 6-digit code. Or send `/invite` in a family's topic: it now also gives a VK link (`vk.me/club…?ref=…`) that works once, for 24 hours, the same as the Telegram link. `/members` shows VK people ("VK id") and `/unlink FirstName` removes them too. Leave `VK_TOKEN` empty to turn VK off; Telegram never depends on it.
+
+**Good to know:** the first time a photo is opened in VK it is copied to VK (a few seconds); after that it is remembered. VK photos are copied from Telegram, so a deleted Telegram photo may stay in VK chats until the cache expires (90 days).

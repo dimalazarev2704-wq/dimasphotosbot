@@ -53,6 +53,7 @@ from pathlib import Path
 import re
 import secrets
 import time
+import sys
 import types
 import unicodedata
 from datetime import date, datetime, timedelta, timezone
@@ -143,6 +144,14 @@ log = logging.getLogger("photobot")
 # Keep those lines out of the logs so the token can't leak through them.
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
+
+import vkbot  # (the VK front; only runs when VK_TOKEN and VK_GROUP_ID are set)
+_APP = None  # the Telegram application (set in post_init)
+
+
+def tg_bot():
+    return _APP.bot
+
 
 db = None  # set in post_init (the Mongo client must be created inside the running loop)
 
@@ -580,13 +589,14 @@ async def members(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not fam:
         return
     people = await db.users.find({"thread_id": fam["thread_id"]}).sort("first_name", 1).to_list()
-    if not people:
+    vkp = await db.vkusers.find({"thread_id": fam["thread_id"]}).sort("first_name", 1).to_list() if vkbot.enabled() else []
+    if not people and not vkp:
         await msg.reply_text(f"No one has linked to the {fam['name']} family yet.")
         return
     lines = [
         f"• {p['first_name']} (id {p['_id']}" + (f", @{p['username']}" if p.get("username") else "") + ")"
         for p in people
-    ]
+    ] + [f"• {p['first_name']} (VK id {p['_id']})" for p in vkp]
     await reply_long(msg, f"{fam['name']} family members:\n" + "\n".join(lines))
 
 
@@ -600,7 +610,20 @@ async def unlink(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not arg:
         await msg.reply_text("Usage: /unlink FirstName  (or /unlink <telegram id> from /members)")
         return
+    vk_hit = None
+    if vkbot.enabled():  # (VK people can be unlinked the same way)
+        vk_people = await db.vkusers.find({"thread_id": fam["thread_id"]}).to_list()
+        vk_hit = [p for p in vk_people if (str(p["_id"]) == arg or normalize(p["first_name"]) == normalize(arg))]
     people = await db.users.find({"thread_id": fam["thread_id"]}).to_list()
+    if vk_hit and not any((str(p["_id"]) == arg or normalize(p["first_name"]) == normalize(arg)) for p in people):
+        if len(vk_hit) > 1:
+            await msg.reply_text("More than one VK person has that name. Use their VK id from /members.")
+            return
+        await db.vkusers.delete_one({"_id": vk_hit[0]["_id"]})
+        await db.vkfavs.delete_many({"uid": vk_hit[0]["_id"]})
+        await db.vkstate.delete_one({"_id": vk_hit[0]["_id"]})
+        await msg.reply_text(f"Unlinked {vk_hit[0]['first_name']} (VK) from the {fam['name']} family.")
+        return
     if arg.isdigit():
         matches = [p for p in people if str(p["_id"]) == arg]
     else:
@@ -980,6 +1003,7 @@ async def invite_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     uname = context.bot.username or BOT_USERNAME_FALLBACK
     await msg.reply_text(
         f"🔗 One-person link for the {fam['name']} family" + (f" ({name})" if name else "") + f":\n{invite_link(uname, tok)}\n\n"
+        + (f"VK: https://vk.me/club{vkbot.VK_GROUP_ID}?ref=inv_{tok}\n\n" if vkbot.enabled() else "") +
         f"Send it to them by text. It works once and stops working after {INVITE_HOURS} hours. Don't post it anywhere public.",
         reply_markup=InlineKeyboardMarkup([[_btn("❌ Cancel this link", f"iv:x:{tok}")]]),
         disable_web_page_preview=True,
@@ -2442,6 +2466,8 @@ async def on_notify_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         except (TelegramError, RuntimeError):
             failed += 1  # e.g. they blocked the bot
         await asyncio.sleep(0.05)
+    if vkbot.enabled():
+        sent += await vkbot.notify_families(info.get("tids") or [info["tid"]])
     await show(
         f"✅ Told {sent} {'person' if sent == 1 else 'people'} in the {info['name']} {'group' if info.get('group') else 'family'}."
         + (f" {failed} couldn't be reached." if failed else "")
@@ -7851,7 +7877,14 @@ async def post_init(app: Application) -> None:
     await safe_index(lambda: db.starters.create_index("seen", expireAfterSeconds=180 * 86400))  # forget old Start presses after ~6 months
     await safe_index(lambda: db.uitr.create_index("at", expireAfterSeconds=180 * 86400))  # (saved UI translations)
     await safe_index(lambda: db.sent.create_index("at", expireAfterSeconds=172800))  # forget hide-buttons after 2 days
+    global _APP
+    _APP = app
     app.bot_data["scheduler"] = asyncio.create_task(scheduler_loop(app))
+    if vkbot.enabled():
+        for coll, field, kw in (("vkusers", "thread_id", {}), ("vkfavs", "uid", {}), ("vkcache", "at", {"expireAfterSeconds": 90 * 86400})):
+            await safe_index(lambda c=coll, f=field, k=kw: db[c].create_index(f, **k))
+        app.bot_data["vk"] = asyncio.create_task(vkbot.run(sys.modules[__name__]))
+        log.info("VK bot is on")
     try:
         RU_USERS.update(u["_id"] for u in await db.users.find({"lang": "ru"}).to_list())
         for u in await db.users.find({"lang": {"$in": list(LANGS)}}).to_list():

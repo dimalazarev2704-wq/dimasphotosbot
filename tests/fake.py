@@ -82,6 +82,7 @@ class Cur:
         if isinstance(key,list): key,d=key[0]
         s.docs=sorted(s.docs,key=lambda x:(x.get(key) is None,x.get(key)),reverse=d==-1); return s
     def limit(s,n): s.docs=s.docs[:n]; return s
+    def skip(s,n): s.docs=s.docs[n:]; return s
     async def to_list(s,n=None): return [copy.deepcopy(x) for x in (s.docs if not n else s.docs[:n])]
 class Coll:
     def __init__(s): s.d=[]
@@ -106,6 +107,25 @@ class Coll:
             if _match(x,q): del s.d[i]; return
     async def delete_many(s,q): s.d=[x for x in s.d if not _match(x,q)]
     async def count_documents(s,q): return len([x for x in s.d if _match(x,q)])
+    async def aggregate(s,pipe):
+        rows=[x for x in s.d]; out=rows
+        for st in pipe:
+            if "$match" in st: out=[x for x in out if _match(x,st["$match"])]
+            elif "$group" in st:
+                g=st["$group"]; fld=g["_id"][1:]; res={}
+                for x in out:
+                    k=x.get(fld); r=res.setdefault(k,{"_id":k})
+                    for name,spec in g.items():
+                        if name=="_id": continue
+                        (op,arg),=spec.items()
+                        if op=="$sum": r[name]=r.get(name,0)+(1 if arg==1 else x.get(arg[1:],0))
+                        elif op=="$first": r.setdefault(name,x.get(arg[1:]))
+                out=list(res.values())
+            elif "$sort" in st:
+                (k,d),=st["$sort"].items(); out=sorted(out,key=lambda x:(x.get(k) is None,x.get(k)),reverse=d==-1)
+        class C:
+            async def to_list(self,n=None): return copy.deepcopy(out)
+        return C()
 class DB:
     def __init__(s): s.c={}
     def __getattr__(s,n):
